@@ -1,0 +1,4 @@
+interface:
+  display_name: "Flash Cardputer Safely"
+  short_description: "Identify, gate, provision, and flash devices"
+  default_prompt: "Use $flash-cardputer-safely to build and flash the correct Cardputer safely."

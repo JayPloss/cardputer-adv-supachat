@@ -1,0 +1,9 @@
+#pragma once
+
+#if defined(SUPACHAT_DEVICE_JUJU)
+#include "splash_logo_juju.h"
+#elif defined(SUPACHAT_DEVICE_PAPA)
+#include "splash_logo_papa.h"
+#else
+#include "splash_logo_albie.h"
+#endif

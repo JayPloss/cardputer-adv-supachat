@@ -1,0 +1,10 @@
+.pio/
+.venv/
+server/data/
+server/.env
+server/node_modules/
+firmware/include/secrets.h
+*.bin
+*.log
+visual-integrity-report.json
+visual-integrity-screens/

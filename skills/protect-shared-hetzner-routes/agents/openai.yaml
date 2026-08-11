@@ -1,0 +1,4 @@
+interface:
+  display_name: "Protect Shared Hetzner Routes"
+  short_description: "Keep shared routing and auth paths isolated"
+  default_prompt: "Use $protect-shared-hetzner-routes before changing an app on the shared Hetzner host."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Emulate Cardputer Contracts"
+  short_description: "Catch ESP32 and M5 contract failures first"
+  default_prompt: "Use $emulate-cardputer-contracts to reproduce a Cardputer firmware failure before flashing."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Verify Cardputer UI"
+  short_description: "Check every 240x135 firmware screen"
+  default_prompt: "Use $verify-cardputer-ui to inspect every Cardputer screen and interaction."

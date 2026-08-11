@@ -1,0 +1,4 @@
+interface:
+  display_name: "Collect Cardputer Feedback"
+  short_description: "Respect download mode and runtime handoff"
+  default_prompt: "Use $collect-cardputer-runtime-feedback to gather valid powered-device results."
