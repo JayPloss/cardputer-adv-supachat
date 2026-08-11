@@ -1,0 +1,25 @@
+[Unit]
+Description=SupaChat family messaging service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=supachat
+Group=supachat
+WorkingDirectory=/opt/supachat/server
+EnvironmentFile=/etc/supachat.env
+ExecStart=/usr/bin/node --experimental-sqlite src/server.mjs
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/supachat
+MemoryMax=96M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target
+

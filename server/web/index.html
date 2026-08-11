@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SupaChat — Family</title>
+  <link rel="stylesheet" href="app.css">
+  <link rel="stylesheet" href="controls.css">
+</head>
+<body>
+  <div class="app-shell" data-vi-container="true">
+    <header class="topbar">
+      <div class="brand-lockup"><img class="brand-logo" src="supachat-logo.png" alt="SupaChat"><p class="eyebrow">FAMILY / ONE LITTLE ROOM, ALWAYS WAITING</p></div>
+      <div class="header-tools"><div class="presence" id="presence" aria-live="polite"></div><div class="session-tools"><button id="sound-toggle" class="quiet-button" type="button" aria-pressed="true">Sound: on</button><button id="logout" class="quiet-button" type="button">Log out</button></div></div>
+    </header>
+    <div class="workspace">
+      <section class="chat-panel" aria-label="Family text chat">
+        <main id="messages" class="messages" aria-live="polite" aria-label="Family conversation"></main>
+        <form id="composer" class="composer">
+          <label for="message">Message the family</label>
+          <div class="compose-row">
+            <input id="message" name="message" maxlength="140" autocomplete="off" placeholder="Write something…" required>
+            <button type="submit">Send</button>
+          </div>
+          <div class="compose-meta"><span id="send-state">Ready</span><span><b id="count">0</b>/140</span></div>
+        </form>
+      </section>
+      <aside class="voice-controls" aria-label="Walkie controls">
+        <div class="walkie-heading"><span class="eyebrow">LIVE VOICE</span><strong>Walkie</strong><span id="walkie-state">Connecting…</span></div>
+        <button id="ptt" class="ptt-button" type="button">Hold to talk</button>
+        <div class="walkie-divider"><span>or leave a message</span></div>
+        <button id="voice-clip" class="voice-button" type="button">Record voice clip</button>
+        <p class="walkie-note">One person talks at a time. Voice clips stay in family history.</p>
+      </aside>
+    </div>
+  </div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SupaChat — Sign in</title>
+  <link rel="stylesheet" href="app.css">
+  <link rel="stylesheet" href="controls.css">
+</head>
+<body class="login-page">
+  <main class="login-card" data-vi-container="true">
+    <img class="brand-logo login-logo" src="supachat-logo.png" alt="SupaChat">
+    <p class="eyebrow">PRIVATE FAMILY CHANNEL</p>
+    <p class="lede">Come in, Papa. The conversation is waiting.</p>
+    <form id="login-form">
+      <label>Username<input name="username" autocomplete="username" value="papa" required></label>
+      <label>Password<input name="password" type="password" autocomplete="current-password" required autofocus></label>
+      <p id="login-error" class="error" role="alert"></p>
+      <button type="submit">Enter SupaChat</button>
+    </form>
+  </main>
+  <script>
+    document.querySelector('#login-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const form = new FormData(event.currentTarget);
+      const response = await fetch('login', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify(Object.fromEntries(form)) });
+      if (response.ok) location.href = './';
+      else document.querySelector('#login-error').textContent = response.status === 429 ? 'Too many tries. Give it a few minutes.' : 'That login did not work.';
+    });
+  </script>
+</body>
+</html>
