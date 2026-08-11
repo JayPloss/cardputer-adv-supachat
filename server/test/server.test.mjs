@@ -121,6 +121,21 @@ test('Papa Authentik identity maps to existing Papa history', async () => {
   assert.equal((await response.json()).user.id, 'papa');
 });
 
+test('SupaChat-native Authentik usernames preserve family identities', async () => {
+  for (const [username, expectedId] of [['papa', 'papa'], ['albie', 'albie'], ['julien', 'juju']]) {
+    const response = await fetch(`http://127.0.0.1:${port}/api/session`, {
+      headers: {
+        'x-forwarded-host': 'supachat.net',
+        'x-authentik-uid': `uid-${username}`,
+        'x-authentik-username': username,
+        'x-authentik-name': username[0].toUpperCase() + username.slice(1),
+      },
+    });
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).user.id, expectedId);
+  }
+});
+
 test('Authentik headers are rejected outside the configured portal host', async () => {
   const response = await fetch(`http://127.0.0.1:${port}/api/session`, {
     headers: { 'x-forwarded-host': 'le954.ca', 'x-authentik-uid': 'spoofed', 'x-authentik-username': 'attacker@example.test' },

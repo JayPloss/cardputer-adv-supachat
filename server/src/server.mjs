@@ -27,6 +27,13 @@ const config = {
   },
 };
 
+const authentikIdentityMap = new Map([
+  ['papa', 'papa'],
+  ['albie', 'albie'],
+  ['julien', 'juju'],
+]);
+if (config.papaAuthentikUsername) authentikIdentityMap.set(config.papaAuthentikUsername, 'papa');
+
 if (config.sessionSecret.length < 32 || !config.papaPasswordHash || !config.deviceTokenHashes.albie) {
   throw new Error('SUPACHAT_SESSION_SECRET, SUPACHAT_PAPA_PASSWORD_HASH, and SUPACHAT_ALBIE_DEVICE_TOKEN_HASH are required');
 }
@@ -167,15 +174,18 @@ function requestHost(req) {
   return String(req.headers['x-forwarded-host'] || req.headers.host || '').split(':')[0].toLowerCase();
 }
 
+function authentikUserId(username, uid) {
+  return authentikIdentityMap.get(String(username).toLowerCase())
+    || `web-${createHash('sha256').update(String(uid)).digest('hex').slice(0, 16)}`;
+}
+
 function webUser(req) {
   const host = requestHost(req);
   const authentikUid = String(req.headers['x-authentik-uid'] || '').trim();
   const authentikUsername = String(req.headers['x-authentik-username'] || '').trim();
   if (host === config.portalHost && authentikUid && authentikUsername) {
     const normalizedUsername = authentikUsername.toLowerCase();
-    const id = normalizedUsername === config.papaAuthentikUsername
-      ? 'papa'
-      : `web-${createHash('sha256').update(authentikUid).digest('hex').slice(0, 16)}`;
+    const id = authentikUserId(normalizedUsername, authentikUid);
     const displayName = String(req.headers['x-authentik-name'] || authentikUsername).trim().slice(0, 80) || authentikUsername.slice(0, 80);
     const shortName = displayName.split(/\s+/)[0].slice(0, 12) || 'Friend';
     db.prepare(`
@@ -421,9 +431,7 @@ const server = createServer(async (req, res) => {
       const profile = await authentikProfile(value.slice(7));
       if (!profile) return json(res, 401, { error: 'invalid_native_token' });
       const username = String(profile.preferred_username || profile.email).toLowerCase();
-      const id = username === config.papaAuthentikUsername
-        ? 'papa'
-        : `web-${createHash('sha256').update(String(profile.sub)).digest('hex').slice(0, 16)}`;
+      const id = authentikUserId(username, profile.sub);
       const displayName = String(profile.name || username).trim().slice(0, 80) || username.slice(0, 80);
       const shortName = displayName.split(/\s+/)[0].slice(0, 12) || 'Friend';
       db.prepare(`
