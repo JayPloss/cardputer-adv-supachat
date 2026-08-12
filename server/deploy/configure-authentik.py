@@ -123,7 +123,10 @@ with transaction.atomic():
     mobile_provider.client_id = "supachat-android"
     mobile_provider.logout_uri = "supachat://logout"
     mobile_provider.signing_key = template.signing_key
-    mobile_provider.redirect_uris = [RedirectURI(matching_mode="strict", url="supachat://auth/callback")]
+    mobile_provider.redirect_uris = [
+        RedirectURI(matching_mode="strict", url="supachat://auth/callback"),
+        RedirectURI(matching_mode="strict", url="net.supachat.app://auth/callback"),
+    ]
     mobile_provider.save()
     mobile_provider.property_mappings.set(template.property_mappings.all())
 
