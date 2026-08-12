@@ -17,6 +17,9 @@ const config = {
   authentikUserinfoUrl: process.env.SUPACHAT_AUTHENTIK_USERINFO_URL || 'https://auth.supachat.net/application/o/userinfo/',
   mobileClientId: process.env.SUPACHAT_MOBILE_CLIENT_ID || 'supachat-android',
   nativeTestToken: process.env.SUPACHAT_NATIVE_TEST_TOKEN || '',
+  authentikApiUrl: (process.env.SUPACHAT_AUTHENTIK_API_URL || 'https://auth.supachat.net/api/v3').replace(/\/$/, ''),
+  authentikApiToken: process.env.SUPACHAT_AUTHENTIK_API_TOKEN || '',
+  authentikInviteFlowId: process.env.SUPACHAT_AUTHENTIK_INVITE_FLOW_ID || '',
   expoPushEnabled: process.env.SUPACHAT_EXPO_PUSH_ENABLED === 'true',
   sessionSecret: process.env.SUPACHAT_SESSION_SECRET || '',
   papaPasswordHash: process.env.SUPACHAT_PAPA_PASSWORD_HASH || '',
@@ -464,6 +467,35 @@ const server = createServer(async (req, res) => {
     if (url.pathname === '/api/session' && req.method === 'GET') {
       const profile = db.prepare('SELECT id, display_name, short_name, role FROM users WHERE id = ?').get(user);
       return json(res, 200, { user: profile, auth: deviceUser(req) ? 'device' : nativeUser(req) ? 'native' : (String(req.headers['x-authentik-uid'] || '') ? 'authentik' : 'legacy') });
+    }
+
+    if (url.pathname === '/api/admin/invitations' && req.method === 'POST') {
+      const profile = db.prepare('SELECT role FROM users WHERE id = ?').get(user);
+      if (profile?.role !== 'admin') return json(res, 403, { error: 'admin_required' });
+      if (webUser(req) && !sameOrigin(req)) return json(res, 403, { error: 'origin_rejected' });
+      const payload = await body(req);
+      const username = String(payload.username || '').trim().toLowerCase();
+      const displayName = String(payload.display_name || '').trim();
+      const email = String(payload.email || '').trim().toLowerCase();
+      if (!/^[a-z0-9][a-z0-9._-]{1,31}$/.test(username) || !displayName || displayName.length > 80 || (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) {
+        return json(res, 400, { error: 'invalid_invitation' });
+      }
+      const expiresAt = Date.now() + 7 * 24 * 60 * 60_000;
+      let invitation;
+      if (config.nativeTestToken) invitation = { pk: '00000000-0000-4000-8000-000000000001' };
+      else {
+        if (!config.authentikApiToken || !config.authentikInviteFlowId) return json(res, 503, { error: 'invites_not_configured' });
+        const invitationResponse = await fetch(`${config.authentikApiUrl}/stages/invitation/invitations/`, {
+          method: 'POST', headers: { authorization: `Bearer ${config.authentikApiToken}`, 'content-type': 'application/json', accept: 'application/json' },
+          body: JSON.stringify({ name: `supachat_${Date.now()}`, expires: new Date(expiresAt).toISOString(), fixed_data: { username, name: displayName, email }, single_use: true, flow: config.authentikInviteFlowId }),
+        });
+        if (!invitationResponse.ok) {
+          console.error('Authentik invitation creation failed', invitationResponse.status, await invitationResponse.text());
+          return json(res, 502, { error: 'identity_provider_failed' });
+        }
+        invitation = await invitationResponse.json();
+      }
+      return json(res, 201, { url: `https://auth.${config.portalHost}/if/flow/supachat-invitation-enrollment/?itoken=${invitation.pk}`, username, expires_at: expiresAt });
     }
 
     if (url.pathname === '/api/notifications/devices' && req.method === 'POST') {

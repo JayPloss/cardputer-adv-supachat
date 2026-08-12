@@ -25,6 +25,9 @@ install -o root -g root -m 0644 "$install_root/deploy/supachat.service" /etc/sys
 install -d -o root -g root -m 0755 /opt/le954-authentik/data/media/public/branding
 install -o root -g root -m 0644 "$install_root/web/supachat-logo.png" /opt/le954-authentik/data/media/public/branding/supachat-logo.png
 docker exec -i le954-authentik-server ak shell < "$install_root/deploy/configure-authentik.py"
+invite_config=$(docker exec -i le954-authentik-server ak shell < "$install_root/deploy/configure-invite-service.py" | grep '^SUPACHAT_AUTHENTIK_')
+sed -i '/^SUPACHAT_AUTHENTIK_/d' /etc/supachat.env
+printf '%s\n' "$invite_config" >> /etc/supachat.env
 
 for attempt in $(seq 1 30); do
   if curl --fail --silent http://127.0.0.1:9000/outpost.goauthentik.io/ping >/dev/null; then break; fi

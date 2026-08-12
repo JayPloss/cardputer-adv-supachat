@@ -18,6 +18,7 @@ const dataDir = mkdtempSync(join(tmpdir(), 'supachat-test-'));
 const port = 18094;
 let child;
 let cookie;
+let nativeSessionToken;
 
 test.before(async () => {
   child = spawn(process.execPath, ['--experimental-sqlite', 'src/server.mjs'], {
@@ -74,6 +75,7 @@ test('native Authentik exchange issues an isolated app session for Papa', async 
   });
   assert.equal(exchange.status, 200);
   const session = await exchange.json();
+  nativeSessionToken = session.token;
   assert.equal(session.user.id, 'papa');
   assert.equal(session.user.role, 'admin');
   const profile = await fetch(`http://127.0.0.1:${port}/api/session`, {
@@ -81,6 +83,23 @@ test('native Authentik exchange issues an isolated app session for Papa', async 
   });
   assert.equal(profile.status, 200);
   assert.equal((await profile.json()).auth, 'native');
+});
+
+test('only Papa can create a one-time password setup link', async () => {
+  const response = await fetch(`http://127.0.0.1:${port}/api/admin/invitations`, {
+    method: 'POST', headers: { authorization: `Bearer ${nativeSessionToken}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'new.friend', display_name: 'New Friend', email: 'friend@example.test' }),
+  });
+  assert.equal(response.status, 201);
+  const invitation = await response.json();
+  assert.match(invitation.url, /^https:\/\/auth\.supachat\.net\/if\/flow\/supachat-invitation-enrollment\/\?itoken=[0-9a-f-]+$/);
+
+  const memberHeaders = { 'x-forwarded-host': 'supachat.net', 'x-authentik-uid': 'uid-member', 'x-authentik-username': 'member@example.test', 'x-authentik-name': 'Member' };
+  const rejected = await fetch(`http://127.0.0.1:${port}/api/admin/invitations`, {
+    method: 'POST', headers: { ...memberHeaders, origin: 'https://supachat.net', 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'nope', display_name: 'Nope' }),
+  });
+  assert.equal(rejected.status, 403);
 });
 
 test('native app session registers an Expo notification destination', async () => {
