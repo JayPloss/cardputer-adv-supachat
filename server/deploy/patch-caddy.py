@@ -44,6 +44,8 @@ www.supachat.net {
 auth.supachat.net {
     bind 65.108.148.87 2a01:4f9:c014:a269::1
     encode zstd gzip
+    @supachat_oauth_token_no_slash path /application/o/token
+    rewrite @supachat_oauth_token_no_slash /application/o/token/
     reverse_proxy 127.0.0.1:9100
 }
 # END SUPACHAT PORTAL
