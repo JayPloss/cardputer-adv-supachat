@@ -7,6 +7,7 @@ from authentik.flows.models import Flow, FlowStageBinding
 from authentik.rbac.models import Role
 from authentik.stages.invitation.models import InvitationStage
 from authentik.stages.prompt.models import Prompt, PromptStage
+from authentik.stages.redirect.models import RedirectStage
 from authentik.stages.user_login.models import UserLoginStage
 from authentik.stages.user_write.models import UserWriteStage
 
@@ -32,7 +33,8 @@ with transaction.atomic():
     group = Group.objects.get(name="SupaChat Users")
     writer, _ = UserWriteStage.objects.update_or_create(name="supachat-enrollment-user-write", defaults={"user_creation_mode": "always_create", "create_users_group": group, "user_type": "internal", "user_path_template": "users/supachat"})
     login, _ = UserLoginStage.objects.get_or_create(name="supachat-enrollment-user-login")
-    for stage, order in ((invitation, 0), (prompts, 10), (writer, 20), (login, 100)):
+    redirect, _ = RedirectStage.objects.update_or_create(name="supachat-enrollment-redirect", defaults={"mode": "static", "target_static": "https://supachat.net/?welcome=1", "keep_context": False})
+    for stage, order in ((invitation, 0), (prompts, 10), (writer, 20), (login, 100), (redirect, 110)):
         FlowStageBinding.objects.update_or_create(target=flow, stage=stage, defaults={"order": order})
 
     service, _ = User.objects.get_or_create(username="supachat-invite-service", defaults={"name": "SupaChat invitation service", "type": "internal_service_account", "path": "goauthentik.io/service-accounts"})
