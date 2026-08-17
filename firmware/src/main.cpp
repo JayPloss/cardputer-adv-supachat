@@ -165,6 +165,7 @@ struct ChatLine {
   bool mine;
   bool label;
 };
+struct ChatRoom { String id; String name; };
 
 uint32_t participantColour(const String &authorId, const String &authorName = "") {
   String identity = authorId + " " + authorName; identity.toLowerCase();
@@ -174,7 +175,7 @@ uint32_t participantColour(const String &authorId, const String &authorName = ""
   return TFT_WHITE;
 }
 
-enum class ScreenMode { Chat, Menu, Volume, Walkie, Status, Networks, NetworkPassword };
+enum class ScreenMode { Chat, Menu, Rooms, Volume, Walkie, Status, Networks, NetworkPassword };
 
 Preferences preferences;
 M5Canvas uiCanvas(&M5Cardputer.Display);
@@ -182,6 +183,9 @@ WebSocketsClient walkieSocket;
 std::vector<WifiProfile> wifiProfiles;
 std::vector<ScannedNetwork> scannedNetworks;
 std::vector<ChatMessage> messages;
+std::vector<ChatRoom> rooms;
+String currentRoomId = "family";
+String currentRoomName = "Family";
 // Retained clips stream to microSD. The small fallback keeps voice usable
 // without a card while reserving heap for simultaneous HTTPS and WSS TLS.
 std::array<int16_t, kVoiceFallbackSamples> voiceSamples{};
@@ -219,6 +223,7 @@ bool localReplayActive = false;
 bool spacePttHeld = false;
 uint32_t spaceReleaseStartedAt = 0;
 bool walkieConnected = false;
+bool walkieInitialized = false;
 bool walkieGranted = false;
 bool audioPlaying = false;
 volatile bool messageNotificationPending = false;
@@ -230,6 +235,7 @@ volatile bool voiceDownloadActive = false;
 int64_t voicePlayingMessageId = 0;
 int voiceInboxSelection = 0;
 int menuSelection = 0;
+int roomSelection = 0;
 int networkSelection = 0;
 uint8_t volumeLevel = kDefaultVolumeLevel;
 int64_t lastServerId = 0;
@@ -905,6 +911,7 @@ bool uploadVoiceClip() {
   if (!http.begin(client, String(kApiBase) + "/api/voice")) return false;
   http.addHeader("Authorization", "Bearer " + deviceToken);
   http.addHeader("Content-Type", "application/octet-stream");
+  http.addHeader("X-Room-Id", currentRoomId);
   if (voiceClientId.isEmpty()) voiceClientId = nextClientId();
   http.addHeader("X-Client-Id", voiceClientId); http.addHeader("X-Sample-Rate", String(kVoiceSampleRate));
   int status = -1;
@@ -985,7 +992,7 @@ void sendQueuedMessages() {
     xSemaphoreGive(stateMutex);
     if (text.isEmpty()) continue;
     String response; int status = 0;
-    const String payload = "{\"client_id\":\"" + jsonEscape(clientId) + "\",\"body\":\"" + jsonEscape(text) + "\"}";
+    const String payload = "{\"client_id\":\"" + jsonEscape(clientId) + "\",\"body\":\"" + jsonEscape(text) + "\",\"room_id\":\"" + jsonEscape(currentRoomId) + "\"}";
     if (!requestJson("/api/messages", "POST", payload, response, status) || (status != 200 && status != 201)) continue;
     JsonDocument document; if (deserializeJson(document, response)) continue;
     xSemaphoreTake(stateMutex, portMAX_DELAY);
@@ -1000,10 +1007,21 @@ void postReadReceipt(int64_t messageId) {
 }
 
 void synchronize() {
+  String roomsResponse; int roomsStatus = 0;
+  if (requestJson("/api/rooms", "GET", "", roomsResponse, roomsStatus) && roomsStatus == 200) {
+    JsonDocument roomDocument;
+    if (!deserializeJson(roomDocument, roomsResponse)) {
+      rooms.clear();
+      for (JsonObjectConst object : roomDocument["rooms"].as<JsonArrayConst>()) rooms.push_back({String(object["id"] | ""), String(object["name"] | "Room")});
+      auto active = std::find_if(rooms.begin(), rooms.end(), [&](const ChatRoom &room) { return room.id == currentRoomId; });
+      if (active == rooms.end() && !rooms.empty()) { currentRoomId = rooms[0].id; currentRoomName = rooms[0].name; }
+      else if (active != rooms.end()) currentRoomName = active->name;
+    }
+  }
   sendQueuedMessages();
   String response; int status = 0;
   const String path = "/api/device/sync?after=" + String(lastServerId) + "&receipts_after=" + String(lastReceiptAt)
-      + "&limit=" + String(kSyncBatchLimit) + "&wait=0";
+      + "&limit=" + String(kSyncBatchLimit) + "&wait=0&room=" + currentRoomId;
   if (!requestJson(path, "GET", "", response, status)) {
     networkStatus = "SYNC IO " + String(status);
     Serial.printf("sync transport error=%d heap=%u\n", status, ESP.getFreeHeap()); renderDirty = true; return;
@@ -1064,13 +1082,13 @@ void networkTask(void *) {
 }
 
 void walkieTask(void *) {
-  bool initialized = false;
   for (;;) {
     if (WiFi.status() == WL_CONNECTED && timeKnown && initialSyncComplete) {
-      if (!initialized) {
+      if (!walkieInitialized) {
         walkieHeaders = "Authorization: Bearer " + deviceToken + "\r\n";
         walkieSocket.setExtraHeaders(walkieHeaders.c_str()); walkieSocket.onEvent(onWalkieEvent); walkieSocket.setReconnectInterval(2000);
-        walkieSocket.beginSSL(kApiHost, 443, "/supachat/walkie", kTlsFingerprint); initialized = true;
+        const String walkiePath = "/supachat/walkie?room=" + currentRoomId;
+        walkieSocket.beginSSL(kApiHost, 443, walkiePath.c_str(), kTlsFingerprint); walkieInitialized = true;
       }
       walkieSocket.loop();
     }
@@ -1096,7 +1114,7 @@ void drawHeader(const char *title) {
 }
 
 void drawChat() {
-  auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader("FAMLY");
+  auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader(currentRoomName.substring(0, 5).c_str());
   xSemaphoreTake(stateMutex, portMAX_DELAY);
   const int end = std::max(0, static_cast<int>(messages.size()) - static_cast<int>(historyOffset));
   const int first = std::max(0, end - 10);
@@ -1144,18 +1162,30 @@ void drawChat() {
   display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(198, 126); display.printf("%d/140", draft.length());
 }
 
-const char *kMenuItems[] = {"BACK TO CHAT", "SYNC NOW", "VOICE MESSAGES", "VOLUME", "NETWORKS", "STATUS"};
+const char *kMenuItems[] = {"BACK TO CHAT", "ROOMS", "SYNC NOW", "VOICE MESSAGES", "VOLUME", "NETWORKS", "STATUS"};
 void drawMenu() {
   auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader("MENU");
   display.setTextSize(1);
-  for (int index = 0; index < 6; index++) {
-    const int y = 21 + index * 16; const bool selected = index == menuSelection;
-    display.fillRoundRect(6, y, 228, 14, 4, selected ? TFT_GREEN : TFT_DARKGREY);
+  for (int index = 0; index < 7; index++) {
+    const int y = 21 + index * 13; const bool selected = index == menuSelection;
+    display.fillRoundRect(6, y, 228, 12, 4, selected ? TFT_GREEN : TFT_DARKGREY);
     display.setTextColor(selected ? TFT_BLACK : TFT_WHITE, selected ? TFT_GREEN : TFT_DARKGREY);
     display.setCursor(13, y + 4); display.print(kMenuItems[index]);
   }
   display.setTextSize(1); display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 117);
   display.print("ARROWS MOVE       OK SELECT");
+}
+
+void drawRooms() {
+  auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader("ROOMS"); display.setTextSize(1);
+  const int start = std::max(0, roomSelection - 5);
+  for (int index = start; index < static_cast<int>(rooms.size()) && index < start + 6; index++) {
+    const int y = 22 + (index - start) * 15; const bool selected = index == roomSelection;
+    display.fillRoundRect(6, y, 228, 13, 3, selected ? TFT_GREEN : TFT_DARKGREY);
+    display.setTextColor(selected ? TFT_BLACK : TFT_WHITE, selected ? TFT_GREEN : TFT_DARKGREY); display.setCursor(12, y + 3);
+    display.print(rooms[index].name.substring(0, 34));
+  }
+  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 123); display.print("UP/DOWN CHOOSE    ENTER OPEN");
 }
 
 void drawWalkie() {
@@ -1238,7 +1268,7 @@ void drawNetworkPassword() {
 }
 
 void render() {
-  if (screenMode == ScreenMode::Chat) drawChat(); else if (screenMode == ScreenMode::Menu) drawMenu();
+  if (screenMode == ScreenMode::Chat) drawChat(); else if (screenMode == ScreenMode::Menu) drawMenu(); else if (screenMode == ScreenMode::Rooms) drawRooms();
   else if (screenMode == ScreenMode::Volume) drawVolume();
   else if (screenMode == ScreenMode::Walkie) drawWalkie();
   else if (screenMode == ScreenMode::Status) drawStatus();
@@ -1320,10 +1350,11 @@ void joinSelectedNetwork() {
 
 void openSelectedMenuItem() {
   if (menuSelection == 0) screenMode = ScreenMode::Chat;
-  else if (menuSelection == 1) { syncOverride = true; networkStatus = "SYNC REQUESTED"; screenMode = ScreenMode::Chat; }
-  else if (menuSelection == 2) { screenMode = ScreenMode::Walkie; walkieStatus = "READY"; }
-  else if (menuSelection == 3) screenMode = ScreenMode::Volume;
-  else if (menuSelection == 4) { screenMode = ScreenMode::Networks; scanForNetworks(); }
+  else if (menuSelection == 1) screenMode = ScreenMode::Rooms;
+  else if (menuSelection == 2) { syncOverride = true; networkStatus = "SYNC REQUESTED"; screenMode = ScreenMode::Chat; }
+  else if (menuSelection == 3) { screenMode = ScreenMode::Walkie; walkieStatus = "READY"; }
+  else if (menuSelection == 4) screenMode = ScreenMode::Volume;
+  else if (menuSelection == 5) { screenMode = ScreenMode::Networks; scanForNetworks(); }
   else screenMode = ScreenMode::Status;
   renderDirty = true;
 }
@@ -1339,11 +1370,18 @@ void handleKeyboard() {
   const bool goLeft = navigationChord && navLeft();
   const bool goRight = navigationChord && navRight();
   if (screenMode == ScreenMode::Menu) {
-    if (goUp) { menuSelection = (menuSelection + 5) % 6; playNextTone(); }
-    else if (goDown) { menuSelection = (menuSelection + 1) % 6; playNextTone(); }
+    if (goUp) { menuSelection = (menuSelection + 6) % 7; playNextTone(); }
+    else if (goDown) { menuSelection = (menuSelection + 1) % 7; playNextTone(); }
     else if (goLeft) { screenMode = ScreenMode::Chat; playNextTone(); }
     else if (goRight || keys.enter) { openSelectedMenuItem(); playNextTone(); }
     renderDirty = true; return;
+  }
+  if (screenMode == ScreenMode::Rooms) {
+    if (goUp && roomSelection > 0) roomSelection--;
+    else if (goDown && roomSelection + 1 < static_cast<int>(rooms.size())) roomSelection++;
+    else if (goLeft) screenMode = ScreenMode::Menu;
+    else if ((goRight || keys.enter) && !rooms.empty()) { currentRoomId=rooms[roomSelection].id; currentRoomName=rooms[roomSelection].name; messages.clear(); lastServerId=0; lastReceiptAt=0; historyOffset=0; screenMode=ScreenMode::Chat; syncOverride=true; walkieSocket.disconnect(); walkieInitialized=false; }
+    playNextTone(); renderDirty=true; return;
   }
   if (screenMode == ScreenMode::Volume) {
     if (goLeft && volumeLevel > 0) { volumeLevel--; saveVolume(); playNextTone(); }

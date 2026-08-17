@@ -6,6 +6,7 @@
   <title>SupaChat — Family</title>
   <link rel="stylesheet" href="app.css">
   <link rel="stylesheet" href="controls.css">
+  <link rel="stylesheet" href="admin.css">
 </head>
 <body>
   <div class="app-shell" data-vi-container="true">
@@ -34,12 +35,14 @@
       </aside>
     </div>
     <dialog id="admin-zone" class="admin-zone" aria-labelledby="admin-title">
-      <form id="invite-form" class="admin-card" data-vi-container="true">
+      <section class="admin-card" data-vi-container="true">
         <div class="admin-heading">
-          <div><p class="eyebrow">ADMIN ZONE</p><h2 id="admin-title">Invite someone</h2><p>Generate a one-use sign-up link. It expires in seven days.</p></div>
+          <div><p class="eyebrow">ADMIN ZONE</p><h2 id="admin-title">Groups</h2><p>Create rooms, manage their members, and invite someone directly into one.</p></div>
           <button id="admin-close" class="admin-close" type="button" aria-label="Close admin zone">×</button>
         </div>
-        <label for="invite-name">Name</label>
+        <form id="new-group-form" class="admin-section"><h3>New group</h3><div class="admin-inline"><input id="new-group-name" name="name" placeholder="Sunday Crew" required maxlength="60"><button type="submit">Create</button></div><p id="group-state" class="invite-state" role="status"></p></form>
+        <div class="admin-section"><h3>Manage group</h3><label for="manage-room">Group</label><select id="manage-room"></select><div id="group-members" class="group-members"></div><label for="existing-user">Add existing user</label><div class="admin-inline"><select id="existing-user"></select><button id="add-member" type="button">Add</button></div></div>
+        <form id="invite-form" class="admin-section"><h3>Invite new user</h3><p>One-use link · expires in seven days.</p><label for="invite-name">Name</label>
         <input id="invite-name" name="display_name" autocomplete="name" placeholder="Aunt Sarah" required maxlength="80">
         <label for="invite-username">Username</label>
         <input id="invite-username" name="username" autocomplete="username" placeholder="sarah" required maxlength="80">
@@ -53,8 +56,8 @@
           <a id="invite-link" href="#" target="_blank" rel="noreferrer"></a>
           <button id="invite-share" type="button">Share invite</button>
         </div>
-        <button id="invite-generate" class="invite-generate" type="submit">Generate one-time link</button>
-      </form>
+        <button id="invite-generate" class="invite-generate" type="submit">Generate one-time link</button></form>
+      </section>
     </dialog>
     <dialog id="welcome-zone" class="welcome-zone" aria-labelledby="welcome-title">
       <section class="welcome-card" data-vi-container="true">

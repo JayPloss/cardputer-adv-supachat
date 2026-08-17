@@ -66,6 +66,15 @@ db.exec(`
     user_id TEXT NOT NULL REFERENCES users(id),
     PRIMARY KEY (conversation_id, user_id)
   );
+  CREATE TABLE IF NOT EXISTS pending_room_memberships (
+    username TEXT NOT NULL,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id),
+    display_name TEXT NOT NULL,
+    invitation_id TEXT,
+    expires_at INTEGER NOT NULL,
+    claimed_at INTEGER,
+    PRIMARY KEY (username, conversation_id)
+  );
   CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     conversation_id TEXT NOT NULL REFERENCES conversations(id),
@@ -135,6 +144,7 @@ const loginAttempts = new Map();
 const assets = new Map([
   ['/app.css', ['text/css; charset=utf-8', readFileSync(join(webRoot, 'app.css'))]],
   ['/controls.css', ['text/css; charset=utf-8', readFileSync(join(webRoot, 'controls.css'))]],
+  ['/admin.css', ['text/css; charset=utf-8', readFileSync(join(webRoot, 'admin.css'))]],
   ['/app.js', ['text/javascript; charset=utf-8', readFileSync(join(webRoot, 'app.js'))]],
   ['/supachat-logo.png', ['image/png', readFileSync(join(webRoot, 'supachat-logo.png'))]],
 ]);
@@ -188,14 +198,12 @@ function authentikGroups(value) {
   return new Set(String(value || '').split(/[,|]/).map((group) => group.trim().toLowerCase()).filter(Boolean));
 }
 
-function provisionRoomMemberships(userId, groups) {
-  if (['papa', 'albie', 'juju'].includes(userId)) return;
-  if (groups.has('supachat family')) {
-    db.prepare("INSERT OR IGNORE INTO conversation_members(conversation_id, user_id) VALUES ('family', ?)").run(userId);
-  }
-  if (groups.has('supachat k-buds')) {
-    db.prepare("INSERT OR IGNORE INTO conversation_members(conversation_id, user_id) VALUES ('k-buds', ?)").run(userId);
-  }
+function claimPendingRoomMemberships(userId, username) {
+  const now = Date.now();
+  const pending = db.prepare('SELECT conversation_id FROM pending_room_memberships WHERE username = ? AND claimed_at IS NULL AND expires_at > ?').all(username, now);
+  const grant = db.prepare('INSERT OR IGNORE INTO conversation_members(conversation_id, user_id) VALUES (?, ?)');
+  const claim = db.prepare('UPDATE pending_room_memberships SET claimed_at = ? WHERE username = ? AND conversation_id = ?');
+  for (const row of pending) { grant.run(row.conversation_id, userId); claim.run(now, username, row.conversation_id); }
 }
 
 function roomsFor(userId) {
@@ -221,7 +229,7 @@ function webUser(req) {
       INSERT INTO users(id, display_name, short_name, kind) VALUES (?, ?, ?, 'web')
       ON CONFLICT(id) DO UPDATE SET display_name = excluded.display_name, short_name = excluded.short_name
     `).run(id, displayName, shortName);
-    provisionRoomMemberships(id, authentikGroups(req.headers['x-authentik-groups']));
+    claimPendingRoomMemberships(id, normalizedUsername);
     return id;
   }
   return verifySignedSession(parseCookies(req).supachat_session);
@@ -469,7 +477,7 @@ const server = createServer(async (req, res) => {
         INSERT INTO users(id, display_name, short_name, kind) VALUES (?, ?, ?, 'web')
         ON CONFLICT(id) DO UPDATE SET display_name = excluded.display_name, short_name = excluded.short_name
       `).run(id, displayName, shortName);
-      provisionRoomMemberships(id, new Set((profile.groups || []).map((group) => String(group).toLowerCase())));
+      claimPendingRoomMemberships(id, username);
       const token = signSession({ user: id, kind: 'native', exp: Date.now() + 30 * 24 * 60 * 60_000 });
       const user = db.prepare('SELECT id, display_name, short_name, role FROM users WHERE id = ?').get(id);
       return json(res, 200, { token, user, rooms: roomsFor(id) });
@@ -499,23 +507,61 @@ const server = createServer(async (req, res) => {
 
     if (url.pathname === '/api/rooms' && req.method === 'GET') return json(res, 200, { rooms: roomsFor(user) });
 
+    const admin = db.prepare('SELECT role FROM users WHERE id = ?').get(user)?.role === 'admin';
+    if (url.pathname === '/api/admin/groups' && req.method === 'GET') {
+      if (!admin) return json(res, 403, { error: 'admin_required' });
+      const groups = db.prepare(`SELECT c.id, c.name, COUNT(cm.user_id) AS member_count FROM conversations c
+        LEFT JOIN conversation_members cm ON cm.conversation_id = c.id WHERE c.kind IN ('shared','room') GROUP BY c.id ORDER BY c.name`).all();
+      const members = db.prepare(`SELECT cm.conversation_id, u.id, u.display_name, u.short_name, u.kind, u.role
+        FROM conversation_members cm JOIN users u ON u.id = cm.user_id ORDER BY u.display_name`).all();
+      const users = db.prepare('SELECT id, display_name, short_name, kind, role FROM users WHERE revoked_at IS NULL ORDER BY display_name').all();
+      return json(res, 200, { groups: groups.map((group) => ({ ...group, members: members.filter((member) => member.conversation_id === group.id) })), users });
+    }
+    if (url.pathname === '/api/admin/groups' && req.method === 'POST') {
+      if (!admin) return json(res, 403, { error: 'admin_required' });
+      if (webUser(req) && !sameOrigin(req)) return json(res, 403, { error: 'origin_rejected' });
+      const payload = await body(req); const name = String(payload.name || '').trim();
+      const id = String(payload.id || name).trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
+      if (!/^[a-z0-9][a-z0-9-]{1,39}$/.test(id) || name.length < 2 || name.length > 60) return json(res, 400, { error: 'invalid_group' });
+      try { db.prepare("INSERT INTO conversations(id, name, kind) VALUES (?, ?, 'room')").run(id, name); }
+      catch (error) { if (String(error).includes('UNIQUE')) return json(res, 409, { error: 'group_exists' }); throw error; }
+      db.prepare('INSERT INTO conversation_members(conversation_id, user_id) VALUES (?, ?)').run(id, user);
+      return json(res, 201, { group: { id, name, members: [db.prepare('SELECT id, display_name, short_name, kind, role FROM users WHERE id = ?').get(user)] } });
+    }
+    const memberPath = url.pathname.match(/^\/api\/admin\/groups\/([^/]+)\/members(?:\/([^/]+))?$/);
+    if (memberPath && ['POST','DELETE'].includes(req.method)) {
+      if (!admin) return json(res, 403, { error: 'admin_required' });
+      if (webUser(req) && !sameOrigin(req)) return json(res, 403, { error: 'origin_rejected' });
+      const roomId = decodeURIComponent(memberPath[1]);
+      if (!db.prepare("SELECT 1 FROM conversations WHERE id = ? AND kind IN ('shared','room')").get(roomId)) return json(res, 404, { error: 'group_not_found' });
+      if (req.method === 'POST') {
+        const payload = await body(req); const memberId = String(payload.user_id || '');
+        if (!db.prepare('SELECT 1 FROM users WHERE id = ? AND revoked_at IS NULL').get(memberId)) return json(res, 404, { error: 'user_not_found' });
+        db.prepare('INSERT OR IGNORE INTO conversation_members(conversation_id, user_id) VALUES (?, ?)').run(roomId, memberId);
+        return json(res, 200, { ok: true });
+      }
+      const memberId = decodeURIComponent(memberPath[2] || '');
+      if (memberId === user) return json(res, 409, { error: 'cannot_remove_self' });
+      db.prepare('DELETE FROM conversation_members WHERE conversation_id = ? AND user_id = ?').run(roomId, memberId);
+      return json(res, 200, { ok: true });
+    }
+
     if (url.pathname === '/api/admin/invitations' && req.method === 'POST') {
-      const profile = db.prepare('SELECT role FROM users WHERE id = ?').get(user);
-      if (profile?.role !== 'admin') return json(res, 403, { error: 'admin_required' });
+      if (!admin) return json(res, 403, { error: 'admin_required' });
       if (webUser(req) && !sameOrigin(req)) return json(res, 403, { error: 'origin_rejected' });
       const payload = await body(req);
       const username = String(payload.username || '').trim().toLowerCase();
       const displayName = String(payload.display_name || '').trim();
       const email = String(payload.email || '').trim().toLowerCase();
       const roomId = String(payload.room_id || 'family').toLowerCase();
-      if (!['family', 'k-buds'].includes(roomId) || !/^[a-z0-9][a-z0-9._-]{1,31}$/.test(username) || !displayName || displayName.length > 80 || (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) {
+      if (!db.prepare("SELECT 1 FROM conversations WHERE id = ? AND kind IN ('shared','room')").get(roomId) || !/^[a-z0-9][a-z0-9._-]{1,31}$/.test(username) || !displayName || displayName.length > 80 || (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) {
         return json(res, 400, { error: 'invalid_invitation' });
       }
       const expiresAt = Date.now() + 7 * 24 * 60 * 60_000;
       let invitation;
       if (config.nativeTestToken) invitation = { pk: '00000000-0000-4000-8000-000000000001' };
       else {
-        const inviteFlowId = roomId === 'k-buds' ? config.authentikKbudsInviteFlowId : config.authentikInviteFlowId;
+        const inviteFlowId = config.authentikInviteFlowId;
         if (!config.authentikApiToken || !inviteFlowId) return json(res, 503, { error: 'invites_not_configured' });
         const invitationResponse = await fetch(`${config.authentikApiUrl}/stages/invitation/invitations/`, {
           method: 'POST', headers: { authorization: `Bearer ${config.authentikApiToken}`, 'content-type': 'application/json', accept: 'application/json' },
@@ -527,7 +573,10 @@ const server = createServer(async (req, res) => {
         }
         invitation = await invitationResponse.json();
       }
-      const enrollmentSlug = roomId === 'k-buds' ? 'supachat-k-buds-invitation-enrollment' : 'supachat-invitation-enrollment';
+      db.prepare(`INSERT INTO pending_room_memberships(username, conversation_id, display_name, invitation_id, expires_at, claimed_at)
+        VALUES (?, ?, ?, ?, ?, NULL) ON CONFLICT(username, conversation_id) DO UPDATE SET display_name=excluded.display_name,
+        invitation_id=excluded.invitation_id, expires_at=excluded.expires_at, claimed_at=NULL`).run(username, roomId, displayName, invitation.pk, expiresAt);
+      const enrollmentSlug = 'supachat-invitation-enrollment';
       const enrollmentUrl = new URL(`https://auth.${config.portalHost}/if/flow/${enrollmentSlug}/`);
       enrollmentUrl.searchParams.set('itoken', invitation.pk);
       enrollmentUrl.searchParams.set('next', `https://${config.portalHost}/?welcome=1`);
@@ -675,8 +724,8 @@ const server = createServer(async (req, res) => {
           longPolls.add(wake);
           res.on('close', () => { clearTimeout(timer); longPolls.delete(wake); resolve(); });
         });
-        messages = messageRows(after, limit);
-        receipts = receiptRows(receiptsAfter, limit);
+        messages = messageRows(room.id, after, limit);
+        receipts = receiptRows(room.id, receiptsAfter, limit);
       }
       for (const message of messages) {
         if (message.author_id !== user && setReceipt(message.id, user, 'delivered')) {

@@ -47,16 +47,17 @@ async function openMenu(index) {
   await page.getByRole('button', { name: 'ENTER' }).click();
 }
 
-await openMenu(2); await shot('walkie-ready');
+await openMenu(1); await shot('rooms'); await page.getByRole('button', { name: '↓ .' }).click(); await page.getByRole('button', { name: 'ENTER' }).click(); assert.equal((await state()).currentRoom, 'K-BUDS');
+await openMenu(3); await shot('walkie-ready');
 const ptt = page.getByRole('button', { name: 'HOLD SPACE · PTT' });
 const box = await ptt.boundingBox(); assert.ok(box);
 await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2); await page.mouse.down();
 await page.waitForTimeout(250); await shot('walkie-recording'); await page.mouse.up();
 assert.equal((await state()).clipReady, true); await page.getByRole('button', { name: 'ENTER' }).click();
 assert.equal((await state()).replayAudible, true); await shot('walkie-replay');
-await openMenu(3); await shot('volume');
-await openMenu(4); await shot('networks'); await page.getByRole('button', { name: 'ENTER' }).click(); await shot('network-password');
-await openMenu(5); await shot('status');
+await openMenu(4); await shot('volume');
+await openMenu(5); await shot('networks'); await page.getByRole('button', { name: 'ENTER' }).click(); await shot('network-password');
+await openMenu(6); await shot('status');
 await page.reload(); await page.getByLabel('Sync fault injection').selectOption('io');
 assert.equal((await state()).network, 'SYNC IO -1'); await shot('chat-sync-io');
 await browser.close();

@@ -21,6 +21,13 @@ const inviteGenerate = document.querySelector('#invite-generate');
 const roomSelect = document.querySelector('#room-select');
 const welcomeZone = document.querySelector('#welcome-zone');
 const welcomeClose = document.querySelector('#welcome-close');
+const newGroupForm = document.querySelector('#new-group-form');
+const groupState = document.querySelector('#group-state');
+const manageRoom = document.querySelector('#manage-room');
+const groupMembers = document.querySelector('#group-members');
+const existingUser = document.querySelector('#existing-user');
+const addMember = document.querySelector('#add-member');
+let adminGroups = []; let adminUsers = [];
 const welcomeRequested = new URLSearchParams(location.search).get('welcome') === '1';
 let messages = [];
 let currentUser = null;
@@ -246,9 +253,25 @@ function dismissWelcome() {
 }
 welcomeClose.addEventListener('click', dismissWelcome);
 welcomeZone.addEventListener('cancel', (event) => { event.preventDefault(); dismissWelcome(); });
-adminOpen.addEventListener('click', () => adminZone.showModal());
+async function loadAdminGroups(selected = manageRoom.value) {
+  const data = await api('api/admin/groups'); adminGroups = data.groups; adminUsers = data.users;
+  manageRoom.innerHTML = adminGroups.map((group) => `<option value="${escapeHtml(group.id)}">${escapeHtml(group.name)} (${group.member_count})</option>`).join('');
+  manageRoom.value = adminGroups.some((group) => group.id === selected) ? selected : adminGroups[0]?.id || '';
+  const group = adminGroups.find((item) => item.id === manageRoom.value);
+  groupMembers.innerHTML = group?.members.length ? group.members.map((member) => `<div class="group-member"><span>${escapeHtml(member.display_name)} <small>${escapeHtml(member.kind)}</small></span><button type="button" data-remove-user="${escapeHtml(member.id)}" ${member.id === currentUser.id ? 'disabled title="You cannot remove yourself"' : ''}>Remove</button></div>`).join('') : '<p class="empty-inline">No members.</p>';
+  const memberIds = new Set(group?.members.map((member) => member.id));
+  existingUser.innerHTML = adminUsers.filter((item) => !memberIds.has(item.id)).map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.display_name)}</option>`).join('');
+  addMember.disabled = !existingUser.value;
+  inviteForm.elements.room_id.innerHTML = adminGroups.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join('');
+  if (group) inviteForm.elements.room_id.value = group.id;
+}
+adminOpen.addEventListener('click', async () => { adminZone.showModal(); try { await loadAdminGroups(currentRoom); } catch { groupState.textContent = 'Could not load groups.'; } });
 adminClose.addEventListener('click', () => adminZone.close());
 adminZone.addEventListener('click', (event) => { if (event.target === adminZone) adminZone.close(); });
+manageRoom.addEventListener('change', () => loadAdminGroups(manageRoom.value));
+newGroupForm.addEventListener('submit', async (event) => { event.preventDefault(); groupState.textContent = 'Creating…'; try { const result = await api('api/admin/groups', {method:'POST',body:JSON.stringify({name:new FormData(newGroupForm).get('name')})}); newGroupForm.reset(); groupState.textContent = `${result.group.name} created.`; await loadAdminGroups(result.group.id); await refresh(); } catch(error) { groupState.textContent = error.message === 'group_exists' ? 'That group already exists.' : 'Could not create group.'; } });
+addMember.addEventListener('click', async () => { if (!existingUser.value) return; await api(`api/admin/groups/${encodeURIComponent(manageRoom.value)}/members`, {method:'POST',body:JSON.stringify({user_id:existingUser.value})}); await loadAdminGroups(manageRoom.value); });
+groupMembers.addEventListener('click', async (event) => { const button = event.target.closest('[data-remove-user]'); if (!button) return; button.disabled = true; try { await api(`api/admin/groups/${encodeURIComponent(manageRoom.value)}/members/${encodeURIComponent(button.dataset.removeUser)}`, {method:'DELETE'}); await loadAdminGroups(manageRoom.value); } catch { groupState.textContent = 'Could not remove that member.'; button.disabled = false; } });
 inviteForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   const data = new FormData(inviteForm);
