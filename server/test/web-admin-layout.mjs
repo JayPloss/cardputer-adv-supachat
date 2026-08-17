@@ -20,7 +20,7 @@ try {
     const page = await browser.newPage({viewport});
     await page.route('**/api/**', async (route) => {
       const url = route.request().url();
-      const json = url.includes('/session') ? {user:{id:'papa',display_name:'Papa',role:'admin'}} : url.includes('/messages') ? {messages:[]} : url.includes('/presence') ? {presence:[]} : {url:'https://auth.supachat.net/if/flow/supachat-invitation-enrollment/?itoken=test'};
+      const json = url.includes('/session') ? {user:{id:'papa',display_name:'Papa',role:'admin'},rooms:[{id:'family',name:'Family'},{id:'k-buds',name:'K-BUDS'}]} : url.includes('/messages') ? {messages:[]} : url.includes('/presence') ? {presence:[]} : {url:'https://auth.supachat.net/if/flow/supachat-invitation-enrollment/?itoken=test'};
       await route.fulfill({status:url.includes('/invitations') ? 201 : 200,contentType:'application/json',body:JSON.stringify(json)});
     });
     await page.addInitScript(() => {

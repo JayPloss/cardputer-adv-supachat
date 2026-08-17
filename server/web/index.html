@@ -10,7 +10,7 @@
 <body>
   <div class="app-shell" data-vi-container="true">
     <header class="topbar">
-      <div class="brand-lockup"><img class="brand-logo" src="supachat-logo.png" alt="SupaChat"><p class="eyebrow">FAMILY / ONE LITTLE ROOM, ALWAYS WAITING</p></div>
+      <div class="brand-lockup"><img class="brand-logo" src="supachat-logo.png" alt="SupaChat"><div><p class="eyebrow">PRIVATE ROOMS / ALWAYS WAITING</p><label class="room-picker" for="room-select">Room<select id="room-select" aria-label="Current room"></select></label></div></div>
       <div class="header-tools"><div class="presence" id="presence" aria-live="polite"></div><div class="session-tools"><button id="admin-open" class="quiet-button" type="button" hidden>Admin</button><button id="sound-toggle" class="quiet-button" type="button" aria-pressed="true">Sound: on</button><button id="logout" class="quiet-button" type="button">Log out</button></div></div>
     </header>
     <div class="workspace">
@@ -45,6 +45,8 @@
         <input id="invite-username" name="username" autocomplete="username" placeholder="sarah" required maxlength="80">
         <label for="invite-email">Email <span>(optional)</span></label>
         <input id="invite-email" name="email" type="email" autocomplete="email" placeholder="sarah@example.com" maxlength="160">
+        <label for="invite-room">Room</label>
+        <select id="invite-room" name="room_id" required><option value="family">Family</option><option value="k-buds">K-BUDS</option></select>
         <p id="invite-state" class="invite-state" role="status" aria-live="polite"></p>
         <div id="invite-result" class="invite-result" hidden>
           <strong>Invite ready</strong>

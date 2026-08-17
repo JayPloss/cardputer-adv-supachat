@@ -92,6 +92,14 @@ with transaction.atomic():
     )
 
     group, _ = Group.objects.get_or_create(name="SupaChat Users")
+    family_group, _ = Group.objects.get_or_create(name="SupaChat Family")
+    kbuds_group, _ = Group.objects.get_or_create(name="SupaChat K-BUDS")
+    family_group.parent = group
+    family_group.save(update_fields=["parent"])
+    kbuds_group.parent = group
+    kbuds_group.save(update_fields=["parent"])
+    for legacy_user in group.users.all():
+        legacy_user.groups.add(family_group)
     for username, name in (("papa", "Papa"), ("albie", "Albie"), ("julien", "Julien")):
         user, _ = User.objects.get_or_create(
             username=username,
@@ -99,7 +107,7 @@ with transaction.atomic():
         )
         user.name = name
         user.save(update_fields=["name"])
-        user.groups.add(group)
+        user.groups.add(group, family_group, kbuds_group)
     PolicyBinding.objects.get_or_create(target=application, group=group, defaults={"order": 0})
 
     mobile_provider, _ = OAuth2Provider.objects.get_or_create(

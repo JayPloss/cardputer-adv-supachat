@@ -18,11 +18,14 @@ const inviteResult = document.querySelector('#invite-result');
 const inviteLink = document.querySelector('#invite-link');
 const inviteShare = document.querySelector('#invite-share');
 const inviteGenerate = document.querySelector('#invite-generate');
+const roomSelect = document.querySelector('#room-select');
 const welcomeZone = document.querySelector('#welcome-zone');
 const welcomeClose = document.querySelector('#welcome-close');
 const welcomeRequested = new URLSearchParams(location.search).get('welcome') === '1';
 let messages = [];
 let currentUser = null;
+let rooms = [];
+let currentRoom = new URLSearchParams(location.search).get('room') || localStorage.getItem('supachat-room') || 'family';
 
 const api = async (path, options = {}) => {
   const response = await fetch(path, { ...options, headers: { 'content-type': 'application/json', ...(options.headers || {}) } });
@@ -148,7 +151,7 @@ voiceClipButton.addEventListener('click', async () => {
     for (const chunk of clipChunks) { pcm.set(chunk, offset); offset += chunk.length; }
     voiceClipButton.textContent = 'Uploading…'; voiceClipButton.disabled = true;
     try {
-      const response = await fetch('api/voice', { method:'POST', headers:{'content-type':'application/octet-stream','x-client-id':crypto.randomUUID(),'x-sample-rate':'8000'}, body:pcm });
+      const response = await fetch('api/voice', { method:'POST', headers:{'content-type':'application/octet-stream','x-client-id':crypto.randomUUID(),'x-sample-rate':'8000','x-room-id':currentRoom}, body:pcm });
       if (!response.ok) throw new Error('upload_failed');
       voiceClipButton.textContent = 'Record voice clip';
     } catch { voiceClipButton.textContent = 'Upload failed — retry'; }
@@ -167,7 +170,7 @@ let walkieSocket;
 let pttGranted = false;
 let pttHeld = false;
 function connectWalkie() {
-  const url = new URL('walkie', location.href); url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const url = new URL('walkie', location.href); url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'; url.searchParams.set('room', currentRoom);
   walkieSocket = new WebSocket(url); walkieSocket.binaryType = 'arraybuffer';
   walkieSocket.onopen = () => walkieState.textContent = 'Ready — hold to talk';
   walkieSocket.onmessage = async (event) => {
@@ -208,8 +211,12 @@ for (const name of ['pointerup','pointercancel']) pttButton.addEventListener(nam
 window.addEventListener('blur', pttStop);
 connectWalkie();
 async function refresh() {
-  const [{ user }, { messages: next }, { presence }] = await Promise.all([api('api/session'), api('api/messages?limit=100'), api('api/presence')]);
-  currentUser = user;
+  const session = await api('api/session');
+  currentUser = session.user; rooms = session.rooms || [];
+  if (!rooms.some((room) => room.id === currentRoom)) currentRoom = rooms[0]?.id || 'family';
+  roomSelect.innerHTML = rooms.map((room) => `<option value="${escapeHtml(room.id)}">${escapeHtml(room.name)}</option>`).join('');
+  roomSelect.value = currentRoom;
+  const [{ messages: next }, { presence }] = await Promise.all([api(`api/messages?room=${encodeURIComponent(currentRoom)}&limit=100`), api(`api/presence?room=${encodeURIComponent(currentRoom)}`)]);
   adminOpen.hidden = currentUser?.role !== 'admin';
   messages = next;
   renderMessages(true);
@@ -220,6 +227,12 @@ async function refresh() {
     else clearWelcomeMarker();
   }
 }
+roomSelect.addEventListener('change', async () => {
+  currentRoom = roomSelect.value;
+  localStorage.setItem('supachat-room', currentRoom);
+  const url = new URL(location.href); url.searchParams.set('room', currentRoom); history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
+  messages = []; renderMessages(true); walkieSocket?.close(); await refresh();
+});
 function clearWelcomeMarker() {
   const url = new URL(location.href);
   url.searchParams.delete('welcome');
@@ -247,6 +260,7 @@ inviteForm.addEventListener('submit', async (event) => {
         display_name:String(data.get('display_name') || '').trim(),
         username:String(data.get('username') || '').trim(),
         email:String(data.get('email') || '').trim(),
+        room_id:String(data.get('room_id') || 'family'),
       }),
     });
     inviteLink.href = invitation.url; inviteLink.textContent = invitation.url;
@@ -276,7 +290,7 @@ composer.addEventListener('submit', async (event) => {
   sendState.textContent = 'Sending…';
   input.disabled = true;
   try {
-    await api('api/messages', { method:'POST', body:JSON.stringify({body:value,client_id:crypto.randomUUID()}) });
+    await api('api/messages', { method:'POST', body:JSON.stringify({body:value,client_id:crypto.randomUUID(),room_id:currentRoom}) });
     input.value = ''; count.textContent = '0'; sendState.textContent = 'Sent';
   } catch { sendState.textContent = 'Not sent — try again'; }
   finally { input.disabled = false; input.focus(); }
@@ -284,12 +298,13 @@ composer.addEventListener('submit', async (event) => {
 const events = new EventSource('api/events');
 events.addEventListener('message', (event) => {
   const message = JSON.parse(event.data);
+  if (message.conversation_id !== currentRoom) return;
   const incoming = message.author_id !== currentUser?.id && !messages.some((item) => item.id === message.id);
   if (!messages.some((item) => item.id === message.id)) messages.push(message);
   messages = messages.slice(-100); renderMessages(true);
   if (incoming) playNotificationSound();
 });
-events.addEventListener('receipt', async () => { ({messages} = await api('api/messages?limit=100')); renderMessages(); });
+events.addEventListener('receipt', async () => { ({messages} = await api(`api/messages?room=${encodeURIComponent(currentRoom)}&limit=100`)); renderMessages(); });
 events.onerror = () => { sendState.textContent = 'Reconnecting…'; };
-setInterval(async () => { try { renderPresence((await api('api/presence')).presence); sendState.textContent = 'Ready'; } catch {} }, 20_000);
+setInterval(async () => { try { renderPresence((await api(`api/presence?room=${encodeURIComponent(currentRoom)}`)).presence); sendState.textContent = 'Ready'; } catch {} }, 20_000);
 refresh();

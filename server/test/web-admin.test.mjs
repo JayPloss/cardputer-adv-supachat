@@ -9,6 +9,7 @@ test('web admin zone is restricted to admin sessions and creates invitations', (
   assert.match(html, /id="admin-open"[^>]+hidden/);
   assert.match(html, /id="admin-zone"/);
   assert.match(html, /id="invite-form"/);
+  assert.match(html, /id="invite-room"/);
   assert.match(app, /currentUser\?\.role !== 'admin'/);
   assert.match(app, /api\('api\/admin\/invitations'/);
   assert.match(app, /navigator\.share/);
