@@ -1,0 +1,5 @@
+interface:
+  display_name: "Release SupaChat Safely"
+  short_description: "Gate SupaChat releases by branch and compatibility"
+  default_prompt: "Use $release-supachat-safely to release SupaChat without crossing branch or platform boundaries."
+
