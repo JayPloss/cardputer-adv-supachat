@@ -18,6 +18,9 @@ const inviteResult = document.querySelector('#invite-result');
 const inviteLink = document.querySelector('#invite-link');
 const inviteShare = document.querySelector('#invite-share');
 const inviteGenerate = document.querySelector('#invite-generate');
+const welcomeZone = document.querySelector('#welcome-zone');
+const welcomeClose = document.querySelector('#welcome-close');
+const welcomeRequested = new URLSearchParams(location.search).get('welcome') === '1';
 let messages = [];
 let currentUser = null;
 
@@ -211,7 +214,25 @@ async function refresh() {
   messages = next;
   renderMessages(true);
   renderPresence(presence);
+  if (welcomeRequested) {
+    const welcomeKey = `supachat-welcomed:${currentUser.id}`;
+    if (!localStorage.getItem(welcomeKey)) welcomeZone.showModal();
+    else clearWelcomeMarker();
+  }
 }
+function clearWelcomeMarker() {
+  const url = new URL(location.href);
+  url.searchParams.delete('welcome');
+  history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
+}
+function dismissWelcome() {
+  if (currentUser) localStorage.setItem(`supachat-welcomed:${currentUser.id}`, '1');
+  welcomeZone.close();
+  clearWelcomeMarker();
+  input.focus();
+}
+welcomeClose.addEventListener('click', dismissWelcome);
+welcomeZone.addEventListener('cancel', (event) => { event.preventDefault(); dismissWelcome(); });
 adminOpen.addEventListener('click', () => adminZone.showModal());
 adminClose.addEventListener('click', () => adminZone.close());
 adminZone.addEventListener('click', (event) => { if (event.target === adminZone) adminZone.close(); });

@@ -13,3 +13,15 @@ test('web admin zone is restricted to admin sessions and creates invitations', (
   assert.match(app, /api\('api\/admin\/invitations'/);
   assert.match(app, /navigator\.share/);
 });
+
+test('newly enrolled users receive a one-time welcome modal', () => {
+  assert.match(html, /id="welcome-zone"/);
+  assert.match(html, /id="welcome-title"/);
+  assert.match(html, /Messages/);
+  assert.match(html, /Sound/);
+  assert.match(html, /Voice/);
+  assert.match(html, /Presence/);
+  assert.match(app, /URLSearchParams\(location\.search\)\.get\('welcome'\) === '1'/);
+  assert.match(app, /supachat-welcomed:/);
+  assert.match(app, /welcomeZone\.showModal\(\)/);
+});

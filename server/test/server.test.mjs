@@ -92,7 +92,11 @@ test('only Papa can create a one-time password setup link', async () => {
   });
   assert.equal(response.status, 201);
   const invitation = await response.json();
-  assert.match(invitation.url, /^https:\/\/auth\.supachat\.net\/if\/flow\/supachat-invitation-enrollment\/\?itoken=[0-9a-f-]+$/);
+  const invitationUrl = new URL(invitation.url);
+  assert.equal(invitationUrl.origin, 'https://auth.supachat.net');
+  assert.equal(invitationUrl.pathname, '/if/flow/supachat-invitation-enrollment/');
+  assert.match(invitationUrl.searchParams.get('itoken'), /^[0-9a-f-]+$/);
+  assert.equal(invitationUrl.searchParams.get('next'), 'https://supachat.net/?welcome=1');
 
   const memberHeaders = { 'x-forwarded-host': 'supachat.net', 'x-authentik-uid': 'uid-member', 'x-authentik-username': 'member@example.test', 'x-authentik-name': 'Member' };
   const rejected = await fetch(`http://127.0.0.1:${port}/api/admin/invitations`, {

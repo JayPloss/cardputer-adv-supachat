@@ -495,7 +495,10 @@ const server = createServer(async (req, res) => {
         }
         invitation = await invitationResponse.json();
       }
-      return json(res, 201, { url: `https://auth.${config.portalHost}/if/flow/supachat-invitation-enrollment/?itoken=${invitation.pk}`, username, expires_at: expiresAt });
+      const enrollmentUrl = new URL(`https://auth.${config.portalHost}/if/flow/supachat-invitation-enrollment/`);
+      enrollmentUrl.searchParams.set('itoken', invitation.pk);
+      enrollmentUrl.searchParams.set('next', `https://${config.portalHost}/?welcome=1`);
+      return json(res, 201, { url: enrollmentUrl.toString(), username, expires_at: expiresAt });
     }
 
     if (url.pathname === '/api/notifications/devices' && req.method === 'POST') {

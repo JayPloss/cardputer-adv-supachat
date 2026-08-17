@@ -150,6 +150,21 @@
 .invite-result strong { color:var(--green); }
 .invite-result a { color:var(--ink); overflow-wrap:anywhere; font-size:.78rem; }
 
+.welcome-zone { width:min(560px,calc(100% - 28px)); max-height:calc(100dvh - 28px); margin:auto; padding:0; border:1px solid var(--line); border-radius:24px; color:var(--ink); background:var(--panel); box-shadow:0 28px 90px #000b; }
+.welcome-zone::backdrop { background:#000c; backdrop-filter:blur(5px); }
+.welcome-card { display:grid; gap:14px; max-height:calc(100dvh - 30px); overflow:auto; padding:clamp(22px,5vw,36px); }
+.welcome-card h2 { margin:0; font-size:clamp(1.8rem,7vw,2.7rem); line-height:1.05; }
+.welcome-intro { margin:-4px 0 0; color:var(--muted); }
+.welcome-concepts { display:grid; gap:10px; margin:2px 0; padding:0; list-style:none; }
+.welcome-concepts li { display:grid; grid-template-columns:92px minmax(0,1fr); gap:12px; padding:12px; border:1px solid var(--line); border-radius:13px; background:color-mix(in srgb,var(--green) 5%,var(--bg)); }
+.welcome-concepts strong { color:var(--green); }
+.welcome-concepts span { color:var(--muted); line-height:1.4; }
+.welcome-close { min-height:50px; border:0; border-radius:13px; padding:0 18px; background:var(--green); color:#10200f; font-weight:900; cursor:pointer; }
+
+@media (max-width:420px) {
+  .welcome-concepts li { grid-template-columns:1fr; gap:4px; }
+}
+
 .brand-lockup {
   min-width: 0;
 }

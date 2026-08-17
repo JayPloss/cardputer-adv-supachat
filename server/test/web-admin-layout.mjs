@@ -6,7 +6,8 @@ import { chromium } from 'playwright';
 
 const webRoot = join(import.meta.dirname, '..', 'web');
 const server = createServer((request, response) => {
-  const name = request.url === '/' ? 'index.html' : request.url.slice(1);
+  const pathname = new URL(request.url, 'http://127.0.0.1').pathname;
+  const name = pathname === '/' ? 'index.html' : pathname.slice(1);
   const mime = name.endsWith('.css') ? 'text/css' : name.endsWith('.js') ? 'text/javascript' : name.endsWith('.png') ? 'image/png' : 'text/html';
   try { response.writeHead(200, {'content-type':mime}); response.end(readFileSync(join(webRoot, name))); }
   catch { response.writeHead(404); response.end(); }
@@ -26,7 +27,20 @@ try {
       window.EventSource = class { addEventListener() {} };
       window.WebSocket = class { static OPEN = 1; constructor() { this.readyState = 0; } };
     });
-    await page.goto('http://127.0.0.1:18876/', {waitUntil:'networkidle'});
+    await page.goto('http://127.0.0.1:18876/?welcome=1', {waitUntil:'networkidle'});
+    await page.locator('#welcome-zone[open]').waitFor();
+    const welcomeGeometry = await page.evaluate(() => {
+      const dialog = document.querySelector('#welcome-zone').getBoundingClientRect();
+      const card = document.querySelector('#welcome-zone [data-vi-container="true"]');
+      return {bodyWidth:document.body.scrollWidth,viewportWidth:document.documentElement.clientWidth,viewportHeight:document.documentElement.clientHeight,dialog:dialog.toJSON(),cardScrollHeight:card.scrollHeight,cardClientHeight:card.clientHeight};
+    });
+    assert.ok(welcomeGeometry.bodyWidth <= welcomeGeometry.viewportWidth + 1, `welcome causes horizontal overflow at ${viewport.width}px`);
+    assert.ok(welcomeGeometry.dialog.x >= 0 && welcomeGeometry.dialog.x + welcomeGeometry.dialog.width <= viewport.width, `welcome escapes viewport width at ${viewport.width}px`);
+    assert.ok(welcomeGeometry.dialog.y >= 0 && welcomeGeometry.dialog.y + welcomeGeometry.dialog.height <= viewport.height, `welcome escapes viewport height at ${viewport.width}px`);
+    assert.ok(welcomeGeometry.cardScrollHeight <= welcomeGeometry.cardClientHeight + 1, `welcome content overflows its card at ${viewport.width}px`);
+    await page.screenshot({path:join(process.env.TEMP || '.',`supachat-welcome-${viewport.width}x${viewport.height}.png`),fullPage:true});
+    await page.locator('#welcome-close').click();
+    assert.equal(new URL(page.url()).searchParams.has('welcome'), false);
     await page.locator('#admin-open').click();
     await page.locator('#invite-name').fill('Aunt Sarah');
     await page.locator('#invite-username').fill('sarah');
