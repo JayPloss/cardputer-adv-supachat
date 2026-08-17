@@ -21,6 +21,8 @@ export class SupaChatState {
   challenge(opponent){this.duel={opponent,status:'pending',score:[0,0],choice:null}}
   acceptDuel(opponent){this.duel={opponent,status:'active',score:[0,0],choice:null}}
   cast(spell){if(this.duel?.status!=='active'||this.duel.choice)return false;this.duel.choice=spell;return true}
+  completeDuel(won=true){if(!this.duel)return false;this.duel={...this.duel,status:'complete',won,score:won?[2,1]:[1,2],choice:null};return true}
+  acknowledgeDuel(){if(!['complete','declined','cancelled','expired'].includes(this.duel?.status))return false;this.duel=null;return true}
   reply(body){const target=[...this.messages].reverse().find(message=>message.author!==this.name);if(!target)return false;this.messages.push({id:this.name.toLowerCase(),author:this.name,body,replyTo:target.messageId??target.id,state:'queued'});return true}
   menu(){this.screen=this.screen==='menu'?'chat':'menu';this.tone()}
   switchRoom(direction){this.roomSelection=(this.roomSelection+direction+this.rooms.length)%this.rooms.length;this.currentRoom=this.rooms[this.roomSelection];this.roomNew[this.roomSelection]=false;this.messages=[]}
@@ -34,6 +36,7 @@ export class SupaChatState {
     else if(this.screen==='rooms'){this.currentRoom=this.rooms[this.roomSelection];this.messages=[];this.screen='chat'}
     else if(this.screen==='networks')this.selectNetwork();
     else if(this.screen==='password'){this.network='SAVED + CONNECTED';this.ssid=this.selectedSsid;this.screen='networks'}
+    else if(this.screen==='chat'&&this.duel&&['complete','declined','cancelled','expired'].includes(this.duel.status)&&!this.draft)this.acknowledgeDuel();
     else if(this.screen==='chat'&&this.draft){this.messages.push({id:this.name.toLowerCase(),author:this.name,body:this.draft,state:'queued'});this.draft=''}
     this.tone();
   }

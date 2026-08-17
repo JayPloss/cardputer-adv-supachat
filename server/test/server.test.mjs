@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { connect } from 'node:net';
+import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 
 const password = 'integration-password';
@@ -228,6 +229,27 @@ test('duels are reciprocal, secret until both choose, and scoped to a shared roo
   const locked=await choose(papa,'Sectum Sempra'); assert.equal(locked.duel.my_choice_locked,true); assert.equal(JSON.stringify(locked).includes('sectumsempra'),false);
   let state=(await choose(albie,'Langlock')).duel; assert.equal(state.challenger_score,1);
   await choose(papa,'Levicorpus'); state=(await choose(albie,'Sectum Sempra')).duel; assert.equal(state.challenger_score,2); assert.equal(state.status,'complete');
+  const current=(headers)=>fetch(`http://127.0.0.1:${port}/api/duels/current?room=k-buds`,{headers}).then(r=>r.json());
+  assert.equal((await current(papa)).duel.status,'complete'); assert.equal((await current(albie)).duel.status,'complete');
+  const action=(headers,duelId,name)=>fetch(`http://127.0.0.1:${port}/api/duels/${duelId}/${name}`,{method:'POST',headers,body:JSON.stringify({room_id:'k-buds'})});
+  assert.equal((await action(papa,id,'acknowledge')).status,200); assert.equal((await current(papa)).duel,null);
+  assert.equal((await current(albie)).duel.status,'complete'); assert.equal((await action(albie,id,'acknowledge')).status,200);
+
+  let nextPending=(await challenge(papa,'Albie')).duel;
+  assert.equal((await action(albie,nextPending.id,'cancel')).status,409);
+  let terminal=await (await action(papa,nextPending.id,'cancel')).json(); assert.equal(terminal.duel.status,'cancelled');
+  assert.equal((await current(albie)).duel.status,'cancelled');
+  await action(papa,nextPending.id,'acknowledge'); await action(albie,nextPending.id,'acknowledge');
+
+  nextPending=(await challenge(papa,'Albie')).duel;
+  assert.equal((await action(papa,nextPending.id,'decline')).status,409);
+  terminal=await (await action(albie,nextPending.id,'decline')).json(); assert.equal(terminal.duel.status,'declined');
+  await action(papa,nextPending.id,'acknowledge'); await action(albie,nextPending.id,'acknowledge');
+
+  nextPending=(await challenge(papa,'Albie')).duel;
+  const testDb=new DatabaseSync(join(dataDir,'supachat.sqlite'));
+  testDb.prepare('UPDATE duels SET expires_at=0 WHERE id=?').run(nextPending.id); testDb.close();
+  assert.equal((await current(papa)).duel.status,'expired'); assert.equal((await current(albie)).duel.status,'expired');
   const forbidden=await fetch(`http://127.0.0.1:${port}/api/duels/current?room=family`,{headers:{'x-forwarded-host':'supachat.net','x-authentik-uid':'uid-kbuds-1','x-authentik-username':'knowltown.friend'}});
   assert.equal(forbidden.status,403);
 });

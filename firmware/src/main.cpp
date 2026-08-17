@@ -266,10 +266,12 @@ int64_t duelId = 0;
 String duelStatus;
 String duelChallenger;
 String duelOpponent;
+String duelWinnerId;
 int duelChallengerScore = 0;
 int duelOpponentScore = 0;
 bool duelChoiceLocked = false;
 String duelSpellPending;
+String duelActionPending;
 int64_t reactionPendingMessageId = 0;
 bool typingState = false;
 bool typingDirty = false;
@@ -1063,10 +1065,11 @@ void postReadReceipt(int64_t messageId) {
 }
 
 void updateDuel(JsonVariantConst value) {
-  if (value.isNull()) { duelId=0; duelStatus=""; duelChoiceLocked=false; return; }
+  if (value.isNull()) { duelId=0; duelStatus=""; duelChoiceLocked=false; duelWinnerId=""; return; }
   duelId=value["id"]|0; duelStatus=String(value["status"]|""); duelChoiceLocked=value["my_choice_locked"]|false;
   duelChallenger=String(value["challenger"]["display_name"]|"?"); duelOpponent=String(value["opponent"]["display_name"]|"?");
   duelChallengerScore=value["challenger_score"]|0; duelOpponentScore=value["opponent_score"]|0;
+  duelWinnerId=String(value["winner_id"]|"");
 }
 
 void serviceMessagingActions() {
@@ -1081,6 +1084,10 @@ void serviceMessagingActions() {
   if (!duelSpellPending.isEmpty()&&duelId>0) {
     String response; int status=0; const String payload="{\"room_id\":\""+jsonEscape(currentRoomId)+"\",\"spell\":\""+jsonEscape(duelSpellPending)+"\"}";
     if (requestJson("/api/duels/"+String(duelId)+"/choice","POST",payload,response,status)&&status==200) { JsonDocument result;if(!deserializeJson(result,response))updateDuel(result["duel"]);duelSpellPending=""; }
+  }
+  if (!duelActionPending.isEmpty()&&duelId>0) {
+    String response; int status=0; const String action=duelActionPending; const String payload="{\"room_id\":\""+jsonEscape(currentRoomId)+"\"}";
+    if (requestJson("/api/duels/"+String(duelId)+"/"+action,"POST",payload,response,status)&&status==200) { JsonDocument result;if(!deserializeJson(result,response))updateDuel(result["duel"]);duelActionPending=""; }
   }
 }
 
@@ -1260,6 +1267,8 @@ void drawChat() {
   display.setTextColor(TFT_WHITE, TFT_BLACK); display.print(draft.substring(draft.length() > 34 ? draft.length() - 34 : 0));
   display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(3, 126);
   if (duelId > 0 && duelStatus == "active") display.print(duelChoiceLocked ? "DUEL: spell locked" : "DUEL 1:P 2:S 3:L 4:G");
+  else if (duelId > 0 && duelStatus == "complete") display.print(duelWinnerId == kDeviceId ? "DUEL WON ENT:DONE" : "DUEL LOST ENT:DONE");
+  else if (duelId > 0 && (duelStatus == "declined" || duelStatus == "cancelled" || duelStatus == "expired")) display.print(("DUEL "+duelStatus+" ENT:DONE").substring(0,28));
   else if (!typingNotice.isEmpty()) display.print(typingNotice.substring(0, 28));
   display.setCursor(198, 126); display.printf("%d/140", draft.length());
 }
@@ -1550,6 +1559,9 @@ void handleKeyboard() {
   if (goDown) { if (historyOffset > 0) historyOffset--; playNextTone(); renderDirty = true; return; }
   if (goLeft) { switchRoom(-1); playNextTone(); return; }
   if (goRight) { switchRoom(1); playNextTone(); return; }
+  if (duelId>0&&(duelStatus=="complete"||duelStatus=="declined"||duelStatus=="cancelled"||duelStatus=="expired")&&keys.enter&&draft.isEmpty()) {
+    duelActionPending="acknowledge";networkStatus="DUEL CLOSED";playNextTone();renderDirty=true;return;
+  }
   if (duelId>0&&duelStatus=="active"&&!duelChoiceLocked&&draft.isEmpty()) {
     for(const char character:keys.word){const char* spell=character=='1'?"protego":character=='2'?"sectumsempra":character=='3'?"levicorpus":character=='4'?"langlock":nullptr;if(spell){duelSpellPending=spell;duelChoiceLocked=true;networkStatus="SPELL LOCKED";playNextTone();renderDirty=true;return;}}
   }

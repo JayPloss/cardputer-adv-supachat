@@ -35,4 +35,6 @@ test('web messaging exposes room-safe duel and standard message controls',()=>{
   assert.match(app,/api\/duels\/current\?room=/);assert.match(app,/reply_to_id:replyTarget/);
   assert.match(app,/api\/typing/);assert.match(app,/\/reactions/);assert.match(app,/message_update/);
   assert.match(app,/room\.unread_count/);
+  assert.match(app,/data-duel-action/);assert.match(app,/acknowledge/);
+  assert.match(app,/Challenge expired/);assert.match(app,/Cancel challenge/);assert.match(app,/Decline/);
 });

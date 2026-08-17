@@ -33,6 +33,10 @@ await bootShot('/firmware/assets/boot/supachat-splash-juju-240x135.png', 'boot-j
 await page.reload();
 
 await shot('chat');
+await page.evaluate(()=>{window.supachatState.completeDuel(true);window.renderSupachat();});
+assert.equal((await state()).duel.status,'complete');await shot('chat-duel-won');
+await page.getByRole('button',{name:'ENTER'}).click();assert.equal((await state()).duel,null);
+await page.reload();
 await page.getByRole('button', { name: 'SHIFT + / = ?' }).click();
 assert.equal((await state()).draft, '?');
 assert.equal((await state()).screen, 'chat');

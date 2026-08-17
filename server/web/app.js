@@ -305,12 +305,19 @@ function renderDuel(){
   duelZone.hidden=!duel;if(!duel)return;
   const other=duel.challenger.id===currentUser.id?duel.opponent:duel.challenger;
   duelTitle.textContent=`${duel.challenger.display_name} ${duel.challenger_score}–${duel.opponent_score} ${duel.opponent.display_name}`;
-  if(duel.status==='pending'){duelStateEl.textContent=duel.challenged_by_me?`Waiting for ${other.display_name} to answer with “duel ${currentUser.display_name}”.`:`Answer with “duel ${other.display_name}” to accept.`;duelSpells.innerHTML='';return;}
-  if(duel.status==='complete'){duelStateEl.textContent=duel.winner_id===currentUser.id?'You won.':'Duel complete.';duelSpells.innerHTML='';return;}
+  if(duel.status==='pending'){
+    duelStateEl.textContent=duel.challenged_by_me?`Waiting for ${other.display_name} to answer with “duel ${currentUser.display_name}”.`:`Answer with “duel ${other.display_name}” to accept.`;
+    duelSpells.innerHTML=`<button data-duel-action="${duel.challenged_by_me?'cancel':'decline'}">${duel.challenged_by_me?'Cancel challenge':'Decline'}</button>`;return;
+  }
+  if(['complete','declined','cancelled','expired'].includes(duel.status)){
+    const result=duel.status==='complete'?(duel.winner_id===currentUser.id?'You won.':`${duel.winner_id?other.display_name:'Neither player'} won.`):duel.status==='declined'?'Challenge declined.':duel.status==='cancelled'?'Challenge cancelled.':'Challenge expired.';
+    const round=duel.last_round?` Last round: ${duel.last_round.challenger_spell} vs ${duel.last_round.opponent_spell}.`:'';
+    duelStateEl.textContent=result+round;duelSpells.innerHTML='<button data-duel-action="acknowledge">Done</button>';return;
+  }
   duelStateEl.textContent=duel.my_choice_locked?'Spell locked. Waiting for your opponent.':`Round ${duel.round_number}: choose secretly.`;
   duelSpells.innerHTML=['Protego','Sectum Sempra','Levicorpus','Langlock'].map(spell=>`<button data-spell="${spell}" ${duel.my_choice_locked?'disabled':''}>${spell}</button>`).join('');
 }
-duelSpells.addEventListener('click',async(event)=>{const button=event.target.closest('[data-spell]');if(!button||!duel)return;const result=await api(`api/duels/${duel.id}/choice`,{method:'POST',body:JSON.stringify({room_id:currentRoom,spell:button.dataset.spell})});duel=result.duel;renderDuel();});
+duelSpells.addEventListener('click',async(event)=>{const button=event.target.closest('[data-spell],[data-duel-action]');if(!button||!duel)return;button.disabled=true;const action=button.dataset.duelAction||'choice';const result=await api(`api/duels/${duel.id}/${action}`,{method:'POST',body:JSON.stringify({room_id:currentRoom,...(button.dataset.spell?{spell:button.dataset.spell}:{})})});duel=result.duel;renderDuel();});
 adminOpen.addEventListener('click', async () => { adminZone.showModal(); try { await loadAdminGroups(currentRoom); } catch { groupState.textContent = 'Could not load groups.'; } });
 adminClose.addEventListener('click', () => adminZone.close());
 adminZone.addEventListener('click', (event) => { if (event.target === adminZone) adminZone.close(); });

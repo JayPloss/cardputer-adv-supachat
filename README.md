@@ -90,6 +90,8 @@ The service can read message content in version 1. TLS protects messages in tran
 - Cardputer renders replies/reactions/edits/deletes, sends `/r your reply` to reply to the latest incoming message, and sends `/like` to toggle a thumbs-up on it.
 - A room member starts a duel by sending `duel Name`; the other member sends the reciprocal command to accept.
 - Active Cardputer duels use `1` Protego, `2` Sectum Sempra, `3` Levicorpus, and `4` Langlock. Choices stay secret until both players lock a spell; first to two points wins.
+- Completed results remain visible independently for both players until each acknowledges them. Web and Android use **Done**; Cardputer uses Enter.
+- Challengers can cancel, opponents can decline, and unanswered challenges expire after 24 hours without blocking future duels.
 
 ## Network behavior
 

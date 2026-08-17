@@ -134,11 +134,12 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     conversation_id TEXT NOT NULL REFERENCES conversations(id),
     challenger_id TEXT NOT NULL REFERENCES users(id), opponent_id TEXT NOT NULL REFERENCES users(id),
-    status TEXT NOT NULL CHECK(status IN ('pending','active','complete','declined','cancelled')),
+    status TEXT NOT NULL CHECK(status IN ('pending','active','complete','declined','cancelled','expired')),
     challenger_score INTEGER NOT NULL DEFAULT 0, opponent_score INTEGER NOT NULL DEFAULT 0,
     challenger_protego INTEGER NOT NULL DEFAULT 0, opponent_protego INTEGER NOT NULL DEFAULT 0,
     round_number INTEGER NOT NULL DEFAULT 1, winner_id TEXT REFERENCES users(id),
-    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, expires_at INTEGER,
+    completed_at INTEGER, terminal_reason TEXT
   );
   CREATE TABLE IF NOT EXISTS duel_choices (
     duel_id INTEGER NOT NULL REFERENCES duels(id) ON DELETE CASCADE, round_number INTEGER NOT NULL,
@@ -149,6 +150,11 @@ db.exec(`
     duel_id INTEGER NOT NULL REFERENCES duels(id) ON DELETE CASCADE, round_number INTEGER NOT NULL,
     challenger_spell TEXT NOT NULL, opponent_spell TEXT NOT NULL, winner_id TEXT REFERENCES users(id),
     reason TEXT NOT NULL, resolved_at INTEGER NOT NULL, PRIMARY KEY(duel_id, round_number)
+  );
+  CREATE TABLE IF NOT EXISTS duel_acknowledgements (
+    duel_id INTEGER NOT NULL REFERENCES duels(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id), acknowledged_at INTEGER NOT NULL,
+    PRIMARY KEY(duel_id, user_id)
   );
 `);
 try { db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('admin', 'member'))"); } catch (error) {
@@ -456,12 +462,31 @@ function markRoomRead(roomId,user,messageId){
     ON CONFLICT(conversation_id,user_id) DO UPDATE SET last_read_message_id=MAX(last_read_message_id,excluded.last_read_message_id),updated_at=excluded.updated_at`).run(roomId,user,messageId,Date.now());
 }
 
-function duelRowFor(user, roomId) {
+const duelChallengeLifetimeMs = 24 * 60 * 60 * 1000;
+
+function expirePendingDuels(roomId) {
+  const now = Date.now();
+  const result = db.prepare(`UPDATE duels SET status='expired',completed_at=?,terminal_reason='challenge_expired',updated_at=?
+    WHERE conversation_id=? AND status='pending' AND expires_at IS NOT NULL AND expires_at<=?`).run(now,now,roomId,now);
+  if (result.changes) publish('duel',{conversation_id:roomId});
+}
+
+function activeDuelRowFor(user, roomId) {
+  expirePendingDuels(roomId);
   return db.prepare("SELECT * FROM duels WHERE conversation_id=? AND status IN ('pending','active') AND (challenger_id=? OR opponent_id=?) ORDER BY id DESC LIMIT 1").get(roomId, user, user);
 }
 
+function visibleDuelRowFor(user, roomId) {
+  const active = activeDuelRowFor(user, roomId);
+  if (active) return active;
+  return db.prepare(`SELECT d.* FROM duels d LEFT JOIN duel_acknowledgements a ON a.duel_id=d.id AND a.user_id=?
+    WHERE d.conversation_id=? AND d.status IN ('complete','declined','cancelled','expired')
+      AND (d.challenger_id=? OR d.opponent_id=?) AND a.duel_id IS NULL
+    ORDER BY COALESCE(d.completed_at,d.updated_at) DESC,d.id DESC LIMIT 1`).get(user,roomId,user,user);
+}
+
 function duelState(user, roomId, duelId = null) {
-  const duel = duelId ? db.prepare('SELECT * FROM duels WHERE id=? AND conversation_id=? AND (challenger_id=? OR opponent_id=?)').get(duelId, roomId, user, user) : duelRowFor(user, roomId);
+  const duel = duelId ? db.prepare('SELECT * FROM duels WHERE id=? AND conversation_id=? AND (challenger_id=? OR opponent_id=?)').get(duelId, roomId, user, user) : visibleDuelRowFor(user, roomId);
   if (!duel) return null;
   const challenger = db.prepare('SELECT id, display_name, short_name FROM users WHERE id=?').get(duel.challenger_id);
   const opponent = db.prepare('SELECT id, display_name, short_name FROM users WHERE id=?').get(duel.opponent_id);
@@ -471,19 +496,20 @@ function duelState(user, roomId, duelId = null) {
 }
 
 function challengeDuel(user, roomId, opponentName) {
+  expirePendingDuels(roomId);
   const wanted = String(opponentName || '').trim().toLowerCase();
   const opponent = db.prepare(`SELECT u.id FROM users u JOIN conversation_members cm ON cm.user_id=u.id
     WHERE cm.conversation_id=? AND u.revoked_at IS NULL AND u.id<>? AND
     (lower(u.id)=? OR lower(u.display_name)=? OR lower(u.short_name)=?) LIMIT 1`).get(roomId, user, wanted, wanted, wanted);
   if (!opponent) return {error:'duelist_not_found'};
-  const mine = duelRowFor(user, roomId); const theirs = duelRowFor(opponent.id, roomId);
+  const mine = activeDuelRowFor(user, roomId); const theirs = activeDuelRowFor(opponent.id, roomId);
   if (mine && mine.id !== theirs?.id) return {error:'already_dueling'};
   if (theirs?.status === 'pending' && theirs.challenger_id === opponent.id && theirs.opponent_id === user) {
     db.prepare("UPDATE duels SET status='active',updated_at=? WHERE id=?").run(Date.now(), theirs.id);
     publish('duel', {conversation_id:roomId,duel_id:theirs.id}); return {duel:duelState(user, roomId, theirs.id)};
   }
   if (mine) return {duel:duelState(user, roomId, mine.id)};
-  const now=Date.now(); const result=db.prepare("INSERT INTO duels(conversation_id,challenger_id,opponent_id,status,created_at,updated_at) VALUES (?,?,?,'pending',?,?)").run(roomId,user,opponent.id,now,now);
+  const now=Date.now(); const result=db.prepare("INSERT INTO duels(conversation_id,challenger_id,opponent_id,status,created_at,updated_at,expires_at) VALUES (?,?,?,'pending',?,?,?)").run(roomId,user,opponent.id,now,now,now+duelChallengeLifetimeMs);
   publish('duel',{conversation_id:roomId,duel_id:Number(result.lastInsertRowid)}); return {duel:duelState(user,roomId,Number(result.lastInsertRowid))};
 }
 
@@ -498,9 +524,27 @@ function chooseDuelSpell(user, roomId, duelId, rawSpell) {
     const round=resolveRound(first,second,duel.challenger_protego,duel.opponent_protego); const winnerId=round.winner==='first'?duel.challenger_id:round.winner==='second'?duel.opponent_id:null;
     const firstScore=duel.challenger_score+(winnerId===duel.challenger_id?1:0); const secondScore=duel.opponent_score+(winnerId===duel.opponent_id?1:0); const complete=firstScore>=2||secondScore>=2;
     db.prepare('INSERT INTO duel_rounds VALUES (?,?,?,?,?,?,?)').run(duel.id,duel.round_number,first,second,winnerId,round.reason,Date.now());
-    db.prepare("UPDATE duels SET status=?,challenger_score=?,opponent_score=?,challenger_protego=?,opponent_protego=?,round_number=round_number+1,winner_id=?,updated_at=? WHERE id=?").run(complete?'complete':'active',firstScore,secondScore,round.firstProtegoStreak,round.secondProtegoStreak,complete?winnerId:null,Date.now(),duel.id);
+    const updatedAt=Date.now();
+    db.prepare("UPDATE duels SET status=?,challenger_score=?,opponent_score=?,challenger_protego=?,opponent_protego=?,round_number=round_number+1,winner_id=?,completed_at=?,terminal_reason=?,updated_at=? WHERE id=?").run(complete?'complete':'active',firstScore,secondScore,round.firstProtegoStreak,round.secondProtegoStreak,complete?winnerId:null,complete?updatedAt:null,complete?'score_limit':null,updatedAt,duel.id);
   }
   publish('duel',{conversation_id:roomId,duel_id:duel.id}); return {duel:duelState(user,roomId,duel.id),resolved:choices.length===2};
+}
+
+function finishPendingDuel(user,roomId,duelId,action){
+  const duel=db.prepare("SELECT * FROM duels WHERE id=? AND conversation_id=? AND status='pending' AND (challenger_id=? OR opponent_id=?)").get(duelId,roomId,user,user);
+  if(!duel)return {error:'duel_not_pending'};
+  if(action==='cancel'&&duel.challenger_id!==user)return {error:'only_challenger_can_cancel'};
+  if(action==='decline'&&duel.opponent_id!==user)return {error:'only_opponent_can_decline'};
+  const now=Date.now(); const status=action==='cancel'?'cancelled':'declined';
+  db.prepare('UPDATE duels SET status=?,completed_at=?,terminal_reason=?,updated_at=? WHERE id=?').run(status,now,status,now,duel.id);
+  publish('duel',{conversation_id:roomId,duel_id:duel.id}); return {duel:duelState(user,roomId,duel.id)};
+}
+
+function acknowledgeDuel(user,roomId,duelId){
+  const duel=db.prepare("SELECT id FROM duels WHERE id=? AND conversation_id=? AND status IN ('complete','declined','cancelled','expired') AND (challenger_id=? OR opponent_id=?)").get(duelId,roomId,user,user);
+  if(!duel)return {error:'duel_not_terminal'};
+  db.prepare('INSERT OR IGNORE INTO duel_acknowledgements(duel_id,user_id,acknowledged_at) VALUES (?,?,?)').run(duel.id,user,Date.now());
+  return {ok:true,duel:duelState(user,roomId)};
 }
 
 function setReceipt(messageId, user, state) {
@@ -629,6 +673,13 @@ const server = createServer(async (req, res) => {
       if(webUser(req)&&!sameOrigin(req))return json(res,403,{error:'origin_rejected'});
       const payload=await body(req); const room=authorizedRoom(user,payload.room_id); if(!room)return json(res,payload.room_id?403:400,{error:payload.room_id?'room_forbidden':'room_required'});
       const result=chooseDuelSpell(user,room.id,Number(duelChoicePath[1]),payload.spell); return json(res,result.error?409:200,result);
+    }
+    const duelActionPath=url.pathname.match(/^\/api\/duels\/(\d+)\/(decline|cancel|acknowledge)$/);
+    if(duelActionPath&&req.method==='POST'){
+      if(webUser(req)&&!sameOrigin(req))return json(res,403,{error:'origin_rejected'});
+      const payload=await body(req); const room=authorizedRoom(user,payload.room_id); if(!room)return json(res,payload.room_id?403:400,{error:payload.room_id?'room_forbidden':'room_required'});
+      const action=duelActionPath[2]; const result=action==='acknowledge'?acknowledgeDuel(user,room.id,Number(duelActionPath[1])):finishPendingDuel(user,room.id,Number(duelActionPath[1]),action);
+      return json(res,result.error?409:200,result);
     }
 
     if(url.pathname==='/api/typing'&&req.method==='POST'){
