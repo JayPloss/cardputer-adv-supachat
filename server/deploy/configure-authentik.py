@@ -92,8 +92,6 @@ with transaction.atomic():
     )
 
     group, _ = Group.objects.get_or_create(name="SupaChat Users")
-    legacy_papa = User.objects.get(username="jay.ploss@le954.ca")
-    legacy_papa.groups.add(group)
     for username, name in (("papa", "Papa"), ("albie", "Albie"), ("julien", "Julien")):
         user, _ = User.objects.get_or_create(
             username=username,

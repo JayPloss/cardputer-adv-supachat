@@ -13,7 +13,7 @@ const config = {
   dataDir: process.env.SUPACHAT_DATA_DIR || join(sourceRoot, '..', 'data'),
   publicBase: (process.env.SUPACHAT_PUBLIC_BASE || '/supachat').replace(/\/$/, ''),
   portalHost: (process.env.SUPACHAT_PORTAL_HOST || 'supachat.net').toLowerCase(),
-  papaAuthentikUsername: (process.env.SUPACHAT_PAPA_AUTHENTIK_USERNAME || '').toLowerCase(),
+  papaAuthentikUsername: (process.env.SUPACHAT_PAPA_AUTHENTIK_USERNAME || 'papa').toLowerCase(),
   authentikUserinfoUrl: process.env.SUPACHAT_AUTHENTIK_USERINFO_URL || 'https://auth.supachat.net/application/o/userinfo/',
   mobileClientId: process.env.SUPACHAT_MOBILE_CLIENT_ID || 'supachat-android',
   nativeTestToken: process.env.SUPACHAT_NATIVE_TEST_TOKEN || '',

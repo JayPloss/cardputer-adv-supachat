@@ -31,7 +31,7 @@ test.before(async () => {
       SUPACHAT_ALBIE_DEVICE_TOKEN_HASH: createHash('sha256').update(deviceToken).digest('hex'),
       SUPACHAT_JUJU_DEVICE_TOKEN_HASH: createHash('sha256').update(jujuToken).digest('hex'),
       SUPACHAT_PAPA_DEVICE_TOKEN_HASH: createHash('sha256').update(papaDeviceToken).digest('hex'),
-      SUPACHAT_PORTAL_HOST: 'supachat.net', SUPACHAT_PAPA_AUTHENTIK_USERNAME: 'jay@example.test',
+      SUPACHAT_PORTAL_HOST: 'supachat.net', SUPACHAT_PAPA_AUTHENTIK_USERNAME: 'papa',
       SUPACHAT_NATIVE_TEST_TOKEN: nativeTestToken,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -135,7 +135,7 @@ test('Authentik provisions independent web users into the family room', async ()
 
 test('Papa Authentik identity maps to existing Papa history', async () => {
   const response = await fetch(`http://127.0.0.1:${port}/api/session`, {
-    headers: { 'x-forwarded-host': 'supachat.net', 'x-authentik-uid': 'uid-papa', 'x-authentik-username': 'jay@example.test', 'x-authentik-name': 'Jay Ploss' },
+    headers: { 'x-forwarded-host': 'supachat.net', 'x-authentik-uid': 'uid-papa', 'x-authentik-username': 'papa', 'x-authentik-name': 'Papa' },
   });
   assert.equal((await response.json()).user.id, 'papa');
 });
