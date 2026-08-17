@@ -20,6 +20,7 @@ const config = {
   authentikApiUrl: (process.env.SUPACHAT_AUTHENTIK_API_URL || 'https://auth.supachat.net/api/v3').replace(/\/$/, ''),
   authentikApiToken: process.env.SUPACHAT_AUTHENTIK_API_TOKEN || '',
   authentikInviteFlowId: process.env.SUPACHAT_AUTHENTIK_INVITE_FLOW_ID || '',
+  authentikKbudsInviteFlowId: process.env.SUPACHAT_AUTHENTIK_KBUDS_INVITE_FLOW_ID || '',
   expoPushEnabled: process.env.SUPACHAT_EXPO_PUSH_ENABLED === 'true',
   sessionSecret: process.env.SUPACHAT_SESSION_SECRET || '',
   papaPasswordHash: process.env.SUPACHAT_PAPA_PASSWORD_HASH || '',
@@ -120,15 +121,16 @@ seed.run('albie', 'Albie', 'Albie', 'device');
 seed.run('juju', 'Julien', 'Juju', 'device');
 db.prepare("UPDATE users SET role = 'admin' WHERE id = 'papa'").run();
 db.prepare("INSERT OR IGNORE INTO conversations(id, name, kind) VALUES ('family', 'Family', 'shared')").run();
+db.prepare("INSERT OR IGNORE INTO conversations(id, name, kind) VALUES ('k-buds', 'K-BUDS', 'room')").run();
 db.prepare("INSERT OR IGNORE INTO conversation_members(conversation_id, user_id) VALUES ('family', ?)").run('papa');
 db.prepare("INSERT OR IGNORE INTO conversation_members(conversation_id, user_id) VALUES ('family', ?)").run('albie');
 db.prepare("INSERT OR IGNORE INTO conversation_members(conversation_id, user_id) VALUES ('family', ?)").run('juju');
+for (const userId of ['papa', 'albie', 'juju']) db.prepare("INSERT OR IGNORE INTO conversation_members(conversation_id, user_id) VALUES ('k-buds', ?)").run(userId);
 
 const clients = new Set();
 const longPolls = new Set();
 const walkieClients = new Map();
-let walkieSpeaker = null;
-let walkieStartedAt = 0;
+const walkieSpeakers = new Map();
 const loginAttempts = new Map();
 const assets = new Map([
   ['/app.css', ['text/css; charset=utf-8', readFileSync(join(webRoot, 'app.css'))]],
@@ -182,6 +184,30 @@ function authentikUserId(username, uid) {
     || `web-${createHash('sha256').update(String(uid)).digest('hex').slice(0, 16)}`;
 }
 
+function authentikGroups(value) {
+  return new Set(String(value || '').split(/[,|]/).map((group) => group.trim().toLowerCase()).filter(Boolean));
+}
+
+function provisionRoomMemberships(userId, groups) {
+  if (['papa', 'albie', 'juju'].includes(userId)) return;
+  if (groups.has('supachat family')) {
+    db.prepare("INSERT OR IGNORE INTO conversation_members(conversation_id, user_id) VALUES ('family', ?)").run(userId);
+  }
+  if (groups.has('supachat k-buds')) {
+    db.prepare("INSERT OR IGNORE INTO conversation_members(conversation_id, user_id) VALUES ('k-buds', ?)").run(userId);
+  }
+}
+
+function roomsFor(userId) {
+  return db.prepare(`SELECT c.id, c.name FROM conversations c JOIN conversation_members cm ON cm.conversation_id = c.id
+    WHERE cm.user_id = ? ORDER BY CASE c.id WHEN 'family' THEN 0 ELSE 1 END, c.name`).all(userId);
+}
+
+function authorizedRoom(userId, requested = 'family') {
+  const roomId = String(requested || 'family').toLowerCase();
+  return db.prepare('SELECT c.id, c.name FROM conversations c JOIN conversation_members cm ON cm.conversation_id = c.id WHERE c.id = ? AND cm.user_id = ?').get(roomId, userId);
+}
+
 function webUser(req) {
   const host = requestHost(req);
   const authentikUid = String(req.headers['x-authentik-uid'] || '').trim();
@@ -195,7 +221,7 @@ function webUser(req) {
       INSERT INTO users(id, display_name, short_name, kind) VALUES (?, ?, ?, 'web')
       ON CONFLICT(id) DO UPDATE SET display_name = excluded.display_name, short_name = excluded.short_name
     `).run(id, displayName, shortName);
-    db.prepare("INSERT OR IGNORE INTO conversation_members(conversation_id, user_id) VALUES ('family', ?)").run(id);
+    provisionRoomMemberships(id, authentikGroups(req.headers['x-authentik-groups']));
     return id;
   }
   return verifySignedSession(parseCookies(req).supachat_session);
@@ -245,12 +271,14 @@ async function authentikProfile(accessToken) {
 
 async function sendExpoNotifications(message) {
   if (!config.expoPushEnabled) return;
-  const devices = db.prepare("SELECT id, token FROM notification_devices WHERE provider = 'expo' AND enabled = 1 AND user_id <> ?").all(message.author_id);
+  const devices = db.prepare(`SELECT nd.id, nd.token FROM notification_devices nd
+    JOIN conversation_members cm ON cm.user_id = nd.user_id
+    WHERE nd.provider = 'expo' AND nd.enabled = 1 AND nd.user_id <> ? AND cm.conversation_id = ?`).all(message.author_id, message.conversation_id);
   if (!devices.length) return;
   const payloads = devices.map((device) => ({
     to: device.token,
     sound: 'default',
-    title: `${message.author_name} · Family`,
+    title: `${message.author_name} · ${message.conversation_name}`,
     body: message.type === 'voice' ? 'Sent a voice message' : message.body,
     data: { conversation_id: message.conversation_id, message_id: message.id },
     channelId: 'messages',
@@ -299,23 +327,23 @@ function pcmWav(pcm, sampleRate = 8000) {
   return Buffer.concat([header, pcm]);
 }
 
-function messageRows(after = 0, limit = 100) {
+function messageRows(roomId = 'family', after = 0, limit = 100) {
   const bounded = Math.min(Math.max(limit, 1), 100);
   const rows = after > 0 ? db.prepare(`
     SELECT m.id, m.client_id, m.conversation_id, m.author_id, u.display_name AS author_name,
            u.short_name AS author_short, m.type, m.body, m.created_at
     FROM messages m JOIN users u ON u.id = m.author_id
-    WHERE m.conversation_id = 'family' AND m.id > ? ORDER BY m.id ASC LIMIT ?
-  `).all(after, bounded) : db.prepare(`
+    WHERE m.conversation_id = ? AND m.id > ? ORDER BY m.id ASC LIMIT ?
+  `).all(roomId, after, bounded) : db.prepare(`
     SELECT * FROM (
       SELECT m.id, m.client_id, m.conversation_id, m.author_id, u.display_name AS author_name,
              u.short_name AS author_short, m.type, m.body, m.created_at
       FROM messages m JOIN users u ON u.id = m.author_id
-      WHERE m.conversation_id = 'family' ORDER BY m.id DESC LIMIT ?
+      WHERE m.conversation_id = ? ORDER BY m.id DESC LIMIT ?
     ) ORDER BY id ASC
-  `).all(bounded);
+  `).all(roomId, bounded);
   return rows.map((row) => ({
-    ...row,
+    ...row, conversation_name: db.prepare('SELECT name FROM conversations WHERE id = ?').get(row.conversation_id)?.name,
     receipts: db.prepare('SELECT user_id, state, updated_at FROM receipts WHERE message_id = ?').all(row.id),
     voice: row.type === 'voice' ? db.prepare(`
       SELECT mime_type, sample_rate, sample_count, duration_ms, byte_length
@@ -324,25 +352,25 @@ function messageRows(after = 0, limit = 100) {
   }));
 }
 
-function presenceRows() {
+function presenceRows(roomId = 'family') {
   const now = Date.now();
   return db.prepare(`
     SELECT u.id, u.display_name, u.short_name, p.last_seen_at, p.connected
-    FROM users u LEFT JOIN presence p ON p.user_id = u.id
-    WHERE u.revoked_at IS NULL ORDER BY u.display_name
-  `).all().map((row) => ({
+    FROM users u JOIN conversation_members cm ON cm.user_id = u.id LEFT JOIN presence p ON p.user_id = u.id
+    WHERE u.revoked_at IS NULL AND cm.conversation_id = ? ORDER BY u.display_name
+  `).all(roomId).map((row) => ({
     ...row,
     status: row.connected && now - row.last_seen_at < 45_000 ? 'online' :
       row.last_seen_at && now - row.last_seen_at < 15 * 60_000 ? 'recent' : 'offline',
   }));
 }
 
-function receiptRows(after = 0, limit = 100) {
+function receiptRows(roomId = 'family', after = 0, limit = 100) {
   const bounded = Math.min(Math.max(limit, 1), 100);
   return db.prepare(`
-    SELECT message_id, user_id, state, updated_at FROM receipts
-    WHERE updated_at > ? ORDER BY updated_at ASC LIMIT ?
-  `).all(after, bounded);
+    SELECT r.message_id, r.user_id, r.state, r.updated_at FROM receipts r JOIN messages m ON m.id = r.message_id
+    WHERE m.conversation_id = ? AND r.updated_at > ? ORDER BY r.updated_at ASC LIMIT ?
+  `).all(roomId, after, bounded);
 }
 
 function touchPresence(user, connected = true) {
@@ -382,21 +410,21 @@ function websocketFrame(payload, opcode = 1) {
   return Buffer.concat([header, content]);
 }
 
-function walkieBroadcast(value, opcode = 1, except = null) {
+function walkieBroadcast(roomId, value, opcode = 1, except = null) {
   const frame = websocketFrame(opcode === 1 ? JSON.stringify(value) : value, opcode);
-  for (const socket of walkieClients.keys()) if (socket !== except && !socket.destroyed) socket.write(frame);
+  for (const [socket, client] of walkieClients) if (client.roomId === roomId && socket !== except && !socket.destroyed) socket.write(frame);
 }
 
-function releaseWalkie(user, reason = 'released') {
-  if (walkieSpeaker !== user) return;
-  walkieSpeaker = null; walkieStartedAt = 0;
-  walkieBroadcast({ type: 'ptt_stop', user, reason, at: Date.now() });
+function releaseWalkie(roomId, user, reason = 'released') {
+  if (walkieSpeakers.get(roomId)?.user !== user) return;
+  walkieSpeakers.delete(roomId);
+  walkieBroadcast(roomId, { type: 'ptt_stop', user, reason, at: Date.now() });
 }
 
 // Release a client that acquired the channel but stopped sending before it
 // could deliver another frame (lost WiFi, suspended browser, or crashed app).
 setInterval(() => {
-  if (walkieSpeaker && Date.now() - walkieStartedAt > 30_000) releaseWalkie(walkieSpeaker, 'timeout');
+  for (const [roomId, speaker] of walkieSpeakers) if (Date.now() - speaker.startedAt > 30_000) releaseWalkie(roomId, speaker.user, 'timeout');
 }, 1000).unref();
 
 const server = createServer(async (req, res) => {
@@ -441,10 +469,10 @@ const server = createServer(async (req, res) => {
         INSERT INTO users(id, display_name, short_name, kind) VALUES (?, ?, ?, 'web')
         ON CONFLICT(id) DO UPDATE SET display_name = excluded.display_name, short_name = excluded.short_name
       `).run(id, displayName, shortName);
-      db.prepare("INSERT OR IGNORE INTO conversation_members(conversation_id, user_id) VALUES ('family', ?)").run(id);
+      provisionRoomMemberships(id, new Set((profile.groups || []).map((group) => String(group).toLowerCase())));
       const token = signSession({ user: id, kind: 'native', exp: Date.now() + 30 * 24 * 60 * 60_000 });
       const user = db.prepare('SELECT id, display_name, short_name, role FROM users WHERE id = ?').get(id);
-      return json(res, 200, { token, user });
+      return json(res, 200, { token, user, rooms: roomsFor(id) });
     }
     if (assets.has(url.pathname)) {
       const [type, content] = assets.get(url.pathname);
@@ -466,8 +494,10 @@ const server = createServer(async (req, res) => {
 
     if (url.pathname === '/api/session' && req.method === 'GET') {
       const profile = db.prepare('SELECT id, display_name, short_name, role FROM users WHERE id = ?').get(user);
-      return json(res, 200, { user: profile, auth: deviceUser(req) ? 'device' : nativeUser(req) ? 'native' : (String(req.headers['x-authentik-uid'] || '') ? 'authentik' : 'legacy') });
+      return json(res, 200, { user: profile, rooms: roomsFor(user), auth: deviceUser(req) ? 'device' : nativeUser(req) ? 'native' : (String(req.headers['x-authentik-uid'] || '') ? 'authentik' : 'legacy') });
     }
+
+    if (url.pathname === '/api/rooms' && req.method === 'GET') return json(res, 200, { rooms: roomsFor(user) });
 
     if (url.pathname === '/api/admin/invitations' && req.method === 'POST') {
       const profile = db.prepare('SELECT role FROM users WHERE id = ?').get(user);
@@ -477,17 +507,19 @@ const server = createServer(async (req, res) => {
       const username = String(payload.username || '').trim().toLowerCase();
       const displayName = String(payload.display_name || '').trim();
       const email = String(payload.email || '').trim().toLowerCase();
-      if (!/^[a-z0-9][a-z0-9._-]{1,31}$/.test(username) || !displayName || displayName.length > 80 || (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) {
+      const roomId = String(payload.room_id || 'family').toLowerCase();
+      if (!['family', 'k-buds'].includes(roomId) || !/^[a-z0-9][a-z0-9._-]{1,31}$/.test(username) || !displayName || displayName.length > 80 || (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) {
         return json(res, 400, { error: 'invalid_invitation' });
       }
       const expiresAt = Date.now() + 7 * 24 * 60 * 60_000;
       let invitation;
       if (config.nativeTestToken) invitation = { pk: '00000000-0000-4000-8000-000000000001' };
       else {
-        if (!config.authentikApiToken || !config.authentikInviteFlowId) return json(res, 503, { error: 'invites_not_configured' });
+        const inviteFlowId = roomId === 'k-buds' ? config.authentikKbudsInviteFlowId : config.authentikInviteFlowId;
+        if (!config.authentikApiToken || !inviteFlowId) return json(res, 503, { error: 'invites_not_configured' });
         const invitationResponse = await fetch(`${config.authentikApiUrl}/stages/invitation/invitations/`, {
           method: 'POST', headers: { authorization: `Bearer ${config.authentikApiToken}`, 'content-type': 'application/json', accept: 'application/json' },
-          body: JSON.stringify({ name: `supachat_${Date.now()}`, expires: new Date(expiresAt).toISOString(), fixed_data: { username, name: displayName, email }, single_use: true, flow: config.authentikInviteFlowId }),
+          body: JSON.stringify({ name: `supachat_${roomId}_${Date.now()}`, expires: new Date(expiresAt).toISOString(), fixed_data: { username, name: displayName, email }, single_use: true, flow: inviteFlowId }),
         });
         if (!invitationResponse.ok) {
           console.error('Authentik invitation creation failed', invitationResponse.status, await invitationResponse.text());
@@ -495,10 +527,12 @@ const server = createServer(async (req, res) => {
         }
         invitation = await invitationResponse.json();
       }
-      const enrollmentUrl = new URL(`https://auth.${config.portalHost}/if/flow/supachat-invitation-enrollment/`);
+      const enrollmentSlug = roomId === 'k-buds' ? 'supachat-k-buds-invitation-enrollment' : 'supachat-invitation-enrollment';
+      const enrollmentUrl = new URL(`https://auth.${config.portalHost}/if/flow/${enrollmentSlug}/`);
       enrollmentUrl.searchParams.set('itoken', invitation.pk);
       enrollmentUrl.searchParams.set('next', `https://${config.portalHost}/?welcome=1`);
-      return json(res, 201, { url: enrollmentUrl.toString(), username, expires_at: expiresAt });
+      enrollmentUrl.searchParams.set('room', roomId);
+      return json(res, 201, { url: enrollmentUrl.toString(), username, room_id: roomId, expires_at: expiresAt });
     }
 
     if (url.pathname === '/api/notifications/devices' && req.method === 'POST') {
@@ -522,7 +556,9 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === '/api/messages' && req.method === 'GET') {
-      const messages = messageRows(Number(url.searchParams.get('after') || 0), Number(url.searchParams.get('limit') || 100));
+      const room = authorizedRoom(user, url.searchParams.get('room'));
+      if (!room) return json(res, 403, { error: 'room_forbidden' });
+      const messages = messageRows(room.id, Number(url.searchParams.get('after') || 0), Number(url.searchParams.get('limit') || 100));
       if (webUser(req)) {
         for (const message of messages) {
           if (message.author_id !== user && setReceipt(message.id, user, 'read')) {
@@ -530,23 +566,25 @@ const server = createServer(async (req, res) => {
           }
         }
       }
-      return json(res, 200, { messages: messageRows(Number(url.searchParams.get('after') || 0), Number(url.searchParams.get('limit') || 100)) });
+      return json(res, 200, { room, messages: messageRows(room.id, Number(url.searchParams.get('after') || 0), Number(url.searchParams.get('limit') || 100)) });
     }
     if (url.pathname === '/api/messages' && req.method === 'POST') {
       if (webUser(req) && !sameOrigin(req)) return json(res, 403, { error: 'origin_rejected' });
       const payload = await body(req);
+      const room = authorizedRoom(user, payload.room_id);
+      if (!room) return json(res, 403, { error: 'room_forbidden' });
       const text = typeof payload.body === 'string' ? payload.body.trim() : '';
       const clientId = String(payload.client_id || '').slice(0, 80);
       if (!text || [...text].length > 140 || !clientId) return json(res, 400, { error: 'invalid_message', max_length: 140 });
       let result;
       try {
-        result = db.prepare("INSERT INTO messages(conversation_id, author_id, client_id, body, created_at) VALUES ('family', ?, ?, ?, ?)").run(user, clientId, text, Date.now());
+        result = db.prepare('INSERT INTO messages(conversation_id, author_id, client_id, body, created_at) VALUES (?, ?, ?, ?, ?)').run(room.id, user, clientId, text, Date.now());
       } catch (error) {
         if (!String(error).includes('UNIQUE')) throw error;
       }
       const row = db.prepare('SELECT id FROM messages WHERE author_id = ? AND client_id = ?').get(user, clientId);
       setReceipt(row.id, user, 'server');
-      const message = messageRows(row.id - 1, 1)[0];
+      const message = messageRows(room.id, row.id - 1, 1)[0];
       if (result) { publish('message', message); sendExpoNotifications(message); }
       return json(res, result ? 201 : 200, { message });
     }
@@ -555,6 +593,8 @@ const server = createServer(async (req, res) => {
       const clientId = String(req.headers['x-client-id'] || '').slice(0, 80);
       const sampleRate = Number(req.headers['x-sample-rate'] || 8000);
       const samples = await rawBody(req);
+      const room = authorizedRoom(user, req.headers['x-room-id']);
+      if (!room) return json(res, 403, { error: 'room_forbidden' });
       if (!clientId || sampleRate !== 8000 || !samples.length || samples.length > 80_000 || samples.length % 2) {
         return json(res, 400, { error: 'invalid_voice_clip', max_seconds: 5, format: 'pcm_s16le_8000_mono' });
       }
@@ -562,8 +602,8 @@ const server = createServer(async (req, res) => {
       try {
         const result = db.prepare(`
           INSERT INTO messages(conversation_id, author_id, client_id, type, body, created_at)
-          VALUES ('family', ?, ?, 'voice', '[voice]', ?)
-        `).run(user, clientId, Date.now());
+          VALUES (?, ?, ?, 'voice', '[voice]', ?)
+        `).run(room.id, user, clientId, Date.now());
         const messageId = Number(result.lastInsertRowid);
         const fileName = `${messageId}-${randomBytes(8).toString('hex')}.pcm`;
         writeFileSync(join(voiceDir, fileName), samples, { mode: 0o600 });
@@ -577,13 +617,15 @@ const server = createServer(async (req, res) => {
       }
       const row = db.prepare('SELECT id FROM messages WHERE author_id = ? AND client_id = ?').get(user, clientId);
       setReceipt(row.id, user, 'server');
-      const message = messageRows(row.id - 1, 1)[0];
+      const message = messageRows(room.id, row.id - 1, 1)[0];
       if (inserted) { publish('message', message); sendExpoNotifications(message); }
       return json(res, inserted ? 201 : 200, { message });
     }
     const voiceMatch = url.pathname.match(/^\/api\/voice\/(\d+)\/audio$/);
     if (voiceMatch && req.method === 'GET') {
-      const clip = db.prepare('SELECT * FROM voice_clips WHERE message_id = ?').get(Number(voiceMatch[1]));
+      const clip = db.prepare(`SELECT vc.* FROM voice_clips vc JOIN messages m ON m.id = vc.message_id
+        JOIN conversation_members cm ON cm.conversation_id = m.conversation_id
+        WHERE vc.message_id = ? AND cm.user_id = ?`).get(Number(voiceMatch[1]), user);
       if (!clip) return json(res, 404, { error: 'voice_not_found' });
       const pcm = readFileSync(join(voiceDir, clip.file_name));
       const wantsWav = url.searchParams.get('format') === 'wav';
@@ -600,13 +642,15 @@ const server = createServer(async (req, res) => {
       const payload = await body(req);
       const messageId = Number(payload.message_id);
       if (!Number.isInteger(messageId) || !['delivered', 'read'].includes(payload.state)) return json(res, 400, { error: 'invalid_receipt' });
-      if (!db.prepare('SELECT 1 FROM messages WHERE id = ?').get(messageId)) return json(res, 404, { error: 'message_not_found' });
+      if (!db.prepare('SELECT 1 FROM messages m JOIN conversation_members cm ON cm.conversation_id=m.conversation_id WHERE m.id = ? AND cm.user_id = ?').get(messageId, user)) return json(res, 404, { error: 'message_not_found' });
       setReceipt(messageId, user, payload.state);
       publish('receipt', { message_id: messageId, user_id: user, state: payload.state, updated_at: Date.now() });
       return json(res, 200, { ok: true });
     }
     if (url.pathname === '/api/presence' && req.method === 'GET') {
-      return json(res, 200, { presence: presenceRows() });
+      const room = authorizedRoom(user, url.searchParams.get('room'));
+      if (!room) return json(res, 403, { error: 'room_forbidden' });
+      return json(res, 200, { room, presence: presenceRows(room.id) });
     }
     if (url.pathname === '/api/events' && req.method === 'GET' && webUser(req)) {
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive', 'x-accel-buffering': 'no' });
@@ -616,12 +660,14 @@ const server = createServer(async (req, res) => {
       return;
     }
     if (url.pathname === '/api/device/sync' && req.method === 'GET' && deviceUser(req)) {
+      const room = authorizedRoom(user, url.searchParams.get('room'));
+      if (!room) return json(res, 403, { error: 'room_forbidden' });
       const after = Number(url.searchParams.get('after') || 0);
       const receiptsAfter = Number(url.searchParams.get('receipts_after') || 0);
       const limit = Math.min(Math.max(Number(url.searchParams.get('limit') || 100), 1), 100);
       const shouldWait = url.searchParams.get('wait') !== '0';
-      let messages = messageRows(after, limit);
-      let receipts = receiptRows(receiptsAfter, limit);
+      let messages = messageRows(room.id, after, limit);
+      let receipts = receiptRows(room.id, receiptsAfter, limit);
       if (shouldWait && !messages.length && !receipts.length) {
         await new Promise((resolve) => {
           const timer = setTimeout(() => { longPolls.delete(wake); resolve(); }, 25_000);
@@ -637,7 +683,7 @@ const server = createServer(async (req, res) => {
           publish('receipt', { message_id: message.id, user_id: user, state: 'delivered', updated_at: Date.now() });
         }
       }
-      return json(res, 200, { server_time: Date.now(), messages, receipts, presence: presenceRows() });
+      return json(res, 200, { server_time: Date.now(), room, rooms: roomsFor(user), messages, receipts, presence: presenceRows(room.id) });
     }
     return json(res, 404, { error: 'not_found' });
   } catch (error) {
@@ -649,16 +695,17 @@ const server = createServer(async (req, res) => {
 server.on('upgrade', (req, socket) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const user = url.pathname === '/walkie' ? actor(req) : null;
+  const room = user ? authorizedRoom(user, url.searchParams.get('room')) : null;
   const key = req.headers['sec-websocket-key'];
   const validUpgrade = String(req.headers.upgrade || '').toLowerCase() === 'websocket' && req.headers['sec-websocket-version'] === '13';
   const deviceBearer = String(req.headers.authorization || '').startsWith('Bearer ');
-  if (!user || !key || !validUpgrade) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); return socket.destroy(); }
+  if (!user || !room || !key || !validUpgrade) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); return socket.destroy(); }
   if (!deviceBearer && !sameOrigin(req)) { socket.write('HTTP/1.1 403 Forbidden\r\n\r\n'); return socket.destroy(); }
   const accept = createHash('sha1').update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
   socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
-  walkieClients.set(socket, user); touchPresence(user);
-  socket.write(websocketFrame(JSON.stringify({ type: 'ready', user, speaker: walkieSpeaker })));
-  walkieBroadcast({ type: 'walkie_presence', user, state: 'online' }, 1, socket);
+  walkieClients.set(socket, { user, roomId: room.id }); touchPresence(user);
+  socket.write(websocketFrame(JSON.stringify({ type: 'ready', user, speaker: walkieSpeakers.get(room.id)?.user || null })));
+  walkieBroadcast(room.id, { type: 'walkie_presence', user, state: 'online' }, 1, socket);
   let buffered = Buffer.alloc(0);
   socket.on('data', (chunk) => {
     buffered = Buffer.concat([buffered, chunk]);
@@ -679,21 +726,22 @@ server.on('upgrade', (req, socket) => {
       if (opcode === 1) {
         let message; try { message = JSON.parse(payload); } catch { continue; }
         if (message.type === 'ptt_start') {
-          if (!walkieSpeaker) {
-            walkieSpeaker = user; walkieStartedAt = Date.now();
-            walkieBroadcast({ type: 'ptt_start', user, sample_rate: 8000, at: walkieStartedAt });
-          } else socket.write(websocketFrame(JSON.stringify({ type: 'busy', speaker: walkieSpeaker })));
-        } else if (message.type === 'ptt_stop') releaseWalkie(user);
-      } else if (opcode === 2 && walkieSpeaker === user) {
-        if (Date.now() - walkieStartedAt > 30_000) releaseWalkie(user, 'timeout');
-        else walkieBroadcast(payload, 2, socket);
+          const speaker = walkieSpeakers.get(room.id);
+          if (!speaker) {
+            const startedAt = Date.now(); walkieSpeakers.set(room.id, { user, startedAt });
+            walkieBroadcast(room.id, { type: 'ptt_start', user, sample_rate: 8000, at: startedAt });
+          } else socket.write(websocketFrame(JSON.stringify({ type: 'busy', speaker: speaker.user })));
+        } else if (message.type === 'ptt_stop') releaseWalkie(room.id, user);
+      } else if (opcode === 2 && walkieSpeakers.get(room.id)?.user === user) {
+        if (Date.now() - walkieSpeakers.get(room.id).startedAt > 30_000) releaseWalkie(room.id, user, 'timeout');
+        else walkieBroadcast(room.id, payload, 2, socket);
       }
     }
   });
   const close = () => {
     if (!walkieClients.delete(socket)) return;
-    releaseWalkie(user, 'disconnect');
-    walkieBroadcast({ type: 'walkie_presence', user, state: 'offline' });
+    releaseWalkie(room.id, user, 'disconnect');
+    walkieBroadcast(room.id, { type: 'walkie_presence', user, state: 'offline' });
   };
   socket.on('close', close); socket.on('error', close);
 });

@@ -97,6 +97,17 @@ test('only Papa can create a one-time password setup link', async () => {
   assert.equal(invitationUrl.pathname, '/if/flow/supachat-invitation-enrollment/');
   assert.match(invitationUrl.searchParams.get('itoken'), /^[0-9a-f-]+$/);
   assert.equal(invitationUrl.searchParams.get('next'), 'https://supachat.net/?welcome=1');
+  assert.equal(invitationUrl.searchParams.get('room'), 'family');
+  assert.equal(invitation.room_id, 'family');
+
+  const kbudsResponse = await fetch(`http://127.0.0.1:${port}/api/admin/invitations`, {
+    method: 'POST', headers: { authorization: `Bearer ${nativeSessionToken}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'knowltown.friend', display_name: 'Knowlton Friend', room_id: 'k-buds' }),
+  });
+  assert.equal(kbudsResponse.status, 201);
+  const kbudsInvitation = await kbudsResponse.json();
+  assert.equal(new URL(kbudsInvitation.url).pathname, '/if/flow/supachat-k-buds-invitation-enrollment/');
+  assert.equal(kbudsInvitation.room_id, 'k-buds');
 
   const memberHeaders = { 'x-forwarded-host': 'supachat.net', 'x-authentik-uid': 'uid-member', 'x-authentik-username': 'member@example.test', 'x-authentik-name': 'Member' };
   const rejected = await fetch(`http://127.0.0.1:${port}/api/admin/invitations`, {
@@ -124,7 +135,7 @@ test('native app session registers an Expo notification destination', async () =
 });
 
 test('Authentik provisions independent web users into the family room', async () => {
-  const headers = { 'x-forwarded-host': 'supachat.net', 'x-authentik-uid': 'uid-friend-1', 'x-authentik-username': 'friend@example.test', 'x-authentik-name': 'Friendly Person' };
+  const headers = { 'x-forwarded-host': 'supachat.net', 'x-authentik-uid': 'uid-friend-1', 'x-authentik-username': 'friend@example.test', 'x-authentik-name': 'Friendly Person', 'x-authentik-groups': 'SupaChat Family' };
   const session = await fetch(`http://127.0.0.1:${port}/api/session`, { headers });
   assert.equal(session.status, 200);
   const profile = (await session.json()).user;
@@ -135,6 +146,17 @@ test('Authentik provisions independent web users into the family room', async ()
     body: JSON.stringify({ client_id: 'friend-test-1', body: 'hello from authentik' }),
   });
   assert.equal(sent.status, 201);
+});
+
+test('K-BUDS membership cannot read or write Family', async () => {
+  const headers = { 'x-forwarded-host': 'supachat.net', 'x-authentik-uid': 'uid-kbuds-1', 'x-authentik-username': 'knowltown.friend', 'x-authentik-name': 'Knowlton Friend', 'x-authentik-groups': 'SupaChat K-BUDS' };
+  const session = await fetch(`http://127.0.0.1:${port}/api/session`, { headers }).then((response) => response.json());
+  assert.deepEqual(session.rooms.map((room) => room.id), ['k-buds']);
+  assert.equal((await fetch(`http://127.0.0.1:${port}/api/messages?room=family`, { headers })).status, 403);
+  const sent = await fetch(`http://127.0.0.1:${port}/api/messages`, { method:'POST', headers:{...headers,origin:'https://supachat.net','content-type':'application/json'}, body:JSON.stringify({client_id:'kbuds-only-1',body:'hello K-BUDS',room_id:'k-buds'}) });
+  assert.equal(sent.status, 201);
+  const family = await fetch(`http://127.0.0.1:${port}/api/messages?room=family`, {headers:{cookie}}).then((response) => response.json());
+  assert.equal(family.messages.some((message) => message.client_id === 'kbuds-only-1'), false);
 });
 
 test('Papa Authentik identity maps to existing Papa history', async () => {
