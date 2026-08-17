@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
+import { normalizeSpell, parseChallenge, resolveRound } from './duel.mjs';
 
 const sourceRoot = dirname(fileURLToPath(import.meta.url));
 const webRoot = join(sourceRoot, '..', 'web');
@@ -110,6 +111,25 @@ db.exec(`
     last_error TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id, id);
+  CREATE TABLE IF NOT EXISTS duels (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    challenger_id TEXT NOT NULL REFERENCES users(id), opponent_id TEXT NOT NULL REFERENCES users(id),
+    status TEXT NOT NULL CHECK (status IN ('pending','active','complete','declined')),
+    challenger_score INTEGER NOT NULL DEFAULT 0, opponent_score INTEGER NOT NULL DEFAULT 0,
+    challenger_protego INTEGER NOT NULL DEFAULT 0, opponent_protego INTEGER NOT NULL DEFAULT 0,
+    round_number INTEGER NOT NULL DEFAULT 1, winner_id TEXT REFERENCES users(id),
+    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS duel_choices (
+    duel_id INTEGER NOT NULL REFERENCES duels(id), round_number INTEGER NOT NULL,
+    user_id TEXT NOT NULL REFERENCES users(id), spell TEXT NOT NULL, submitted_at INTEGER NOT NULL,
+    PRIMARY KEY (duel_id, round_number, user_id)
+  );
+  CREATE TABLE IF NOT EXISTS duel_rounds (
+    duel_id INTEGER NOT NULL REFERENCES duels(id), round_number INTEGER NOT NULL,
+    challenger_spell TEXT NOT NULL, opponent_spell TEXT NOT NULL, winner_id TEXT REFERENCES users(id), reason TEXT NOT NULL, resolved_at INTEGER NOT NULL,
+    PRIMARY KEY (duel_id, round_number)
+  );
 `);
 try { db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('admin', 'member'))"); } catch (error) {
   if (!String(error).includes('duplicate column')) throw error;
@@ -387,6 +407,58 @@ function publish(event, payload) {
   longPolls.clear();
 }
 
+function duelRowFor(user) {
+  return db.prepare("SELECT * FROM duels WHERE status IN ('pending','active') AND (challenger_id = ? OR opponent_id = ?) ORDER BY id DESC LIMIT 1").get(user, user);
+}
+
+function duelState(user, duelId = null) {
+  const duel = duelId ? db.prepare('SELECT * FROM duels WHERE id=? AND (challenger_id=? OR opponent_id=?)').get(duelId, user, user) : duelRowFor(user);
+  if (!duel) return null;
+  const challenger = db.prepare('SELECT id, display_name, short_name FROM users WHERE id = ?').get(duel.challenger_id);
+  const opponent = db.prepare('SELECT id, display_name, short_name FROM users WHERE id = ?').get(duel.opponent_id);
+  const ownChoice = db.prepare('SELECT spell FROM duel_choices WHERE duel_id = ? AND round_number = ? AND user_id = ?').get(duel.id, duel.round_number, user);
+  const lastRound = db.prepare('SELECT * FROM duel_rounds WHERE duel_id = ? ORDER BY round_number DESC LIMIT 1').get(duel.id);
+  return { id: duel.id, status: duel.status, round_number: duel.round_number, challenger, opponent,
+    challenger_score: duel.challenger_score, opponent_score: duel.opponent_score,
+    challenged_by_me: duel.challenger_id === user, my_choice_locked: Boolean(ownChoice), winner_id: duel.winner_id || null, last_round: lastRound || null };
+}
+
+function challengeDuel(user, opponentName) {
+  const wanted = String(opponentName).trim().toLowerCase();
+  const opponent = db.prepare('SELECT id FROM users WHERE revoked_at IS NULL AND id <> ? AND (lower(id)=? OR lower(display_name)=? OR lower(short_name)=?) LIMIT 1').get(user, wanted, wanted, wanted);
+  if (!opponent) return {error:'duelist_not_found'};
+  const mine = duelRowFor(user); const theirs = duelRowFor(opponent.id);
+  if (mine && mine.id !== theirs?.id) return {error:'already_dueling'};
+  if (theirs && theirs.status === 'pending' && theirs.challenger_id === opponent.id && theirs.opponent_id === user) {
+    db.prepare("UPDATE duels SET status='active', updated_at=? WHERE id=?").run(Date.now(), theirs.id);
+    const first = duelState(user); publish('duel', {duel_id:theirs.id}); return {duel:first};
+  }
+  if (mine) return {duel:duelState(user)};
+  const now = Date.now();
+  db.prepare("INSERT INTO duels(challenger_id,opponent_id,status,created_at,updated_at) VALUES (?,?,'pending',?,?)").run(user, opponent.id, now, now);
+  const result = duelState(user); publish('duel', {duel_id:result.id}); return {duel:result};
+}
+
+function chooseDuelSpell(user, duelId, rawSpell) {
+  const spell = normalizeSpell(rawSpell); const duel = db.prepare("SELECT * FROM duels WHERE id=? AND status='active' AND (challenger_id=? OR opponent_id=?)").get(duelId, user, user);
+  if (!duel || !spell) return {error:!duel?'duel_not_active':'invalid_spell'};
+  try { db.prepare('INSERT INTO duel_choices(duel_id,round_number,user_id,spell,submitted_at) VALUES (?,?,?,?,?)').run(duel.id, duel.round_number, user, spell, Date.now()); }
+  catch (error) { if (!String(error).includes('UNIQUE')) throw error; return {error:'choice_locked'}; }
+  const choices = db.prepare('SELECT user_id,spell FROM duel_choices WHERE duel_id=? AND round_number=?').all(duel.id, duel.round_number);
+  if (choices.length === 2) {
+    const firstSpell = choices.find(choice => choice.user_id === duel.challenger_id).spell;
+    const secondSpell = choices.find(choice => choice.user_id === duel.opponent_id).spell;
+    const resolved = resolveRound(firstSpell, secondSpell, duel.challenger_protego, duel.opponent_protego);
+    const winnerId = resolved.winner === 'first' ? duel.challenger_id : resolved.winner === 'second' ? duel.opponent_id : null;
+    let firstScore = duel.challenger_score + (winnerId === duel.challenger_id ? 1 : 0); let secondScore = duel.opponent_score + (winnerId === duel.opponent_id ? 1 : 0);
+    const complete = firstScore >= 2 || secondScore >= 2;
+    db.prepare('INSERT INTO duel_rounds VALUES (?,?,?,?,?,?,?)').run(duel.id, duel.round_number, firstSpell, secondSpell, winnerId, resolved.reason, Date.now());
+    db.prepare("UPDATE duels SET status=?,challenger_score=?,opponent_score=?,challenger_protego=?,opponent_protego=?,round_number=round_number+1,winner_id=?,updated_at=? WHERE id=?")
+      .run(complete?'complete':'active', firstScore, secondScore, resolved.firstProtegoStreak, resolved.secondProtegoStreak, complete?winnerId:null, Date.now(), duel.id);
+  }
+  publish('duel', {duel_id:duel.id}); return {duel:duelState(user, duel.id), resolved:choices.length === 2};
+}
+
 function setReceipt(messageId, user, state) {
   const rank = { server: 0, delivered: 1, read: 2 };
   const current = db.prepare('SELECT state FROM receipts WHERE message_id = ? AND user_id = ?').get(messageId, user);
@@ -499,6 +571,17 @@ const server = createServer(async (req, res) => {
 
     if (url.pathname === '/api/rooms' && req.method === 'GET') return json(res, 200, { rooms: roomsFor(user) });
 
+    if (url.pathname === '/api/duels/current' && req.method === 'GET') return json(res, 200, { duel: duelState(user) });
+    if (url.pathname === '/api/duels/challenge' && req.method === 'POST') {
+      const payload = await body(req); const result = challengeDuel(user, payload.opponent);
+      return json(res, result.error ? (result.error === 'duelist_not_found' ? 404 : 409) : 200, result);
+    }
+    const duelChoiceMatch = url.pathname.match(/^\/api\/duels\/(\d+)\/choice$/);
+    if (duelChoiceMatch && req.method === 'POST') {
+      const payload = await body(req); const result = chooseDuelSpell(user, Number(duelChoiceMatch[1]), payload.spell);
+      return json(res, result.error ? 409 : 200, result);
+    }
+
     if (url.pathname === '/api/admin/invitations' && req.method === 'POST') {
       const profile = db.prepare('SELECT role FROM users WHERE id = ?').get(user);
       if (profile?.role !== 'admin') return json(res, 403, { error: 'admin_required' });
@@ -585,8 +668,11 @@ const server = createServer(async (req, res) => {
       const row = db.prepare('SELECT id FROM messages WHERE author_id = ? AND client_id = ?').get(user, clientId);
       setReceipt(row.id, user, 'server');
       const message = messageRows(room.id, row.id - 1, 1)[0];
+      let duel;
+      const opponent = parseChallenge(text);
+      if (opponent) duel = challengeDuel(user, opponent).duel;
       if (result) { publish('message', message); sendExpoNotifications(message); }
-      return json(res, result ? 201 : 200, { message });
+      return json(res, result ? 201 : 200, { message, duel });
     }
     if (url.pathname === '/api/voice' && req.method === 'POST') {
       if (webUser(req) && !sameOrigin(req)) return json(res, 403, { error: 'origin_rejected' });
@@ -675,15 +761,15 @@ const server = createServer(async (req, res) => {
           longPolls.add(wake);
           res.on('close', () => { clearTimeout(timer); longPolls.delete(wake); resolve(); });
         });
-        messages = messageRows(after, limit);
-        receipts = receiptRows(receiptsAfter, limit);
+        messages = messageRows(room.id, after, limit);
+        receipts = receiptRows(room.id, receiptsAfter, limit);
       }
       for (const message of messages) {
         if (message.author_id !== user && setReceipt(message.id, user, 'delivered')) {
           publish('receipt', { message_id: message.id, user_id: user, state: 'delivered', updated_at: Date.now() });
         }
       }
-      return json(res, 200, { server_time: Date.now(), room, rooms: roomsFor(user), messages, receipts, presence: presenceRows(room.id) });
+      return json(res, 200, { server_time: Date.now(), room, rooms: roomsFor(user), messages, receipts, presence: presenceRows(room.id), duel: duelState(user) });
     }
     return json(res, 404, { error: 'not_found' });
   } catch (error) {

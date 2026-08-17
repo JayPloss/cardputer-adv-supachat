@@ -247,6 +247,28 @@ test('Albie can send a message to Papa', async () => {
   assert.equal(history.messages.at(-1).receipts.find((item) => item.user_id === 'papa').state, 'read');
 });
 
+test('Papa and Albie reciprocate a duel and resolve a best-of-three privately', async () => {
+  const send = (headers, body) => fetch(`http://127.0.0.1:${port}/api/messages`, {method:'POST', headers:{...headers,'content-type':'application/json'}, body:JSON.stringify({client_id:randomBytes(8).toString('hex'),body})});
+  const papaHeaders = {cookie}; const albieHeaders = {authorization:`Bearer ${deviceToken}`};
+  assert.equal((await send(papaHeaders, 'duel <Albie>')).status, 201);
+  const accepted = await send(albieHeaders, 'duel Papa');
+  const duel = (await accepted.json()).duel;
+  assert.equal(duel.status, 'active');
+  const choose = async (headers, spell) => fetch(`http://127.0.0.1:${port}/api/duels/${duel.id}/choice`, {method:'POST',headers:{...headers,'content-type':'application/json'},body:JSON.stringify({spell})}).then(response => response.json());
+  const locked = await choose(papaHeaders, 'Sectum Sempra!');
+  assert.equal(locked.duel.my_choice_locked, true);
+  assert.equal(JSON.stringify(locked).includes('sectumsempra'), false);
+  let state = (await choose(albieHeaders, 'Langlock')).duel;
+  assert.equal(state.challenger_score, 1);
+  for (let round = 0; round < 2; round++) { await choose(papaHeaders, 'Protego!'); state = (await choose(albieHeaders, 'Protego!')).duel; assert.equal(state.challenger_score, 1); }
+  await choose(papaHeaders, 'Protego!'); state = (await choose(albieHeaders, 'Langlock')).duel;
+  assert.equal(state.opponent_score, 1);
+  await choose(papaHeaders, 'Levicorpus'); state = (await choose(albieHeaders, 'Sectum Sempra')).duel;
+  assert.equal(state.status, 'complete');
+  assert.equal(state.challenger_score, 2);
+  assert.equal(state.winner_id, 'papa');
+});
+
 test('Juju has an independent device identity and shared-family sync', async () => {
   const headers = { authorization: `Bearer ${jujuToken}` };
   const sync = await fetch(`http://127.0.0.1:${port}/api/device/sync?after=0`, { headers }).then((r) => r.json());
