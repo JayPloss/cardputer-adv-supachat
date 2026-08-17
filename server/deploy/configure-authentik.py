@@ -94,10 +94,8 @@ with transaction.atomic():
     group, _ = Group.objects.get_or_create(name="SupaChat Users")
     family_group, _ = Group.objects.get_or_create(name="SupaChat Family")
     kbuds_group, _ = Group.objects.get_or_create(name="SupaChat K-BUDS")
-    family_group.parent = group
-    family_group.save(update_fields=["parent"])
-    kbuds_group.parent = group
-    kbuds_group.save(update_fields=["parent"])
+    family_group.parents.set([group])
+    kbuds_group.parents.set([group])
     for legacy_user in group.users.all():
         legacy_user.groups.add(family_group)
     for username, name in (("papa", "Papa"), ("albie", "Albie"), ("julien", "Julien")):
