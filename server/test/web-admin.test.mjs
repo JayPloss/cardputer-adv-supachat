@@ -29,3 +29,10 @@ test('newly enrolled users receive a one-time welcome modal', () => {
   assert.match(app, /supachat-welcomed:/);
   assert.match(app, /welcomeZone\.showModal\(\)/);
 });
+
+test('web messaging exposes room-safe duel and standard message controls',()=>{
+  assert.match(html,/id="duel-zone"/);assert.match(html,/id="replying"/);
+  assert.match(app,/api\/duels\/current\?room=/);assert.match(app,/reply_to_id:replyTarget/);
+  assert.match(app,/api\/typing/);assert.match(app,/\/reactions/);assert.match(app,/message_update/);
+  assert.match(app,/room\.unread_count/);
+});

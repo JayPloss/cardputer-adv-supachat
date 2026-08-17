@@ -70,18 +70,26 @@ The intended implementation layers are:
 
 ## Implemented MVP design
 
-The current vertical slice deliberately starts with the smallest complete texting path:
+The current vertical slice supports private multi-room messaging:
 
 - Papa uses a password-authenticated browser session.
 - Albie's pre-registered device uses a revocable bearer token stored in NVS.
-- Both identities share the `family` conversation.
+- Membership independently gates every room; requests without an explicit room are rejected.
 - The server schema already supports `shared`, `room`, and `direct` conversation kinds.
 - Messages use client-generated idempotency keys and are limited to 140 Unicode characters.
-- The Cardputer synchronizes through authenticated HTTPS long-polling and keeps the latest 100 messages locally.
+- The Cardputer synchronizes through authenticated HTTPS polling and keeps a separate 100-message SD snapshot per room.
 - SQLite retains server history indefinitely for the MVP.
 - Per-participant `server`, `delivered`, and `read` receipts plus last-seen presence are modeled separately.
 
 The service can read message content in version 1. TLS protects messages in transit; end-to-end encryption is explicitly deferred. Revoking Albie prevents new device access without deleting his history.
+
+## Messaging and duels
+
+- New messages are limited to one per user per second at the server; idempotent retries remain safe.
+- Web and Android support replies, reactions, edits/deletes, typing state, unread room counts, and notification deep-links.
+- Cardputer renders replies/reactions/edits/deletes, sends `/r your reply` to reply to the latest incoming message, and sends `/like` to toggle a thumbs-up on it.
+- A room member starts a duel by sending `duel Name`; the other member sends the reciprocal command to accept.
+- Active Cardputer duels use `1` Protego, `2` Sectum Sempra, `3` Levicorpus, and `4` Langlock. Choices stay secret until both players lock a spell; first to two points wins.
 
 ## Network behavior
 

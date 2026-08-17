@@ -20,7 +20,7 @@ try {
     const page = await browser.newPage({viewport});
     await page.route('**/api/**', async (route) => {
       const url = route.request().url();
-      const json = url.includes('/session') ? {user:{id:'papa',display_name:'Papa',role:'admin'},rooms:[{id:'family',name:'Family'},{id:'k-buds',name:'K-BUDS'}]} : url.includes('/messages') ? {messages:[]} : url.includes('/presence') ? {presence:[]} : {url:'https://auth.supachat.net/if/flow/supachat-invitation-enrollment/?itoken=test'};
+      const json = url.includes('/session') ? {user:{id:'papa',display_name:'Papa',role:'admin'},rooms:[{id:'family',name:'Family'},{id:'k-buds',name:'K-BUDS',unread_count:2}]} : url.includes('/messages') ? {messages:[]} : url.includes('/presence') ? {presence:[]} : url.includes('/duels/current') ? {duel:{id:1,status:'active',round_number:1,challenger:{id:'papa',display_name:'Papa'},opponent:{id:'albie',display_name:'Albie'},challenger_score:0,opponent_score:0,my_choice_locked:false}} : url.includes('/admin/groups') ? {groups:[{id:'family',name:'Family',member_count:2,members:[{id:'papa',display_name:'Papa',kind:'web'}]}],users:[{id:'papa',display_name:'Papa'}]} : {url:'https://auth.supachat.net/if/flow/supachat-invitation-enrollment/?itoken=test',room_id:'family'};
       await route.fulfill({status:url.includes('/invitations') ? 201 : 200,contentType:'application/json',body:JSON.stringify(json)});
     });
     await page.addInitScript(() => {

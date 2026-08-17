@@ -25,6 +25,13 @@ const composerLabel = document.querySelector('#composer-label');
 const voiceRoomNote = document.querySelector('#voice-room-note');
 const welcomeTitle = document.querySelector('#welcome-title');
 const welcomeRoomCopy = document.querySelector('#welcome-room-copy');
+const replying = document.querySelector('#replying');
+const replyingText = document.querySelector('#replying-text');
+const replyCancel = document.querySelector('#reply-cancel');
+const duelZone = document.querySelector('#duel-zone');
+const duelTitle = document.querySelector('#duel-title');
+const duelStateEl = document.querySelector('#duel-state');
+const duelSpells = document.querySelector('#duel-spells');
 const newGroupForm = document.querySelector('#new-group-form');
 const groupState = document.querySelector('#group-state');
 const manageRoom = document.querySelector('#manage-room');
@@ -34,6 +41,8 @@ const addMember = document.querySelector('#add-member');
 let adminGroups = []; let adminUsers = [];
 const welcomeRequested = new URLSearchParams(location.search).get('welcome') === '1';
 let messages = [];
+let replyTarget = null;
+let duel = null;
 let currentUser = null;
 let rooms = [];
 let currentRoom = new URLSearchParams(location.search).get('room') || localStorage.getItem('supachat-room') || 'family';
@@ -59,8 +68,11 @@ const receiptLabel = (message) => {
 function renderMessages(scroll = false) {
   messagesEl.innerHTML = messages.length ? messages.map((message) => `
     <article class="message ${message.author_id === currentUser?.id ? 'mine' : ''} ${identityClass(message.author_id)}" data-id="${message.id}">
-      <div class="bubble">${message.type === 'voice' ? `<button class="voice-play" data-voice-id="${message.id}">▶ Play voice</button><span class="voice-wave">${Math.round((message.voice?.duration_ms || 0) / 100) / 10}s</span>` : escapeHtml(message.body)}</div>
-      <div class="message-meta"><strong>${escapeHtml(message.author_name)}</strong><span>${time(message.created_at)}</span>${message.author_id === currentUser?.id ? `<span class="receipt">${receiptLabel(message)}</span>` : ''}</div>
+      ${message.reply_to ? `<div class="reply-preview">↪ ${escapeHtml(message.reply_to.author_name)}: ${escapeHtml(message.reply_to.deleted_at ? 'Deleted message' : message.reply_to.body)}</div>` : ''}
+      <div class="bubble">${message.deleted_at ? '<em>Message deleted</em>' : message.type === 'voice' ? `<button class="voice-play" data-voice-id="${message.id}">▶ Play voice</button><span class="voice-wave">${Math.round((message.voice?.duration_ms || 0) / 100) / 10}s</span>` : escapeHtml(message.body)}</div>
+      <div class="reaction-list">${(message.reactions||[]).map(reaction=>`<button data-react="${reaction.emoji}" title="${escapeHtml(reaction.names)}">${reaction.emoji} ${reaction.count}</button>`).join('')}</div>
+      <div class="message-actions">${message.deleted_at?'':`<button data-reply>Reply</button>${['👍','❤️','😂','🎉'].map(emoji=>`<button data-react="${emoji}">${emoji}</button>`).join('')}${message.author_id===currentUser?.id&&message.type==='text'?'<button data-edit>Edit</button><button data-delete>Delete</button>':''}`}</div>
+      <div class="message-meta"><strong>${escapeHtml(message.author_name)}</strong><span>${time(message.created_at)}${message.edited_at?' · edited':''}</span>${message.author_id === currentUser?.id ? `<span class="receipt">${receiptLabel(message)}</span>` : ''}</div>
     </article>`).join('') : '<p class="empty">No messages yet.<br>Say the first thing.</p>';
   if (scroll) messagesEl.scrollTop = messagesEl.scrollHeight;
 }
@@ -144,6 +156,11 @@ async function playPcm(bytes) {
   source.start(nextPlaybackAt); nextPlaybackAt += buffer.duration;
 }
 messagesEl.addEventListener('click', async (event) => {
+  const article=event.target.closest('[data-id]'); const message=messages.find(item=>item.id===Number(article?.dataset.id));
+  if(event.target.closest('[data-reply]')&&message){setReply(message);input.focus();return;}
+  const reaction=event.target.closest('[data-react]'); if(reaction&&message){const result=await api(`api/messages/${message.id}/reactions`,{method:'POST',body:JSON.stringify({emoji:reaction.dataset.react})});messages=messages.map(item=>item.id===message.id?result.message:item);renderMessages();return;}
+  if(event.target.closest('[data-edit]')&&message){const value=prompt('Edit message',message.body);if(value?.trim()){const result=await api(`api/messages/${message.id}`,{method:'PATCH',body:JSON.stringify({body:value.trim()})});messages=messages.map(item=>item.id===message.id?result.message:item);renderMessages();}return;}
+  if(event.target.closest('[data-delete]')&&message){const result=await api(`api/messages/${message.id}`,{method:'DELETE'});messages=messages.map(item=>item.id===message.id?result.message:item);renderMessages();return;}
   const button = event.target.closest('[data-voice-id]'); if (!button) return;
   button.disabled = true; button.textContent = 'Playing…';
   try {
@@ -227,7 +244,7 @@ async function refresh() {
   const session = await api('api/session');
   currentUser = session.user; rooms = session.rooms || [];
   if (!rooms.some((room) => room.id === currentRoom)) currentRoom = rooms[0]?.id || 'family';
-  roomSelect.innerHTML = rooms.map((room) => `<option value="${escapeHtml(room.id)}">${escapeHtml(room.name)}</option>`).join('');
+  roomSelect.innerHTML = rooms.map((room) => `<option value="${escapeHtml(room.id)}">${escapeHtml(room.name)}${room.unread_count ? ` (${room.unread_count})` : ''}</option>`).join('');
   roomSelect.value = currentRoom;
   const activeRoomName = rooms.find((room) => room.id === currentRoom)?.name || 'this room';
   composerLabel.textContent = `Message ${activeRoomName}`;
@@ -235,12 +252,13 @@ async function refresh() {
   welcomeTitle.textContent = `You’re in ${activeRoomName}.`;
   welcomeRoomCopy.textContent = `This invitation added you to the ${activeRoomName} conversation.`;
   const requestedRoom = currentRoom;
-  const [{ messages: next }, { presence }] = await Promise.all([api(`api/messages?room=${encodeURIComponent(requestedRoom)}&limit=100`), api(`api/presence?room=${encodeURIComponent(requestedRoom)}`)]);
+  const [{ messages: next }, { presence }, duelResult] = await Promise.all([api(`api/messages?room=${encodeURIComponent(requestedRoom)}&limit=100`), api(`api/presence?room=${encodeURIComponent(requestedRoom)}`), api(`api/duels/current?room=${encodeURIComponent(requestedRoom)}`)]);
   if (currentRoom !== requestedRoom) return;
   adminOpen.hidden = currentUser?.role !== 'admin';
   messages = next;
   renderMessages(true);
   renderPresence(presence);
+  duel=duelResult.duel;renderDuel();
   if (welcomeRequested) {
     const welcomeKey = `supachat-welcomed:${currentUser.id}`;
     if (!localStorage.getItem(welcomeKey)) welcomeZone.showModal();
@@ -248,7 +266,9 @@ async function refresh() {
   }
 }
 roomSelect.addEventListener('change', async () => {
+  const previousRoom=currentRoom;if(typingActive)api('api/typing',{method:'POST',body:JSON.stringify({room_id:previousRoom,typing:false})}).catch(()=>{});
   currentRoom = roomSelect.value;
+  typingActive=false;clearTimeout(typingTimer);setReply(null);duel=null;renderDuel();
   localStorage.setItem('supachat-room', currentRoom);
   const url = new URL(location.href); url.searchParams.set('room', currentRoom); history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
   messages = []; renderMessages(true); walkieSocket?.close(); await refresh();
@@ -278,6 +298,19 @@ async function loadAdminGroups(selected = manageRoom.value) {
   inviteForm.elements.room_id.innerHTML = adminGroups.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join('');
   if (group) inviteForm.elements.room_id.value = group.id;
 }
+
+function setReply(message){replyTarget=message;replying.hidden=!message;if(message)replyingText.textContent=`Replying to ${message.author_name}: ${message.body.slice(0,60)}`;}
+replyCancel.addEventListener('click',()=>setReply(null));
+function renderDuel(){
+  duelZone.hidden=!duel;if(!duel)return;
+  const other=duel.challenger.id===currentUser.id?duel.opponent:duel.challenger;
+  duelTitle.textContent=`${duel.challenger.display_name} ${duel.challenger_score}–${duel.opponent_score} ${duel.opponent.display_name}`;
+  if(duel.status==='pending'){duelStateEl.textContent=duel.challenged_by_me?`Waiting for ${other.display_name} to answer with “duel ${currentUser.display_name}”.`:`Answer with “duel ${other.display_name}” to accept.`;duelSpells.innerHTML='';return;}
+  if(duel.status==='complete'){duelStateEl.textContent=duel.winner_id===currentUser.id?'You won.':'Duel complete.';duelSpells.innerHTML='';return;}
+  duelStateEl.textContent=duel.my_choice_locked?'Spell locked. Waiting for your opponent.':`Round ${duel.round_number}: choose secretly.`;
+  duelSpells.innerHTML=['Protego','Sectum Sempra','Levicorpus','Langlock'].map(spell=>`<button data-spell="${spell}" ${duel.my_choice_locked?'disabled':''}>${spell}</button>`).join('');
+}
+duelSpells.addEventListener('click',async(event)=>{const button=event.target.closest('[data-spell]');if(!button||!duel)return;const result=await api(`api/duels/${duel.id}/choice`,{method:'POST',body:JSON.stringify({room_id:currentRoom,spell:button.dataset.spell})});duel=result.duel;renderDuel();});
 adminOpen.addEventListener('click', async () => { adminZone.showModal(); try { await loadAdminGroups(currentRoom); } catch { groupState.textContent = 'Could not load groups.'; } });
 adminClose.addEventListener('click', () => adminZone.close());
 adminZone.addEventListener('click', (event) => { if (event.target === adminZone) adminZone.close(); });
@@ -315,7 +348,8 @@ inviteShare.addEventListener('click', async () => {
 function renderPresence(presence) {
   presenceEl.innerHTML = presence.map((person) => `<div class="person ${identityClass(person.user_id)}"><strong><span class="dot ${person.status}"></span>${escapeHtml(person.display_name)}</strong><small>${person.status === 'online' ? 'online' : person.last_seen_at ? `seen ${time(person.last_seen_at)}` : 'offline'}</small></div>`).join('');
 }
-input.addEventListener('input', () => count.textContent = [...input.value].length);
+let typingActive=false;let typingTimer;
+input.addEventListener('input', () => {count.textContent = [...input.value].length;if(!typingActive){typingActive=true;api('api/typing',{method:'POST',body:JSON.stringify({room_id:currentRoom,typing:true})}).catch(()=>{});}clearTimeout(typingTimer);typingTimer=setTimeout(()=>{typingActive=false;api('api/typing',{method:'POST',body:JSON.stringify({room_id:currentRoom,typing:false})}).catch(()=>{});},1800);});
 logout?.addEventListener('click', async () => {
   if (location.hostname === 'supachat.net') { location.href = '/outpost.goauthentik.io/sign_out'; return; }
   await api('logout', { method:'POST', body:'{}' });
@@ -328,7 +362,9 @@ composer.addEventListener('submit', async (event) => {
   sendState.textContent = 'Sending…';
   input.disabled = true;
   try {
-    await api('api/messages', { method:'POST', body:JSON.stringify({body:value,client_id:crypto.randomUUID(),room_id:currentRoom}) });
+    const result=await api('api/messages', { method:'POST', body:JSON.stringify({body:value,client_id:crypto.randomUUID(),room_id:currentRoom,reply_to_id:replyTarget?.id||null}) });
+    if(result.duel){duel=result.duel;renderDuel();}
+    setReply(null);typingActive=false;clearTimeout(typingTimer);api('api/typing',{method:'POST',body:JSON.stringify({room_id:currentRoom,typing:false})}).catch(()=>{});
     input.value = ''; count.textContent = '0'; sendState.textContent = 'Sent';
   } catch { sendState.textContent = 'Not sent — try again'; }
   finally { input.disabled = false; input.focus(); }
@@ -348,6 +384,9 @@ events.addEventListener('receipt', async () => {
   if (currentRoom !== requestedRoom) return;
   messages = result.messages; renderMessages();
 });
+events.addEventListener('message_update',(event)=>{const updated=JSON.parse(event.data);if(updated.conversation_id!==currentRoom)return;messages=messages.map(item=>item.id===updated.id?updated:item);renderMessages();});
+events.addEventListener('duel',async(event)=>{const update=JSON.parse(event.data);if(update.conversation_id!==currentRoom)return;duel=(await api(`api/duels/current?room=${encodeURIComponent(currentRoom)}`)).duel;renderDuel();});
+events.addEventListener('typing',(event)=>{const update=JSON.parse(event.data);if(update.conversation_id!==currentRoom||update.user_id===currentUser?.id)return;sendState.textContent=update.typing?'Someone is typing…':'Ready';});
 events.onerror = () => { sendState.textContent = 'Reconnecting…'; };
 setInterval(async () => { try { const requestedRoom=currentRoom; const result=await api(`api/presence?room=${encodeURIComponent(requestedRoom)}`); if(currentRoom===requestedRoom)renderPresence(result.presence); sendState.textContent = 'Ready'; } catch {} }, 20_000);
 refresh();

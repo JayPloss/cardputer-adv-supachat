@@ -8,7 +8,7 @@
   },
   "scripts": {
     "start": "node --experimental-sqlite src/server.mjs",
-    "test": "node --experimental-sqlite --test test/server.test.mjs"
+    "test": "node --experimental-sqlite --test test/server.test.mjs test/duel.test.mjs test/identity-colors.mjs test/web-admin.test.mjs"
   },
   "devDependencies": {
     "playwright": "^1.54.2",

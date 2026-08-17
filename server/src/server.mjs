@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
+import { normalizeSpell, parseChallenge, resolveRound } from './duel.mjs';
 
 const sourceRoot = dirname(fileURLToPath(import.meta.url));
 const webRoot = join(sourceRoot, '..', 'web');
@@ -119,6 +120,36 @@ db.exec(`
     last_error TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id, id);
+  CREATE TABLE IF NOT EXISTS message_reactions (
+    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id), emoji TEXT NOT NULL,
+    created_at INTEGER NOT NULL, PRIMARY KEY(message_id, user_id, emoji)
+  );
+  CREATE TABLE IF NOT EXISTS room_reads (
+    conversation_id TEXT NOT NULL REFERENCES conversations(id), user_id TEXT NOT NULL REFERENCES users(id),
+    last_read_message_id INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL,
+    PRIMARY KEY(conversation_id, user_id)
+  );
+  CREATE TABLE IF NOT EXISTS duels (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id),
+    challenger_id TEXT NOT NULL REFERENCES users(id), opponent_id TEXT NOT NULL REFERENCES users(id),
+    status TEXT NOT NULL CHECK(status IN ('pending','active','complete','declined','cancelled')),
+    challenger_score INTEGER NOT NULL DEFAULT 0, opponent_score INTEGER NOT NULL DEFAULT 0,
+    challenger_protego INTEGER NOT NULL DEFAULT 0, opponent_protego INTEGER NOT NULL DEFAULT 0,
+    round_number INTEGER NOT NULL DEFAULT 1, winner_id TEXT REFERENCES users(id),
+    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS duel_choices (
+    duel_id INTEGER NOT NULL REFERENCES duels(id) ON DELETE CASCADE, round_number INTEGER NOT NULL,
+    user_id TEXT NOT NULL REFERENCES users(id), spell TEXT NOT NULL, submitted_at INTEGER NOT NULL,
+    PRIMARY KEY(duel_id, round_number, user_id)
+  );
+  CREATE TABLE IF NOT EXISTS duel_rounds (
+    duel_id INTEGER NOT NULL REFERENCES duels(id) ON DELETE CASCADE, round_number INTEGER NOT NULL,
+    challenger_spell TEXT NOT NULL, opponent_spell TEXT NOT NULL, winner_id TEXT REFERENCES users(id),
+    reason TEXT NOT NULL, resolved_at INTEGER NOT NULL, PRIMARY KEY(duel_id, round_number)
+  );
 `);
 try { db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('admin', 'member'))"); } catch (error) {
   if (!String(error).includes('duplicate column')) throw error;
@@ -141,6 +172,8 @@ const longPolls = new Set();
 const walkieClients = new Map();
 const walkieSpeakers = new Map();
 const loginAttempts = new Map();
+const typingByRoom = new Map();
+const lastMessageAt = new Map();
 const assets = new Map([
   ['/app.css', ['text/css; charset=utf-8', readFileSync(join(webRoot, 'app.css'))]],
   ['/controls.css', ['text/css; charset=utf-8', readFileSync(join(webRoot, 'controls.css'))]],
@@ -205,11 +238,19 @@ function claimPendingRoomMemberships(userId, username) {
   const claim = db.prepare('UPDATE pending_room_memberships SET claimed_at = ? WHERE username = ? AND conversation_id = ?');
   for (const row of pending) { grant.run(row.conversation_id, userId); claim.run(now, username, row.conversation_id); }
 }
+for (const migration of [
+  'ALTER TABLE messages ADD COLUMN reply_to_id INTEGER REFERENCES messages(id)',
+  'ALTER TABLE messages ADD COLUMN edited_at INTEGER',
+  'ALTER TABLE messages ADD COLUMN deleted_at INTEGER',
+]) try { db.exec(migration); } catch (error) { if (!String(error).includes('duplicate column')) throw error; }
 
 function roomsFor(userId) {
-  return db.prepare(`SELECT c.id, c.name, COALESCE(MAX(m.id), 0) AS latest_message_id FROM conversations c JOIN conversation_members cm ON cm.conversation_id = c.id
+  return db.prepare(`SELECT c.id, c.name, COALESCE(MAX(m.id), 0) AS latest_message_id,
+    COUNT(CASE WHEN m.id > COALESCE(rr.last_read_message_id, 0) AND m.author_id <> ? THEN 1 END) AS unread_count
+    FROM conversations c JOIN conversation_members cm ON cm.conversation_id = c.id
     LEFT JOIN messages m ON m.conversation_id = c.id
-    WHERE cm.user_id = ? GROUP BY c.id, c.name ORDER BY CASE c.id WHEN 'family' THEN 0 ELSE 1 END, c.name`).all(userId);
+    LEFT JOIN room_reads rr ON rr.conversation_id = c.id AND rr.user_id = cm.user_id
+    WHERE cm.user_id = ? GROUP BY c.id, c.name ORDER BY CASE c.id WHEN 'family' THEN 0 ELSE 1 END, c.name`).all(userId, userId);
 }
 
 function authorizedRoom(userId, requested) {
@@ -341,20 +382,27 @@ function messageRows(roomId, after = 0, limit = 100) {
   const bounded = Math.min(Math.max(limit, 1), 100);
   const rows = after > 0 ? db.prepare(`
     SELECT m.id, m.client_id, m.conversation_id, m.author_id, u.display_name AS author_name,
-           u.short_name AS author_short, m.type, m.body, m.created_at
+           u.short_name AS author_short, m.type, m.body, m.created_at, m.reply_to_id, m.edited_at, m.deleted_at
     FROM messages m JOIN users u ON u.id = m.author_id
     WHERE m.conversation_id = ? AND m.id > ? ORDER BY m.id ASC LIMIT ?
   `).all(roomId, after, bounded) : db.prepare(`
     SELECT * FROM (
       SELECT m.id, m.client_id, m.conversation_id, m.author_id, u.display_name AS author_name,
-             u.short_name AS author_short, m.type, m.body, m.created_at
+             u.short_name AS author_short, m.type, m.body, m.created_at, m.reply_to_id, m.edited_at, m.deleted_at
       FROM messages m JOIN users u ON u.id = m.author_id
       WHERE m.conversation_id = ? ORDER BY m.id DESC LIMIT ?
     ) ORDER BY id ASC
   `).all(roomId, bounded);
   return rows.map((row) => ({
-    ...row, conversation_name: db.prepare('SELECT name FROM conversations WHERE id = ?').get(row.conversation_id)?.name,
+    ...row, body: row.deleted_at ? '' : row.body,
+    conversation_name: db.prepare('SELECT name FROM conversations WHERE id = ?').get(row.conversation_id)?.name,
     receipts: db.prepare('SELECT user_id, state, updated_at FROM receipts WHERE message_id = ?').all(row.id),
+    reactions: db.prepare(`SELECT mr.emoji, COUNT(*) AS count,
+      GROUP_CONCAT(u.display_name, ', ') AS names FROM message_reactions mr JOIN users u ON u.id=mr.user_id
+      WHERE mr.message_id=? GROUP BY mr.emoji ORDER BY mr.emoji`).all(row.id),
+    reply_to: row.reply_to_id ? db.prepare(`SELECT m.id, m.author_id, u.display_name AS author_name,
+      CASE WHEN m.deleted_at IS NULL THEN m.body ELSE '' END AS body, m.deleted_at
+      FROM messages m JOIN users u ON u.id=m.author_id WHERE m.id=? AND m.conversation_id=?`).get(row.reply_to_id, row.conversation_id) : null,
     voice: row.type === 'voice' ? db.prepare(`
       SELECT mime_type, sample_rate, sample_count, duration_ms, byte_length
       FROM voice_clips WHERE message_id = ?
@@ -395,6 +443,64 @@ function publish(event, payload) {
   for (const res of clients) res.write(packet);
   for (const wake of longPolls) wake();
   longPolls.clear();
+}
+
+function activeTyping(roomId, exceptUser) {
+  const now=Date.now(); const result=[];
+  for(const [key,value] of typingByRoom){if(value.expires_at<=now){typingByRoom.delete(key);continue;}if(key.startsWith(`${roomId}:`)&&value.user_id!==exceptUser)result.push(value);}
+  return result;
+}
+
+function markRoomRead(roomId,user,messageId){
+  db.prepare(`INSERT INTO room_reads(conversation_id,user_id,last_read_message_id,updated_at) VALUES (?,?,?,?)
+    ON CONFLICT(conversation_id,user_id) DO UPDATE SET last_read_message_id=MAX(last_read_message_id,excluded.last_read_message_id),updated_at=excluded.updated_at`).run(roomId,user,messageId,Date.now());
+}
+
+function duelRowFor(user, roomId) {
+  return db.prepare("SELECT * FROM duels WHERE conversation_id=? AND status IN ('pending','active') AND (challenger_id=? OR opponent_id=?) ORDER BY id DESC LIMIT 1").get(roomId, user, user);
+}
+
+function duelState(user, roomId, duelId = null) {
+  const duel = duelId ? db.prepare('SELECT * FROM duels WHERE id=? AND conversation_id=? AND (challenger_id=? OR opponent_id=?)').get(duelId, roomId, user, user) : duelRowFor(user, roomId);
+  if (!duel) return null;
+  const challenger = db.prepare('SELECT id, display_name, short_name FROM users WHERE id=?').get(duel.challenger_id);
+  const opponent = db.prepare('SELECT id, display_name, short_name FROM users WHERE id=?').get(duel.opponent_id);
+  const ownChoice = db.prepare('SELECT 1 FROM duel_choices WHERE duel_id=? AND round_number=? AND user_id=?').get(duel.id, duel.round_number, user);
+  const lastRound = db.prepare('SELECT * FROM duel_rounds WHERE duel_id=? ORDER BY round_number DESC LIMIT 1').get(duel.id);
+  return {...duel, challenger, opponent, challenged_by_me:duel.challenger_id===user, my_choice_locked:Boolean(ownChoice), last_round:lastRound||null};
+}
+
+function challengeDuel(user, roomId, opponentName) {
+  const wanted = String(opponentName || '').trim().toLowerCase();
+  const opponent = db.prepare(`SELECT u.id FROM users u JOIN conversation_members cm ON cm.user_id=u.id
+    WHERE cm.conversation_id=? AND u.revoked_at IS NULL AND u.id<>? AND
+    (lower(u.id)=? OR lower(u.display_name)=? OR lower(u.short_name)=?) LIMIT 1`).get(roomId, user, wanted, wanted, wanted);
+  if (!opponent) return {error:'duelist_not_found'};
+  const mine = duelRowFor(user, roomId); const theirs = duelRowFor(opponent.id, roomId);
+  if (mine && mine.id !== theirs?.id) return {error:'already_dueling'};
+  if (theirs?.status === 'pending' && theirs.challenger_id === opponent.id && theirs.opponent_id === user) {
+    db.prepare("UPDATE duels SET status='active',updated_at=? WHERE id=?").run(Date.now(), theirs.id);
+    publish('duel', {conversation_id:roomId,duel_id:theirs.id}); return {duel:duelState(user, roomId, theirs.id)};
+  }
+  if (mine) return {duel:duelState(user, roomId, mine.id)};
+  const now=Date.now(); const result=db.prepare("INSERT INTO duels(conversation_id,challenger_id,opponent_id,status,created_at,updated_at) VALUES (?,?,?,'pending',?,?)").run(roomId,user,opponent.id,now,now);
+  publish('duel',{conversation_id:roomId,duel_id:Number(result.lastInsertRowid)}); return {duel:duelState(user,roomId,Number(result.lastInsertRowid))};
+}
+
+function chooseDuelSpell(user, roomId, duelId, rawSpell) {
+  const spell=normalizeSpell(rawSpell); const duel=db.prepare("SELECT * FROM duels WHERE id=? AND conversation_id=? AND status='active' AND (challenger_id=? OR opponent_id=?)").get(duelId,roomId,user,user);
+  if(!duel||!spell)return {error:!duel?'duel_not_active':'invalid_spell'};
+  try{db.prepare('INSERT INTO duel_choices(duel_id,round_number,user_id,spell,submitted_at) VALUES (?,?,?,?,?)').run(duel.id,duel.round_number,user,spell,Date.now());}
+  catch(error){if(!String(error).includes('UNIQUE'))throw error;return {error:'choice_locked'};}
+  const choices=db.prepare('SELECT user_id,spell FROM duel_choices WHERE duel_id=? AND round_number=?').all(duel.id,duel.round_number);
+  if(choices.length===2){
+    const first=choices.find(choice=>choice.user_id===duel.challenger_id).spell; const second=choices.find(choice=>choice.user_id===duel.opponent_id).spell;
+    const round=resolveRound(first,second,duel.challenger_protego,duel.opponent_protego); const winnerId=round.winner==='first'?duel.challenger_id:round.winner==='second'?duel.opponent_id:null;
+    const firstScore=duel.challenger_score+(winnerId===duel.challenger_id?1:0); const secondScore=duel.opponent_score+(winnerId===duel.opponent_id?1:0); const complete=firstScore>=2||secondScore>=2;
+    db.prepare('INSERT INTO duel_rounds VALUES (?,?,?,?,?,?,?)').run(duel.id,duel.round_number,first,second,winnerId,round.reason,Date.now());
+    db.prepare("UPDATE duels SET status=?,challenger_score=?,opponent_score=?,challenger_protego=?,opponent_protego=?,round_number=round_number+1,winner_id=?,updated_at=? WHERE id=?").run(complete?'complete':'active',firstScore,secondScore,round.firstProtegoStreak,round.secondProtegoStreak,complete?winnerId:null,Date.now(),duel.id);
+  }
+  publish('duel',{conversation_id:roomId,duel_id:duel.id}); return {duel:duelState(user,roomId,duel.id),resolved:choices.length===2};
 }
 
 function setReceipt(messageId, user, state) {
@@ -509,6 +615,38 @@ const server = createServer(async (req, res) => {
 
     if (url.pathname === '/api/rooms' && req.method === 'GET') return json(res, 200, { rooms: roomsFor(user) });
 
+    if (url.pathname === '/api/duels/current' && req.method === 'GET') {
+      const room=authorizedRoom(user,url.searchParams.get('room')); if(!room)return json(res,url.searchParams.get('room')?403:400,{error:url.searchParams.get('room')?'room_forbidden':'room_required'});
+      return json(res,200,{duel:duelState(user,room.id)});
+    }
+    if (url.pathname === '/api/duels/challenge' && req.method === 'POST') {
+      if(webUser(req)&&!sameOrigin(req))return json(res,403,{error:'origin_rejected'});
+      const payload=await body(req); const room=authorizedRoom(user,payload.room_id); if(!room)return json(res,payload.room_id?403:400,{error:payload.room_id?'room_forbidden':'room_required'});
+      const result=challengeDuel(user,room.id,payload.opponent); return json(res,result.error?(result.error==='duelist_not_found'?404:409):200,result);
+    }
+    const duelChoicePath=url.pathname.match(/^\/api\/duels\/(\d+)\/choice$/);
+    if(duelChoicePath&&req.method==='POST'){
+      if(webUser(req)&&!sameOrigin(req))return json(res,403,{error:'origin_rejected'});
+      const payload=await body(req); const room=authorizedRoom(user,payload.room_id); if(!room)return json(res,payload.room_id?403:400,{error:payload.room_id?'room_forbidden':'room_required'});
+      const result=chooseDuelSpell(user,room.id,Number(duelChoicePath[1]),payload.spell); return json(res,result.error?409:200,result);
+    }
+
+    if(url.pathname==='/api/typing'&&req.method==='POST'){
+      if(webUser(req)&&!sameOrigin(req))return json(res,403,{error:'origin_rejected'});
+      const payload=await body(req); const room=authorizedRoom(user,payload.room_id); if(!room)return json(res,payload.room_id?403:400,{error:payload.room_id?'room_forbidden':'room_required'});
+      const key=`${room.id}:${user}`; if(payload.typing)typingByRoom.set(key,{user_id:user,display_name:db.prepare('SELECT display_name FROM users WHERE id=?').get(user).display_name,expires_at:Date.now()+5000});else typingByRoom.delete(key);
+      publish('typing',{conversation_id:room.id,user_id:user,typing:Boolean(payload.typing)}); return json(res,200,{ok:true});
+    }
+
+    if(url.pathname==='/api/reads'&&req.method==='POST'){
+      if(webUser(req)&&!sameOrigin(req))return json(res,403,{error:'origin_rejected'});
+      const payload=await body(req); const room=authorizedRoom(user,payload.room_id); if(!room)return json(res,payload.room_id?403:400,{error:payload.room_id?'room_forbidden':'room_required'});
+      const lastId=Number(payload.message_id||0); const valid=lastId===0||db.prepare('SELECT 1 FROM messages WHERE id=? AND conversation_id=?').get(lastId,room.id); if(!valid)return json(res,400,{error:'invalid_read_marker'});
+      db.prepare(`INSERT INTO room_reads(conversation_id,user_id,last_read_message_id,updated_at) VALUES (?,?,?,?)
+        ON CONFLICT(conversation_id,user_id) DO UPDATE SET last_read_message_id=MAX(last_read_message_id,excluded.last_read_message_id),updated_at=excluded.updated_at`).run(room.id,user,lastId,Date.now());
+      return json(res,200,{ok:true,rooms:roomsFor(user)});
+    }
+
     const admin = db.prepare('SELECT role FROM users WHERE id = ?').get(user)?.role === 'admin';
     if (url.pathname === '/api/admin/groups' && req.method === 'GET') {
       if (!admin) return json(res, 403, { error: 'admin_required' });
@@ -606,6 +744,29 @@ const server = createServer(async (req, res) => {
       return json(res, 200, { ok: true });
     }
 
+    const reactionPath=url.pathname.match(/^\/api\/messages\/(\d+)\/reactions$/);
+    if(reactionPath&&req.method==='POST'){
+      if(webUser(req)&&!sameOrigin(req))return json(res,403,{error:'origin_rejected'});
+      const payload=await body(req); const messageId=Number(reactionPath[1]); const emoji=String(payload.emoji||'');
+      const message=db.prepare(`SELECT m.id,m.conversation_id FROM messages m JOIN conversation_members cm ON cm.conversation_id=m.conversation_id WHERE m.id=? AND cm.user_id=?`).get(messageId,user);
+      if(!message)return json(res,404,{error:'message_not_found'}); if(!['👍','❤️','😂','😮','😢','🎉'].includes(emoji))return json(res,400,{error:'invalid_reaction'});
+      const existing=db.prepare('SELECT 1 FROM message_reactions WHERE message_id=? AND user_id=? AND emoji=?').get(messageId,user,emoji);
+      if(existing)db.prepare('DELETE FROM message_reactions WHERE message_id=? AND user_id=? AND emoji=?').run(messageId,user,emoji);
+      else db.prepare('INSERT INTO message_reactions VALUES (?,?,?,?)').run(messageId,user,emoji,Date.now());
+      const updated=messageRows(message.conversation_id,messageId-1,1)[0]; publish('message_update',updated); return json(res,200,{message:updated});
+    }
+    const messagePath=url.pathname.match(/^\/api\/messages\/(\d+)$/);
+    if(messagePath&&['PATCH','DELETE'].includes(req.method)){
+      if(webUser(req)&&!sameOrigin(req))return json(res,403,{error:'origin_rejected'});
+      const messageId=Number(messagePath[1]); const existing=db.prepare('SELECT * FROM messages WHERE id=?').get(messageId);
+      if(!existing||existing.author_id!==user)return json(res,404,{error:'message_not_found'}); if(existing.type!=='text')return json(res,409,{error:'message_not_editable'});
+      if(req.method==='PATCH'){
+        const payload=await body(req); const text=String(payload.body||'').trim(); if(!text||[...text].length>140)return json(res,400,{error:'invalid_message',max_length:140});
+        db.prepare('UPDATE messages SET body=?,edited_at=? WHERE id=?').run(text,Date.now(),messageId);
+      }else db.prepare("UPDATE messages SET body='',deleted_at=? WHERE id=?").run(Date.now(),messageId);
+      const updated=messageRows(existing.conversation_id,messageId-1,1)[0]; publish('message_update',updated); return json(res,200,{message:updated});
+    }
+
     if (url.pathname === '/api/messages' && req.method === 'GET') {
       if (!url.searchParams.get('room')) return json(res, 400, { error: 'room_required' });
       const room = authorizedRoom(user, url.searchParams.get('room'));
@@ -617,6 +778,7 @@ const server = createServer(async (req, res) => {
             publish('receipt', { message_id: message.id, user_id: user, state: 'read', updated_at: Date.now() });
           }
         }
+        markRoomRead(room.id,user,Math.max(0,...messages.map(message=>message.id)));
       }
       return json(res, 200, { room, messages: messageRows(room.id, Number(url.searchParams.get('after') || 0), Number(url.searchParams.get('limit') || 100)) });
     }
@@ -628,22 +790,27 @@ const server = createServer(async (req, res) => {
       if (!room) return json(res, 403, { error: 'room_forbidden' });
       const text = typeof payload.body === 'string' ? payload.body.trim() : '';
       const clientId = String(payload.client_id || '').slice(0, 80);
+      const replyToId = payload.reply_to_id == null ? null : Number(payload.reply_to_id);
       if (!text || [...text].length > 140 || !clientId) return json(res, 400, { error: 'invalid_message', max_length: 140 });
-      const existing = db.prepare('SELECT id, conversation_id, body, type FROM messages WHERE author_id = ? AND client_id = ?').get(user, clientId);
-      if (existing && (existing.conversation_id !== room.id || existing.body !== text || existing.type !== 'text')) {
+      if(replyToId&&!db.prepare('SELECT 1 FROM messages WHERE id=? AND conversation_id=?').get(replyToId,room.id))return json(res,400,{error:'invalid_reply'});
+      const existing = db.prepare('SELECT id, conversation_id, body, type, reply_to_id FROM messages WHERE author_id = ? AND client_id = ?').get(user, clientId);
+      if (existing && (existing.conversation_id !== room.id || existing.body !== text || existing.type !== 'text' || existing.reply_to_id !== replyToId)) {
         return json(res, 409, { error: 'client_id_conflict' });
       }
+      const now=Date.now(); const retryAfter=Math.max(0,1000-(now-(lastMessageAt.get(user)||0)));
+      if(!existing&&retryAfter>0)return json(res,429,{error:'message_cooldown',retry_after_ms:retryAfter},{'retry-after':String(Math.ceil(retryAfter/1000))});
       let result;
       try {
-        result = db.prepare('INSERT INTO messages(conversation_id, author_id, client_id, body, created_at) VALUES (?, ?, ?, ?, ?)').run(room.id, user, clientId, text, Date.now());
+        result = db.prepare('INSERT INTO messages(conversation_id, author_id, client_id, body, created_at, reply_to_id) VALUES (?, ?, ?, ?, ?, ?)').run(room.id, user, clientId, text, now, replyToId);
       } catch (error) {
         if (!String(error).includes('UNIQUE')) throw error;
       }
       const row = db.prepare('SELECT id FROM messages WHERE author_id = ? AND client_id = ?').get(user, clientId);
       setReceipt(row.id, user, 'server');
       const message = messageRows(room.id, row.id - 1, 1)[0];
-      if (result) { publish('message', message); sendExpoNotifications(message); }
-      return json(res, result ? 201 : 200, { message });
+      let duel;
+      if (result) { lastMessageAt.set(user,now); const opponent=parseChallenge(text); if(opponent)duel=challengeDuel(user,room.id,opponent).duel; publish('message', message); sendExpoNotifications(message); }
+      return json(res, result ? 201 : 200, { message, duel });
     }
     if (url.pathname === '/api/voice' && req.method === 'POST') {
       if (webUser(req) && !sameOrigin(req)) return json(res, 403, { error: 'origin_rejected' });
@@ -660,12 +827,14 @@ const server = createServer(async (req, res) => {
       if (existing && (existing.conversation_id !== room.id || existing.type !== 'voice')) {
         return json(res, 409, { error: 'client_id_conflict' });
       }
+      const now=Date.now(); const retryAfter=Math.max(0,1000-(now-(lastMessageAt.get(user)||0)));
+      if(!existing&&retryAfter>0)return json(res,429,{error:'message_cooldown',retry_after_ms:retryAfter},{'retry-after':String(Math.ceil(retryAfter/1000))});
       let inserted = false;
       try {
         const result = db.prepare(`
           INSERT INTO messages(conversation_id, author_id, client_id, type, body, created_at)
           VALUES (?, ?, ?, 'voice', '[voice]', ?)
-        `).run(room.id, user, clientId, Date.now());
+        `).run(room.id, user, clientId, now);
         const messageId = Number(result.lastInsertRowid);
         const fileName = `${messageId}-${randomBytes(8).toString('hex')}.pcm`;
         writeFileSync(join(voiceDir, fileName), samples, { mode: 0o600 });
@@ -680,7 +849,7 @@ const server = createServer(async (req, res) => {
       const row = db.prepare('SELECT id FROM messages WHERE author_id = ? AND client_id = ?').get(user, clientId);
       setReceipt(row.id, user, 'server');
       const message = messageRows(room.id, row.id - 1, 1)[0];
-      if (inserted) { publish('message', message); sendExpoNotifications(message); }
+      if (inserted) { lastMessageAt.set(user,now); publish('message', message); sendExpoNotifications(message); }
       return json(res, inserted ? 201 : 200, { message });
     }
     const voiceMatch = url.pathname.match(/^\/api\/voice\/(\d+)\/audio$/);
@@ -704,8 +873,10 @@ const server = createServer(async (req, res) => {
       const payload = await body(req);
       const messageId = Number(payload.message_id);
       if (!Number.isInteger(messageId) || !['delivered', 'read'].includes(payload.state)) return json(res, 400, { error: 'invalid_receipt' });
-      if (!db.prepare('SELECT 1 FROM messages m JOIN conversation_members cm ON cm.conversation_id=m.conversation_id WHERE m.id = ? AND cm.user_id = ?').get(messageId, user)) return json(res, 404, { error: 'message_not_found' });
+      const receiptMessage=db.prepare('SELECT m.conversation_id FROM messages m JOIN conversation_members cm ON cm.conversation_id=m.conversation_id WHERE m.id = ? AND cm.user_id = ?').get(messageId, user);
+      if (!receiptMessage) return json(res, 404, { error: 'message_not_found' });
       setReceipt(messageId, user, payload.state);
+      if(payload.state==='read')markRoomRead(receiptMessage.conversation_id,user,messageId);
       publish('receipt', { message_id: messageId, user_id: user, state: payload.state, updated_at: Date.now() });
       return json(res, 200, { ok: true });
     }
@@ -747,7 +918,7 @@ const server = createServer(async (req, res) => {
           publish('receipt', { message_id: message.id, user_id: user, state: 'delivered', updated_at: Date.now() });
         }
       }
-      return json(res, 200, { server_time: Date.now(), room, rooms: roomsFor(user), messages, receipts, presence: presenceRows(room.id) });
+      return json(res, 200, { server_time: Date.now(), room, rooms: roomsFor(user), messages, receipts, presence: presenceRows(room.id), typing:activeTyping(room.id,user), duel:duelState(user,room.id) });
     }
     return json(res, 404, { error: 'not_found' });
   } catch (error) {

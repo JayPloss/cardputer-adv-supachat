@@ -158,6 +158,12 @@ struct ChatMessage {
   int64_t createdAt = 0;
   bool queued = false;
   bool voice = false;
+  bool deleted = false;
+  bool edited = false;
+  int64_t replyToId = 0;
+  String replyAuthor;
+  String replyBody;
+  int reactionCount = 0;
 };
 
 struct ChatLine {
@@ -256,6 +262,20 @@ int batteryEdgeBaselineMv = 0;
 int batteryPreviousMv = 0;
 bool externalPowerDetected = false;
 int persistedBatteryLevel = -1;
+int64_t duelId = 0;
+String duelStatus;
+String duelChallenger;
+String duelOpponent;
+int duelChallengerScore = 0;
+int duelOpponentScore = 0;
+bool duelChoiceLocked = false;
+String duelSpellPending;
+int64_t reactionPendingMessageId = 0;
+bool typingState = false;
+bool typingDirty = false;
+uint32_t typingChangedAt = 0;
+String typingNotice;
+uint32_t lastDraftQueuedAt = 0;
 
 void serviceMessageNotification();
 uint32_t lastToneAt = 0;
@@ -998,6 +1018,10 @@ void mergeServerMessage(JsonObjectConst object) {
   serverMessage.authorName = String(object["author_name"] | "?"); serverMessage.body = String(object["body"] | "");
   serverMessage.createdAt = object["created_at"] | 0; serverMessage.queued = false; serverMessage.state = "saved";
   serverMessage.voice = String(object["type"] | "text") == "voice";
+  serverMessage.deleted = !object["deleted_at"].isNull(); serverMessage.edited = !object["edited_at"].isNull();
+  serverMessage.replyToId = object["reply_to_id"] | 0;
+  if (!object["reply_to"].isNull()) { serverMessage.replyAuthor = String(object["reply_to"]["author_name"] | ""); serverMessage.replyBody = String(object["reply_to"]["body"] | ""); }
+  for (JsonObjectConst reaction : object["reactions"].as<JsonArrayConst>()) serverMessage.reactionCount += reaction["count"] | 0;
   for (JsonObjectConst receipt : object["receipts"].as<JsonArrayConst>()) {
     if (String(receipt["user_id"] | "") == "papa") serverMessage.state = String(receipt["state"] | "saved");
   }
@@ -1011,10 +1035,10 @@ void sendQueuedMessages() {
   for (const auto &message : messages) if (message.queued) queuedIds.push_back(message.clientId);
   xSemaphoreGive(stateMutex);
   for (const auto &clientId : queuedIds) {
-    String text;
+    String text; int64_t replyToId=0;
     xSemaphoreTake(stateMutex, portMAX_DELAY);
     auto item = std::find_if(messages.begin(), messages.end(), [&](const ChatMessage &message) { return message.clientId == clientId; });
-    if (item != messages.end()) text = item->body;
+    if (item != messages.end()) { text = item->body; replyToId=item->replyToId; }
     xSemaphoreGive(stateMutex);
     if (text.isEmpty()) continue;
     String response; int status = 0;
@@ -1024,7 +1048,7 @@ void sendQueuedMessages() {
     if (item != messages.end()) queuedRoomId = item->roomId;
     xSemaphoreGive(stateMutex);
     if (queuedRoomId != currentRoomId) continue;
-    const String payload = "{\"client_id\":\"" + jsonEscape(clientId) + "\",\"body\":\"" + jsonEscape(text) + "\",\"room_id\":\"" + jsonEscape(queuedRoomId) + "\"}";
+    const String payload = "{\"client_id\":\"" + jsonEscape(clientId) + "\",\"body\":\"" + jsonEscape(text) + "\",\"room_id\":\"" + jsonEscape(queuedRoomId) + "\",\"reply_to_id\":" + (replyToId>0?String(replyToId):String("null")) + "}";
     if (!requestJson("/api/messages", "POST", payload, response, status) || (status != 200 && status != 201)) continue;
     JsonDocument document; if (deserializeJson(document, response)) continue;
     xSemaphoreTake(stateMutex, portMAX_DELAY);
@@ -1036,6 +1060,28 @@ void sendQueuedMessages() {
 void postReadReceipt(int64_t messageId) {
   String response; int status = 0;
   requestJson("/api/receipts", "POST", "{\"message_id\":" + String(messageId) + ",\"state\":\"read\"}", response, status);
+}
+
+void updateDuel(JsonVariantConst value) {
+  if (value.isNull()) { duelId=0; duelStatus=""; duelChoiceLocked=false; return; }
+  duelId=value["id"]|0; duelStatus=String(value["status"]|""); duelChoiceLocked=value["my_choice_locked"]|false;
+  duelChallenger=String(value["challenger"]["display_name"]|"?"); duelOpponent=String(value["opponent"]["display_name"]|"?");
+  duelChallengerScore=value["challenger_score"]|0; duelOpponentScore=value["opponent_score"]|0;
+}
+
+void serviceMessagingActions() {
+  if (typingDirty) {
+    String response; int status=0; const String payload="{\"room_id\":\""+jsonEscape(currentRoomId)+"\",\"typing\":"+(typingState?"true":"false")+"}";
+    if (requestJson("/api/typing","POST",payload,response,status)&&status==200) typingDirty=false;
+  }
+  if (reactionPendingMessageId>0) {
+    String response; int status=0; const int64_t id=reactionPendingMessageId;
+    if (requestJson("/api/messages/"+String(id)+"/reactions","POST","{\"emoji\":\"👍\"}",response,status)&&status==200) reactionPendingMessageId=0;
+  }
+  if (!duelSpellPending.isEmpty()&&duelId>0) {
+    String response; int status=0; const String payload="{\"room_id\":\""+jsonEscape(currentRoomId)+"\",\"spell\":\""+jsonEscape(duelSpellPending)+"\"}";
+    if (requestJson("/api/duels/"+String(duelId)+"/choice","POST",payload,response,status)&&status==200) { JsonDocument result;if(!deserializeJson(result,response))updateDuel(result["duel"]);duelSpellPending=""; }
+  }
 }
 
 void synchronize() {
@@ -1056,7 +1102,7 @@ void synchronize() {
       else if (active != rooms.end()) currentRoomName = active->name;
     }
   }
-  sendQueuedMessages();
+  sendQueuedMessages(); serviceMessagingActions();
   String response; int status = 0;
   const String path = "/api/device/sync?after=" + String(lastServerId) + "&receipts_after=" + String(lastReceiptAt)
       + "&limit=" + String(kSyncBatchLimit) + "&wait=0&room=" + currentRoomId;
@@ -1069,6 +1115,8 @@ void synchronize() {
     Serial.printf("sync http status=%d body=%s\n", status, response.substring(0, 80).c_str()); renderDirty = true; return;
   }
   JsonDocument document; if (deserializeJson(document, response)) { networkStatus = "BAD DATA"; renderDirty = true; return; }
+  updateDuel(document["duel"]);
+  typingNotice=""; for(JsonObjectConst person:document["typing"].as<JsonArrayConst>()){if(!typingNotice.isEmpty())typingNotice+=", ";typingNotice+=String(person["display_name"]|"Someone");} if(!typingNotice.isEmpty())typingNotice+=" typing";
   std::vector<int64_t> newlyRead;
   xSemaphoreTake(stateMutex, portMAX_DELAY);
   for (JsonObjectConst object : document["messages"].as<JsonArrayConst>()) {
@@ -1173,7 +1221,10 @@ void drawChat() {
     const bool mine = message.authorId == kDeviceId;
     const uint32_t colour = participantColour(message.authorId, message.authorName);
     if (!mine) lines.push_back({message.authorName.substring(0, 5), colour, false, true});
-    String text = message.voice ? String("[voice message]") : message.body;
+    if (message.replyToId > 0) lines.push_back({String("reply ") + message.replyAuthor.substring(0, 6) + ": " + message.replyBody.substring(0, 12), TFT_DARKGREY, mine, true});
+    String text = message.deleted ? String("[deleted]") : message.voice ? String("[voice message]") : message.body;
+    if (message.edited && !message.deleted) text += " [edit]";
+    if (message.reactionCount > 0) text += " [+" + String(message.reactionCount) + "]";
     while (!text.isEmpty()) {
       int split = text.length() <= 25 ? text.length() : text.lastIndexOf(' ', 25);
       if (split < 6) split = std::min(25, static_cast<int>(text.length()));
@@ -1207,7 +1258,10 @@ void drawChat() {
   display.setTextSize(1);
   display.setTextColor(TFT_YELLOW, TFT_BLACK); display.setCursor(3, 112); display.print("> ");
   display.setTextColor(TFT_WHITE, TFT_BLACK); display.print(draft.substring(draft.length() > 34 ? draft.length() - 34 : 0));
-  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(198, 126); display.printf("%d/140", draft.length());
+  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(3, 126);
+  if (duelId > 0 && duelStatus == "active") display.print(duelChoiceLocked ? "DUEL: spell locked" : "DUEL 1:P 2:S 3:L 4:G");
+  else if (!typingNotice.isEmpty()) display.print(typingNotice.substring(0, 28));
+  display.setCursor(198, 126); display.printf("%d/140", draft.length());
 }
 
 const char *kMenuItems[] = {"BACK TO CHAT", "ROOMS", "SYNC NOW", "VOICE MESSAGES", "VOLUME", "NETWORKS", "STATUS"};
@@ -1343,7 +1397,13 @@ bool navRight() { return physicalKeyAt(12, 3); }
 
 void sendDraft() {
   draft.trim(); if (draft.isEmpty()) return;
+  if (draft == "/like") {
+    xSemaphoreTake(stateMutex, portMAX_DELAY); for(auto item=messages.rbegin();item!=messages.rend();++item)if(item->authorId!=kDeviceId&&!item->deleted){reactionPendingMessageId=item->id;break;} xSemaphoreGive(stateMutex);
+    draft=""; typingState=false;typingDirty=true;renderDirty=true;return;
+  }
+  if (millis()-lastDraftQueuedAt<1000) { networkStatus="SLOW DOWN"; renderDirty=true; return; }
   ChatMessage message; message.roomId = currentRoomId; message.clientId = nextClientId(); message.authorId = kDeviceId; message.authorName = kDeviceName;
+  if(draft.startsWith("/r ")){xSemaphoreTake(stateMutex,portMAX_DELAY);for(auto item=messages.rbegin();item!=messages.rend();++item)if(item->authorId!=kDeviceId&&!item->deleted){message.replyToId=item->id;message.replyAuthor=item->authorName;message.replyBody=item->body;break;}xSemaphoreGive(stateMutex);draft.remove(0,3);draft.trim();if(draft.isEmpty())return;}
   message.body = draft; message.createdAt = time(nullptr) * 1000LL; message.queued = true; message.state = "queued";
   xSemaphoreTake(stateMutex, portMAX_DELAY); messages.push_back(message); trimHistory(); saveHistoryLocked(); xSemaphoreGive(stateMutex);
   if (kEspNowEnabled && meshReady) {
@@ -1355,7 +1415,7 @@ void sendDraft() {
     if (encryptMeshPacket(packet, reinterpret_cast<const uint8_t *>(message.body.c_str()), length))
       esp_now_send(broadcast, reinterpret_cast<uint8_t *>(&packet), offsetof(EspNowPacket, payload) + packet.payloadLength);
   }
-  draft = ""; historyOffset = 0; renderDirty = true;
+  draft = ""; lastDraftQueuedAt=millis(); typingState=false;typingDirty=true;historyOffset = 0; renderDirty = true;
 }
 
 void scanForNetworks() {
@@ -1490,11 +1550,15 @@ void handleKeyboard() {
   if (goDown) { if (historyOffset > 0) historyOffset--; playNextTone(); renderDirty = true; return; }
   if (goLeft) { switchRoom(-1); playNextTone(); return; }
   if (goRight) { switchRoom(1); playNextTone(); return; }
+  if (duelId>0&&duelStatus=="active"&&!duelChoiceLocked&&draft.isEmpty()) {
+    for(const char character:keys.word){const char* spell=character=='1'?"protego":character=='2'?"sectumsempra":character=='3'?"levicorpus":character=='4'?"langlock":nullptr;if(spell){duelSpellPending=spell;duelChoiceLocked=true;networkStatus="SPELL LOCKED";playNextTone();renderDirty=true;return;}}
+  }
   playNextTone();
   if (keys.enter) { sendDraft(); return; }
-  if (keys.del) { if (!draft.isEmpty()) draft.remove(draft.length() - 1); renderDirty = true; return; }
+  if (keys.del) { if (!draft.isEmpty()) draft.remove(draft.length() - 1); typingState=!draft.isEmpty();typingDirty=true;typingChangedAt=millis();renderDirty = true; return; }
   if (keys.space && draft.length() < kMessageLimit) draft += ' ';
   for (const auto character : keys.word) if (draft.length() < kMessageLimit && character >= 0x20 && character <= 0x7e) draft += character;
+  if(!draft.isEmpty()){typingState=true;typingDirty=true;typingChangedAt=millis();}
   renderDirty = true;
 }
 }  // namespace
@@ -1528,6 +1592,7 @@ void setup() {
 
 void loop() {
   M5Cardputer.update(); sampleBattery(); serviceClockRender(); handleKeyboard(); captureVoice(); serviceAudioPlayback(); serviceMessageNotification();
+  if(typingState&&millis()-typingChangedAt>2000){typingState=false;typingDirty=true;}
   if (screenMode == ScreenMode::Walkie) {
     const bool spacePressed = M5Cardputer.Keyboard.isPressed() && M5Cardputer.Keyboard.keysState().space;
     if (spacePressed) {

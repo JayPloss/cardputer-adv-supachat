@@ -18,6 +18,7 @@
       <section class="chat-panel" aria-label="Family text chat">
         <main id="messages" class="messages" aria-live="polite" aria-label="Family conversation"></main>
         <form id="composer" class="composer">
+          <div id="replying" class="replying" hidden><span id="replying-text"></span><button id="reply-cancel" type="button" aria-label="Cancel reply">×</button></div>
           <label id="composer-label" for="message">Message this room</label>
           <div class="compose-row">
             <input id="message" name="message" maxlength="140" autocomplete="off" placeholder="Write something…" required>
@@ -27,6 +28,7 @@
         </form>
       </section>
       <aside class="voice-controls" aria-label="Walkie controls">
+        <section id="duel-zone" class="duel-zone" hidden><span class="eyebrow">WIZARD DUEL</span><strong id="duel-title"></strong><p id="duel-state"></p><div id="duel-spells" class="duel-spells"></div></section>
         <div class="walkie-heading"><span class="eyebrow">LIVE VOICE</span><strong>Walkie</strong><span id="walkie-state">Connecting…</span></div>
         <button id="ptt" class="ptt-button" type="button">Hold to talk</button>
         <div class="walkie-divider"><span>or leave a message</span></div>

@@ -19,6 +19,7 @@ const port = 18094;
 let child;
 let cookie;
 let nativeSessionToken;
+const waitForCooldown = () => new Promise((resolve) => setTimeout(resolve, 1050));
 
 test.before(async () => {
   child = spawn(process.execPath, ['--experimental-sqlite', 'src/server.mjs'], {
@@ -191,6 +192,46 @@ test('idempotency keys cannot be reused across rooms', async () => {
   assert.equal((await collision.json()).error, 'client_id_conflict');
 });
 
+test('server enforces the one-message-per-second cooldown without breaking retries', async () => {
+  await waitForCooldown();
+  const headers={cookie,'content-type':'application/json'}; const payload={client_id:'cooldown-first',body:'first',room_id:'family'};
+  assert.equal((await fetch(`http://127.0.0.1:${port}/api/messages`,{method:'POST',headers,body:JSON.stringify(payload)})).status,201);
+  assert.equal((await fetch(`http://127.0.0.1:${port}/api/messages`,{method:'POST',headers,body:JSON.stringify(payload)})).status,200);
+  const blocked=await fetch(`http://127.0.0.1:${port}/api/messages`,{method:'POST',headers,body:JSON.stringify({client_id:'cooldown-second',body:'second',room_id:'family'})});
+  assert.equal(blocked.status,429); assert.equal((await blocked.json()).error,'message_cooldown');
+});
+
+test('replies, reactions, edits, deletes, read markers, and typing stay room-scoped', async () => {
+  await waitForCooldown();
+  const headers={cookie,'content-type':'application/json'};
+  const first=await fetch(`http://127.0.0.1:${port}/api/messages`,{method:'POST',headers,body:JSON.stringify({client_id:'feature-parent',body:'parent',room_id:'family'})}).then(r=>r.json());
+  await waitForCooldown();
+  const reply=await fetch(`http://127.0.0.1:${port}/api/messages`,{method:'POST',headers,body:JSON.stringify({client_id:'feature-reply',body:'reply',room_id:'family',reply_to_id:first.message.id})}).then(r=>r.json());
+  assert.equal(reply.message.reply_to.body,'parent');
+  const reaction=await fetch(`http://127.0.0.1:${port}/api/messages/${first.message.id}/reactions`,{method:'POST',headers,body:JSON.stringify({emoji:'👍'})}).then(r=>r.json());
+  assert.equal(reaction.message.reactions[0].count,1);
+  const edited=await fetch(`http://127.0.0.1:${port}/api/messages/${reply.message.id}`,{method:'PATCH',headers,body:JSON.stringify({body:'edited reply'})}).then(r=>r.json());
+  assert.equal(edited.message.body,'edited reply'); assert.ok(edited.message.edited_at);
+  const removed=await fetch(`http://127.0.0.1:${port}/api/messages/${reply.message.id}`,{method:'DELETE',headers}).then(r=>r.json());
+  assert.equal(removed.message.body,''); assert.ok(removed.message.deleted_at);
+  assert.equal((await fetch(`http://127.0.0.1:${port}/api/reads`,{method:'POST',headers,body:JSON.stringify({room_id:'family',message_id:first.message.id})})).status,200);
+  assert.equal((await fetch(`http://127.0.0.1:${port}/api/typing`,{method:'POST',headers,body:JSON.stringify({room_id:'family',typing:true})})).status,200);
+  assert.equal((await fetch(`http://127.0.0.1:${port}/api/messages/${first.message.id}/reactions`,{method:'POST',headers:{authorization:`Bearer ${deviceToken}`,'content-type':'application/json'},body:JSON.stringify({emoji:'nope'})})).status,400);
+});
+
+test('duels are reciprocal, secret until both choose, and scoped to a shared room', async () => {
+  const papa={authorization:`Bearer ${nativeSessionToken}`,'content-type':'application/json'}; const albie={authorization:`Bearer ${deviceToken}`,'content-type':'application/json'};
+  const challenge=(headers,opponent)=>fetch(`http://127.0.0.1:${port}/api/duels/challenge`,{method:'POST',headers,body:JSON.stringify({room_id:'k-buds',opponent})}).then(r=>r.json());
+  const pending=await challenge(papa,'Albie'); assert.equal(pending.duel.status,'pending');
+  const accepted=await challenge(albie,'Papa'); assert.equal(accepted.duel.status,'active'); const id=accepted.duel.id;
+  const choose=(headers,spell)=>fetch(`http://127.0.0.1:${port}/api/duels/${id}/choice`,{method:'POST',headers,body:JSON.stringify({room_id:'k-buds',spell})}).then(r=>r.json());
+  const locked=await choose(papa,'Sectum Sempra'); assert.equal(locked.duel.my_choice_locked,true); assert.equal(JSON.stringify(locked).includes('sectumsempra'),false);
+  let state=(await choose(albie,'Langlock')).duel; assert.equal(state.challenger_score,1);
+  await choose(papa,'Levicorpus'); state=(await choose(albie,'Sectum Sempra')).duel; assert.equal(state.challenger_score,2); assert.equal(state.status,'complete');
+  const forbidden=await fetch(`http://127.0.0.1:${port}/api/duels/current?room=family`,{headers:{'x-forwarded-host':'supachat.net','x-authentik-uid':'uid-kbuds-1','x-authentik-username':'knowltown.friend'}});
+  assert.equal(forbidden.status,403);
+});
+
 test('room discovery reports independent latest-message cursors', async () => {
   const response = await fetch(`http://127.0.0.1:${port}/api/rooms`, {headers:{cookie}});
   assert.equal(response.status, 200);
@@ -230,6 +271,7 @@ test('Authentik headers are rejected outside the configured portal host', async 
 });
 
 test('Papa sends a 140-character message idempotently', async () => {
+  await waitForCooldown();
   const payload = { client_id: 'papa-test-1', body: 'x'.repeat(140), room_id: 'family' };
   const send = () => fetch(`http://127.0.0.1:${port}/api/messages`, {
     method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(payload),
@@ -311,6 +353,7 @@ test('Papa Cardputer uses bearer sync without changing Papa web login', async ()
 });
 
 test('Papa uploads and retrieves a bounded PCM voice clip', async () => {
+  await waitForCooldown();
   const pcm = Buffer.alloc(1600);
   for (let index = 0; index < pcm.length; index += 2) pcm.writeInt16LE((index * 17) % 32767, index);
   const upload = await fetch(`http://127.0.0.1:${port}/api/voice`, {

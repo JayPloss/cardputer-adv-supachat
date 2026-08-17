@@ -10,6 +10,7 @@ export class SupaChatState {
       replayAudible:false,voiceSelection:0,volume:3,draft:'',password:'',selectedSsid:'',tones:0,notifications:0,http:200,heap:181432,
       batteryLevel:73,batteryVoltageMv:3986,externalPowerDetected:true,roomSelection:0,currentRoom:'Family',rooms:['Family','K-BUDS','Sunday Crew'],roomNew:[false,true,false],
       easternTime:'3:42P',
+      duel:{opponent:'Papa',status:'active',score:[1,0],choice:null},typingNotice:'',replyTarget:null,
       bootElapsedMs:0,bootSkipped:false,bootActive:true,
       messages:[{id:'papa',messageId:41,author:'Papa',body:'Hey Albie — testing SupaChat.',state:'read'},{id:'juju',messageId:42,author:'Julien',body:'I found the orange channel.',state:'saved'},{id:'papa',messageId:43,author:'Papa',body:'',voice:true,state:'saved'},{id:'albie',messageId:44,author:name,body:'I am online!',state:'saved'}]});
   }
@@ -17,6 +18,10 @@ export class SupaChatState {
   bootTick(ms){if(!this.bootSkipped)this.bootElapsedMs+=ms}
   skipBoot(){this.bootSkipped=true;this.bootActive=false}
   receive(author,body,id=author.toLowerCase(),room=this.currentRoom){if(room!==this.currentRoom)return false;this.messages.push({id,author,body,state:'saved'});if(author!==this.name&&this.volume>0)this.notifications++;return true}
+  challenge(opponent){this.duel={opponent,status:'pending',score:[0,0],choice:null}}
+  acceptDuel(opponent){this.duel={opponent,status:'active',score:[0,0],choice:null}}
+  cast(spell){if(this.duel?.status!=='active'||this.duel.choice)return false;this.duel.choice=spell;return true}
+  reply(body){const target=[...this.messages].reverse().find(message=>message.author!==this.name);if(!target)return false;this.messages.push({id:this.name.toLowerCase(),author:this.name,body,replyTo:target.messageId??target.id,state:'queued'});return true}
   menu(){this.screen=this.screen==='menu'?'chat':'menu';this.tone()}
   switchRoom(direction){this.roomSelection=(this.roomSelection+direction+this.rooms.length)%this.rooms.length;this.currentRoom=this.rooms[this.roomSelection];this.roomNew[this.roomSelection]=false;this.messages=[]}
   left(){if(this.screen==='chat')this.switchRoom(-1);else if(this.screen==='menu')this.screen='chat';else this.screen='menu';this.tone()}
