@@ -28,11 +28,11 @@
 #endif
 
 namespace {
-constexpr char kApiBase[] = "https://le954.ca/supachat";
-constexpr char kApiHost[] = "le954.ca";
-// SHA-256 fingerprint for le954.ca's leaf certificate, valid through 2026-09-29.
+constexpr char kApiBase[] = "https://supachat.net";
+constexpr char kApiHost[] = "supachat.net";
+// SHA-256 fingerprint for supachat.net's current leaf certificate.
 // Renew this pin when Caddy rotates the certificate.
-constexpr char kTlsFingerprint[] = "C7 B4 16 EC A3 5A 0E 37 6B 28 0D E3 3B 05 4D 1D FC 11 F5 A0 D4 11 CF 35 BD 10 A4 4A 5B 27 C7 8A";
+constexpr char kTlsFingerprint[] = "E7 09 64 D3 D6 B2 1D 03 F9 0E 81 59 6C FA 37 28 6C 69 37 5A AB C6 8A 0F DB C1 6D A0 87 9E 8F 15";
 constexpr char kDeviceName[] = SUPACHAT_DEVICE_NAME;
 constexpr char kDeviceId[] = SUPACHAT_DEVICE_ID;
 constexpr char kFirmwareVersion[] = "v0.42";
@@ -1087,7 +1087,7 @@ void walkieTask(void *) {
       if (!walkieInitialized) {
         walkieHeaders = "Authorization: Bearer " + deviceToken + "\r\n";
         walkieSocket.setExtraHeaders(walkieHeaders.c_str()); walkieSocket.onEvent(onWalkieEvent); walkieSocket.setReconnectInterval(2000);
-        const String walkiePath = "/supachat/walkie?room=" + currentRoomId;
+        const String walkiePath = "/walkie?room=" + currentRoomId;
         walkieSocket.beginSSL(kApiHost, 443, walkiePath.c_str(), kTlsFingerprint); walkieInitialized = true;
       }
       walkieSocket.loop();

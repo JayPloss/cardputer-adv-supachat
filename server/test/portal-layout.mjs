@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { chromium } from 'playwright-core';
 
 const password = process.env.SUPACHAT_PAPA_PASSWORD;
-const baseUrl = process.env.SUPACHAT_PORTAL_URL || 'https://le954.ca/supachat/';
+const baseUrl = process.env.SUPACHAT_PORTAL_URL || 'https://supachat.net/';
 if (!password) throw new Error('SUPACHAT_PAPA_PASSWORD is required');
 
 const executablePath = process.env.EDGE_PATH || 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';

@@ -2,7 +2,7 @@
 
 Persistent private mesh chat for Cardputer ADV handhelds using ESP-NOW for infrastructure-free peer-to-peer communication and optional WiFi backhaul through a Hetzner-hosted peer.
 
-> **Status (August 2026):** Text chat is working through the deployed Node/SQLite service and authenticated web portal at `https://le954.ca/supachat/`. The first walkie build adds raw-PCM voice clips, authenticated live PTT through Hetzner, and encrypted ESP-NOW fallback. Both child variants compile; Albie has the first walkie build, while two-device audio acceptance and the Juju flash remain release gates.
+> **Status (August 2026):** Text chat is working through the deployed Node/SQLite service and authenticated web portal at `https://supachat.net/`. The first walkie build adds raw-PCM voice clips and authenticated live PTT through Hetzner. Both child variants compile; physical two-device audio acceptance remains a release gate.
 
 ## What this project is
 
@@ -250,7 +250,7 @@ The Cardputer starts with the supplied retro arcade logo, converted reproducibly
 
 The bottom-right boot label comes from the firmware identity rather than the shared image. The default `cardputer-adv` environment builds Albie's node; `pio run -e juju` builds the second Juju node with its own display name and device ID.
 
-TLS uses a pinned `le954.ca` leaf-certificate fingerprint because the Cardputer's embedded CA path does not currently validate Caddy's Let’s Encrypt YE2/Root YE chain. The current pin expires with the certificate on September 29, 2026 and must be refreshed when Caddy rotates it.
+TLS uses a pinned `supachat.net` leaf-certificate fingerprint because the Cardputer's embedded CA path does not currently validate Caddy's Let’s Encrypt chain. The pin must be refreshed whenever Caddy rotates the certificate.
 
 ## Prior Cardputer lessons
 

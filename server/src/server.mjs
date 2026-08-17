@@ -408,7 +408,7 @@ function setReceipt(messageId, user, state) {
 
 function sameOrigin(req) {
   const origin = req.headers.origin;
-  return !origin || origin === 'https://le954.ca' || origin === `https://${requestHost(req)}` || origin === `http://${req.headers.host}`;
+  return !origin || origin === `https://${requestHost(req)}` || origin === `http://${req.headers.host}`;
 }
 
 function websocketFrame(payload, opcode = 1) {

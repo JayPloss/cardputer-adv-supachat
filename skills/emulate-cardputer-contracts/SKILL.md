@@ -17,6 +17,6 @@ Treat UI simulation and device emulation as separate test surfaces. Never claim 
 6. When external state matters, compare against the live endpoint or artifact.
 7. Run `scripts/run-contract-gate.ps1` before compilation and again before upload.
 
-For SupaChat, the gate must cover ESP32 SHA-256 pin parsing, the live `le954.ca` leaf pin, HTTP error mapping, M5's two-slot microphone DMA delay, and Cardputer modifier/navigation precedence. Read [references/contracts.md](references/contracts.md) when editing those paths.
+For SupaChat, the gate must cover ESP32 SHA-256 pin parsing, the live `supachat.net` leaf pin, HTTP error mapping, M5's two-slot microphone DMA delay, and Cardputer modifier/navigation precedence. Read [references/contracts.md](references/contracts.md) when editing those paths.
 
 Do not flash if a device-only failure has not first been represented by a failing emulator test.

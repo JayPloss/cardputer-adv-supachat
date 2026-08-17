@@ -48,7 +48,7 @@ assert.deepEqual(parseEsp32Fingerprint(oldSha1),
 
 const parsedCompiledPin = parseEsp32Fingerprint(pinMatch[1]);
 assert.equal(parsedCompiledPin.ok, true, parsedCompiledPin.reason);
-const livePin = await liveLeafFingerprint('le954.ca');
+const livePin = await liveLeafFingerprint('supachat.net');
 const verified = verifyEsp32Fingerprint(pinMatch[1], livePin);
 assert.equal(verified.ok, true, `${verified.reason}: compiled=${pinMatch[1]} live=${livePin}`);
 
