@@ -88,7 +88,7 @@ test('native Authentik exchange issues an isolated app session for Papa', async 
 test('only Papa can create a one-time password setup link', async () => {
   const response = await fetch(`http://127.0.0.1:${port}/api/admin/invitations`, {
     method: 'POST', headers: { authorization: `Bearer ${nativeSessionToken}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ username: 'new.friend', display_name: 'New Friend', email: 'friend@example.test' }),
+    body: JSON.stringify({ username: 'new.friend', display_name: 'New Friend', email: 'friend@example.test', room_id: 'family' }),
   });
   assert.equal(response.status, 201);
   const invitation = await response.json();
@@ -173,6 +173,24 @@ test('K-BUDS membership cannot read or write Family', async () => {
   assert.equal(family.messages.some((message) => message.client_id === 'kbuds-only-1'), false);
 });
 
+test('room-scoped APIs reject omitted rooms instead of falling back to Family', async () => {
+  const jsonHeaders = {cookie, 'content-type':'application/json'};
+  assert.equal((await fetch(`http://127.0.0.1:${port}/api/messages`, {headers:{cookie}})).status, 400);
+  assert.equal((await fetch(`http://127.0.0.1:${port}/api/messages`, {method:'POST',headers:jsonHeaders,body:JSON.stringify({client_id:'missing-room',body:'must fail'})})).status, 400);
+  assert.equal((await fetch(`http://127.0.0.1:${port}/api/presence`, {headers:{cookie}})).status, 400);
+  assert.equal((await fetch(`http://127.0.0.1:${port}/api/device/sync?wait=0`, {headers:{authorization:`Bearer ${deviceToken}`}})).status, 400);
+  assert.equal((await fetch(`http://127.0.0.1:${port}/api/voice`, {method:'POST',headers:{...jsonHeaders,'x-client-id':'missing-room-voice','x-sample-rate':'8000'},body:Buffer.alloc(2)})).status, 400);
+});
+
+test('idempotency keys cannot be reused across rooms', async () => {
+  const headers = {cookie,'content-type':'application/json'};
+  const first = await fetch(`http://127.0.0.1:${port}/api/messages`, {method:'POST',headers,body:JSON.stringify({client_id:'room-bound-key',body:'Family only',room_id:'family'})});
+  assert.equal(first.status, 201);
+  const collision = await fetch(`http://127.0.0.1:${port}/api/messages`, {method:'POST',headers,body:JSON.stringify({client_id:'room-bound-key',body:'K-BUDS only',room_id:'k-buds'})});
+  assert.equal(collision.status, 409);
+  assert.equal((await collision.json()).error, 'client_id_conflict');
+});
+
 test('room discovery reports independent latest-message cursors', async () => {
   const response = await fetch(`http://127.0.0.1:${port}/api/rooms`, {headers:{cookie}});
   assert.equal(response.status, 200);
@@ -212,27 +230,27 @@ test('Authentik headers are rejected outside the configured portal host', async 
 });
 
 test('Papa sends a 140-character message idempotently', async () => {
-  const payload = { client_id: 'papa-test-1', body: 'x'.repeat(140) };
+  const payload = { client_id: 'papa-test-1', body: 'x'.repeat(140), room_id: 'family' };
   const send = () => fetch(`http://127.0.0.1:${port}/api/messages`, {
     method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(payload),
   });
   assert.equal((await send()).status, 201);
   assert.equal((await send()).status, 200);
-  const history = await fetch(`http://127.0.0.1:${port}/api/messages`, { headers: { cookie } }).then((r) => r.json());
+  const history = await fetch(`http://127.0.0.1:${port}/api/messages?room=family`, { headers: { cookie } }).then((r) => r.json());
   assert.equal(history.messages.filter((message) => message.client_id === payload.client_id).length, 1);
 });
 
 test('messages over 140 characters are rejected', async () => {
   const response = await fetch(`http://127.0.0.1:${port}/api/messages`, {
     method: 'POST', headers: { cookie, 'content-type': 'application/json' },
-    body: JSON.stringify({ client_id: 'too-long', body: 'x'.repeat(141) }),
+    body: JSON.stringify({ client_id: 'too-long', body: 'x'.repeat(141), room_id: 'family' }),
   });
   assert.equal(response.status, 400);
 });
 
 test('Albie synchronizes and records delivery and read state', async () => {
   const headers = { authorization: `Bearer ${deviceToken}` };
-  const sync = await fetch(`http://127.0.0.1:${port}/api/device/sync?after=0`, { headers }).then((r) => r.json());
+  const sync = await fetch(`http://127.0.0.1:${port}/api/device/sync?room=family&after=0`, { headers }).then((r) => r.json());
   const papaMessage = sync.messages.find((message) => message.client_id === 'papa-test-1');
   assert.equal(papaMessage.body.length, 140);
   const receipt = await fetch(`http://127.0.0.1:${port}/api/receipts`, {
@@ -240,13 +258,13 @@ test('Albie synchronizes and records delivery and read state', async () => {
     body: JSON.stringify({ message_id: papaMessage.id, state: 'read' }),
   });
   assert.equal(receipt.status, 200);
-  const history = await fetch(`http://127.0.0.1:${port}/api/messages`, { headers: { cookie } }).then((r) => r.json());
+  const history = await fetch(`http://127.0.0.1:${port}/api/messages?room=family`, { headers: { cookie } }).then((r) => r.json());
   assert.equal(history.messages.find((message) => message.id === papaMessage.id).receipts.find((item) => item.user_id === 'albie').state, 'read');
 });
 
 test('device sync honors bounded message and receipt pages', async () => {
   const headers = { authorization: `Bearer ${deviceToken}` };
-  const sync = await fetch(`http://127.0.0.1:${port}/api/device/sync?after=0&receipts_after=0&limit=1`, { headers }).then((r) => r.json());
+  const sync = await fetch(`http://127.0.0.1:${port}/api/device/sync?room=family&after=0&receipts_after=0&limit=1`, { headers }).then((r) => r.json());
   assert.ok(sync.messages.length <= 1);
   assert.ok(sync.receipts.length <= 1);
 });
@@ -254,7 +272,7 @@ test('device sync honors bounded message and receipt pages', async () => {
 test('device sync can disable long polling for responsive voice controls', async () => {
   const headers = { authorization: `Bearer ${deviceToken}` };
   const started = Date.now();
-  const response = await fetch(`http://127.0.0.1:${port}/api/device/sync?after=999999&receipts_after=9999999999999&limit=20&wait=0`, { headers });
+  const response = await fetch(`http://127.0.0.1:${port}/api/device/sync?room=family&after=999999&receipts_after=9999999999999&limit=20&wait=0`, { headers });
   assert.equal(response.status, 200);
   assert.ok(Date.now() - started < 1000);
 });
@@ -262,29 +280,29 @@ test('device sync can disable long polling for responsive voice controls', async
 test('Albie can send a message to Papa', async () => {
   const response = await fetch(`http://127.0.0.1:${port}/api/messages`, {
     method: 'POST', headers: { authorization: `Bearer ${deviceToken}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ client_id: 'albie-test-1', body: 'hello papa' }),
+    body: JSON.stringify({ client_id: 'albie-test-1', body: 'hello papa', room_id: 'family' }),
   });
   assert.equal(response.status, 201);
-  const history = await fetch(`http://127.0.0.1:${port}/api/messages`, { headers: { cookie } }).then((r) => r.json());
+  const history = await fetch(`http://127.0.0.1:${port}/api/messages?room=family`, { headers: { cookie } }).then((r) => r.json());
   assert.equal(history.messages.at(-1).author_id, 'albie');
   assert.equal(history.messages.at(-1).receipts.find((item) => item.user_id === 'papa').state, 'read');
 });
 
 test('Juju has an independent device identity and shared-family sync', async () => {
   const headers = { authorization: `Bearer ${jujuToken}` };
-  const sync = await fetch(`http://127.0.0.1:${port}/api/device/sync?after=0`, { headers }).then((r) => r.json());
+  const sync = await fetch(`http://127.0.0.1:${port}/api/device/sync?room=family&after=0`, { headers }).then((r) => r.json());
   assert.ok(sync.messages.length >= 2);
   const response = await fetch(`http://127.0.0.1:${port}/api/messages`, {
     method: 'POST', headers: { ...headers, 'content-type': 'application/json' },
-    body: JSON.stringify({ client_id: 'juju-test-1', body: 'hello family' }),
+    body: JSON.stringify({ client_id: 'juju-test-1', body: 'hello family', room_id: 'family' }),
   });
   assert.equal(response.status, 201);
-  const history = await fetch(`http://127.0.0.1:${port}/api/messages`, { headers: { cookie } }).then((r) => r.json());
+  const history = await fetch(`http://127.0.0.1:${port}/api/messages?room=family`, { headers: { cookie } }).then((r) => r.json());
   assert.equal(history.messages.at(-1).author_id, 'juju');
 });
 
 test('Papa Cardputer uses bearer sync without changing Papa web login', async () => {
-  const response = await fetch(`http://127.0.0.1:${port}/api/device/sync?after=0&wait=0`, {
+  const response = await fetch(`http://127.0.0.1:${port}/api/device/sync?room=family&after=0&wait=0`, {
     headers: { authorization: `Bearer ${papaDeviceToken}` },
   });
   assert.equal(response.status, 200);
@@ -296,7 +314,7 @@ test('Papa uploads and retrieves a bounded PCM voice clip', async () => {
   const pcm = Buffer.alloc(1600);
   for (let index = 0; index < pcm.length; index += 2) pcm.writeInt16LE((index * 17) % 32767, index);
   const upload = await fetch(`http://127.0.0.1:${port}/api/voice`, {
-    method: 'POST', headers: { cookie, 'content-type': 'application/octet-stream', 'x-client-id': 'voice-test-1', 'x-sample-rate': '8000' }, body: pcm,
+    method: 'POST', headers: { cookie, 'content-type': 'application/octet-stream', 'x-client-id': 'voice-test-1', 'x-sample-rate': '8000', 'x-room-id': 'family' }, body: pcm,
   });
   assert.equal(upload.status, 201);
   const message = (await upload.json()).message;
@@ -316,7 +334,7 @@ test('Papa uploads and retrieves a bounded PCM voice clip', async () => {
 
 test('voice clips reject oversized or malformed audio', async () => {
   const response = await fetch(`http://127.0.0.1:${port}/api/voice`, {
-    method: 'POST', headers: { cookie, 'content-type': 'application/octet-stream', 'x-client-id': 'bad-voice', 'x-sample-rate': '8000' }, body: Buffer.alloc(3),
+    method: 'POST', headers: { cookie, 'content-type': 'application/octet-stream', 'x-client-id': 'bad-voice', 'x-sample-rate': '8000', 'x-room-id': 'family' }, body: Buffer.alloc(3),
   });
   assert.equal(response.status, 400);
 });
@@ -326,7 +344,7 @@ test('authenticated device obtains and releases the half-duplex walkie channel',
     const socket = connect(port, '127.0.0.1'); let received = Buffer.alloc(0); let upgraded = false;
     const timer = setTimeout(() => { socket.destroy(); reject(new Error('walkie timeout')); }, 3000);
     socket.on('connect', () => socket.write([
-      'GET /walkie HTTP/1.1', `Host: 127.0.0.1:${port}`, 'Upgrade: websocket', 'Connection: Upgrade',
+      'GET /walkie?room=family HTTP/1.1', `Host: 127.0.0.1:${port}`, 'Upgrade: websocket', 'Connection: Upgrade',
       'Sec-WebSocket-Key: dGVzdC13YWxraWUta2V5', 'Sec-WebSocket-Version: 13', `Authorization: Bearer ${deviceToken}`, '', '',
     ].join('\r\n')));
     socket.on('data', (chunk) => {

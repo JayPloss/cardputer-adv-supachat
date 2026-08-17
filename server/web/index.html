@@ -18,7 +18,7 @@
       <section class="chat-panel" aria-label="Family text chat">
         <main id="messages" class="messages" aria-live="polite" aria-label="Family conversation"></main>
         <form id="composer" class="composer">
-          <label for="message">Message the family</label>
+          <label id="composer-label" for="message">Message this room</label>
           <div class="compose-row">
             <input id="message" name="message" maxlength="140" autocomplete="off" placeholder="Write something…" required>
             <button type="submit">Send</button>
@@ -31,7 +31,7 @@
         <button id="ptt" class="ptt-button" type="button">Hold to talk</button>
         <div class="walkie-divider"><span>or leave a message</span></div>
         <button id="voice-clip" class="voice-button" type="button">Record voice clip</button>
-        <p class="walkie-note">One person talks at a time. Voice clips stay in family history.</p>
+        <p id="voice-room-note" class="walkie-note">One person talks at a time. Voice clips stay in this room’s history.</p>
       </aside>
     </div>
     <dialog id="admin-zone" class="admin-zone" aria-labelledby="admin-title">
@@ -62,8 +62,8 @@
     <dialog id="welcome-zone" class="welcome-zone" aria-labelledby="welcome-title">
       <section class="welcome-card" data-vi-container="true">
         <p class="eyebrow">WELCOME TO SUPACHAT</p>
-        <h2 id="welcome-title">You’re in the family room.</h2>
-        <p class="welcome-intro">One shared conversation, kept simple.</p>
+        <h2 id="welcome-title">You’re in SupaChat.</h2>
+        <p id="welcome-room-copy" class="welcome-intro">Private group conversations, kept simple.</p>
         <ul class="welcome-concepts">
           <li><strong>Messages</strong><span>Type at the bottom. Newest messages stay in view.</span></li>
           <li><strong>Sound</strong><span>Incoming messages make a sound. Use “Sound: on” to mute it.</span></li>

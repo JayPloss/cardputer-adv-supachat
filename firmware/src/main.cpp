@@ -149,6 +149,7 @@ struct WifiProfile { String ssid; String password; };
 struct ScannedNetwork { String ssid; int32_t rssi; bool open; };
 struct ChatMessage {
   int64_t id = 0;
+  String roomId;
   String clientId;
   String authorId;
   String authorName;
@@ -390,9 +391,18 @@ void trimHistory() {
   if (messages.size() > kHistoryLimit) messages.erase(messages.begin(), messages.begin() + (messages.size() - kHistoryLimit));
 }
 
+String roomHistoryPath(const String &roomId, bool temporary = false) {
+  String safe;
+  for (const char character : roomId) if (isalnum(static_cast<unsigned char>(character)) || character == '-') safe += character;
+  if (safe.isEmpty()) safe = "unknown";
+  return "/supachat-" + safe + ".tsv" + (temporary ? ".tmp" : "");
+}
+
 void saveHistoryLocked() {
   if (!sdReady) return;
-  File file = SD.open("/supachat-messages.tsv.tmp", FILE_WRITE);
+  const String path = roomHistoryPath(currentRoomId);
+  const String temporaryPath = roomHistoryPath(currentRoomId, true);
+  File file = SD.open(temporaryPath, FILE_WRITE);
   if (!file) return;
   for (const auto &message : messages) {
     file.printf("%lld\t%s\t%s\t%s\t%s\t%lld\t%d\n", message.id, cleanField(message.clientId).c_str(),
@@ -400,13 +410,15 @@ void saveHistoryLocked() {
                 message.createdAt, message.queued ? 1 : 0);
   }
   file.close();
-  SD.remove("/supachat-messages.tsv");
-  SD.rename("/supachat-messages.tsv.tmp", "/supachat-messages.tsv");
+  SD.remove(path);
+  SD.rename(temporaryPath, path);
 }
 
 void loadHistory() {
   if (!sdReady) return;
-  File file = SD.open("/supachat-messages.tsv", FILE_READ);
+  String path = roomHistoryPath(currentRoomId);
+  if (!SD.exists(path) && currentRoomId == "family" && SD.exists("/supachat-messages.tsv")) path = "/supachat-messages.tsv";
+  File file = SD.open(path, FILE_READ);
   if (!file) return;
   while (file.available()) {
     String line = file.readStringUntil('\n');
@@ -417,7 +429,7 @@ void loadHistory() {
     }
     if (fields.size() < 7) continue;
     ChatMessage message;
-    message.id = strtoll(fields[0].c_str(), nullptr, 10); message.clientId = fields[1]; message.authorId = fields[2];
+    message.roomId = currentRoomId; message.id = strtoll(fields[0].c_str(), nullptr, 10); message.clientId = fields[1]; message.authorId = fields[2];
     message.authorName = fields[3]; message.body = fields[4]; message.createdAt = strtoll(fields[5].c_str(), nullptr, 10);
     message.queued = fields[6].toInt() == 1; message.state = message.queued ? "queued" : "saved";
     messages.push_back(message); lastServerId = std::max(lastServerId, message.id);
@@ -426,10 +438,19 @@ void loadHistory() {
 }
 
 void loadConfiguration() {
-  preferences.begin("supachat", true);
+  preferences.begin("supachat", false);
   deviceToken = preferences.getString("device_token", "");
   meshReady = decodeHexKey(preferences.getString("mesh_key", ""), meshKey, sizeof(meshKey));
   volumeLevel = std::min<uint8_t>(preferences.getUChar("volume", kDefaultVolumeLevel), 4);
+  // Older installs commonly persisted MAX as their effective default. Migrate
+  // that once so updated devices start at HIGH without overriding later choices.
+  if (!preferences.getBool("high_default", false)) {
+    if (volumeLevel == 4) {
+      volumeLevel = kDefaultVolumeLevel;
+      preferences.putUChar("volume", volumeLevel);
+    }
+    preferences.putBool("high_default", true);
+  }
   persistedBatteryLevel = preferences.getInt("battery_soc", -1);
   if (persistedBatteryLevel < 0 || persistedBatteryLevel > 100) persistedBatteryLevel = -1;
   const int count = preferences.getUChar("wifi_count", 0);
@@ -713,7 +734,7 @@ void onEspNowReceive(const uint8_t *, const uint8_t *data, int length) {
     std::vector<int16_t> samples(plain.size() / 2); memcpy(samples.data(), plain.data(), plain.size());
     if (stateMutex) { xSemaphoreTake(stateMutex, portMAX_DELAY); if (incomingAudio.size() < 12) incomingAudio.push_back(std::move(samples)); xSemaphoreGive(stateMutex); }
   } else if (packet->type == static_cast<uint8_t>(EspNowType::Text) && packet->payloadLength > 0) {
-    ChatMessage message; message.clientId = packet->clientId; message.authorId = packet->senderId; message.authorName = packet->senderName;
+    ChatMessage message; message.roomId = currentRoomId; message.clientId = packet->clientId; message.authorId = packet->senderId; message.authorName = packet->senderName;
     message.body = String(reinterpret_cast<const char *>(plain.data())).substring(0, plain.size()); message.state = "nearby";
     if (stateMutex) { xSemaphoreTake(stateMutex, portMAX_DELAY); if (std::none_of(messages.begin(), messages.end(), [&](const ChatMessage &item){ return item.clientId == message.clientId; })) messages.push_back(message); xSemaphoreGive(stateMutex); renderDirty = true; }
   }
@@ -963,13 +984,17 @@ String nextClientId() {
 }
 
 void mergeServerMessage(JsonObjectConst object) {
+  const String messageRoomId = String(object["conversation_id"] | "");
+  // A room switch can happen while an HTTPS sync is in flight. Never merge
+  // that stale response into the newly selected room.
+  if (messageRoomId.isEmpty() || messageRoomId != currentRoomId) return;
   const int64_t id = object["id"] | 0;
   const String clientId = object["client_id"] | "";
   auto existing = std::find_if(messages.begin(), messages.end(), [&](const ChatMessage &item) {
     return (id > 0 && item.id == id) || (!clientId.isEmpty() && item.clientId == clientId);
   });
   ChatMessage serverMessage;
-  serverMessage.id = id; serverMessage.clientId = clientId; serverMessage.authorId = String(object["author_id"] | "");
+  serverMessage.roomId = messageRoomId; serverMessage.id = id; serverMessage.clientId = clientId; serverMessage.authorId = String(object["author_id"] | "");
   serverMessage.authorName = String(object["author_name"] | "?"); serverMessage.body = String(object["body"] | "");
   serverMessage.createdAt = object["created_at"] | 0; serverMessage.queued = false; serverMessage.state = "saved";
   serverMessage.voice = String(object["type"] | "text") == "voice";
@@ -993,7 +1018,13 @@ void sendQueuedMessages() {
     xSemaphoreGive(stateMutex);
     if (text.isEmpty()) continue;
     String response; int status = 0;
-    const String payload = "{\"client_id\":\"" + jsonEscape(clientId) + "\",\"body\":\"" + jsonEscape(text) + "\",\"room_id\":\"" + jsonEscape(currentRoomId) + "\"}";
+    String queuedRoomId;
+    xSemaphoreTake(stateMutex, portMAX_DELAY);
+    item = std::find_if(messages.begin(), messages.end(), [&](const ChatMessage &message) { return message.clientId == clientId; });
+    if (item != messages.end()) queuedRoomId = item->roomId;
+    xSemaphoreGive(stateMutex);
+    if (queuedRoomId != currentRoomId) continue;
+    const String payload = "{\"client_id\":\"" + jsonEscape(clientId) + "\",\"body\":\"" + jsonEscape(text) + "\",\"room_id\":\"" + jsonEscape(queuedRoomId) + "\"}";
     if (!requestJson("/api/messages", "POST", payload, response, status) || (status != 200 && status != 201)) continue;
     JsonDocument document; if (deserializeJson(document, response)) continue;
     xSemaphoreTake(stateMutex, portMAX_DELAY);
@@ -1312,7 +1343,7 @@ bool navRight() { return physicalKeyAt(12, 3); }
 
 void sendDraft() {
   draft.trim(); if (draft.isEmpty()) return;
-  ChatMessage message; message.clientId = nextClientId(); message.authorId = kDeviceId; message.authorName = kDeviceName;
+  ChatMessage message; message.roomId = currentRoomId; message.clientId = nextClientId(); message.authorId = kDeviceId; message.authorName = kDeviceName;
   message.body = draft; message.createdAt = time(nullptr) * 1000LL; message.queued = true; message.state = "queued";
   xSemaphoreTake(stateMutex, portMAX_DELAY); messages.push_back(message); trimHistory(); saveHistoryLocked(); xSemaphoreGive(stateMutex);
   if (kEspNowEnabled && meshReady) {
@@ -1376,13 +1407,21 @@ void openSelectedMenuItem() {
   renderDirty = true;
 }
 
+void selectRoom(int next) {
+  if (next < 0 || next >= static_cast<int>(rooms.size()) || rooms[next].id == currentRoomId) return;
+  xSemaphoreTake(stateMutex, portMAX_DELAY);
+  saveHistoryLocked();
+  currentRoomId = rooms[next].id; currentRoomName = rooms[next].name; roomSelection = next;
+  messages.clear(); lastServerId = 0; lastReceiptAt = 0; historyOffset = 0; syncOverride = true;
+  loadHistory();
+  xSemaphoreGive(stateMutex);
+  walkieSocket.disconnect(); walkieInitialized = false; networkStatus = "SWITCHING"; renderDirty = true;
+}
+
 void switchRoom(int direction) {
   if (rooms.size() < 2) return;
   int active = 0; for (int index = 0; index < static_cast<int>(rooms.size()); index++) if (rooms[index].id == currentRoomId) active = index;
-  const int next = (active + direction + static_cast<int>(rooms.size())) % static_cast<int>(rooms.size());
-  currentRoomId = rooms[next].id; currentRoomName = rooms[next].name; roomSelection = next;
-  messages.clear(); lastServerId = 0; lastReceiptAt = 0; historyOffset = 0; syncOverride = true;
-  walkieSocket.disconnect(); walkieInitialized = false; networkStatus = "SWITCHING"; renderDirty = true;
+  selectRoom((active + direction + static_cast<int>(rooms.size())) % static_cast<int>(rooms.size()));
 }
 
 void handleKeyboard() {
@@ -1406,7 +1445,7 @@ void handleKeyboard() {
     if (goUp && roomSelection > 0) roomSelection--;
     else if (goDown && roomSelection + 1 < static_cast<int>(rooms.size())) roomSelection++;
     else if (goLeft) screenMode = ScreenMode::Menu;
-    else if ((goRight || keys.enter) && !rooms.empty()) { currentRoomId=rooms[roomSelection].id; currentRoomName=rooms[roomSelection].name; messages.clear(); lastServerId=0; lastReceiptAt=0; historyOffset=0; screenMode=ScreenMode::Chat; syncOverride=true; walkieSocket.disconnect(); walkieInitialized=false; }
+    else if ((goRight || keys.enter) && !rooms.empty()) { selectRoom(roomSelection); screenMode=ScreenMode::Chat; }
     playNextTone(); renderDirty=true; return;
   }
   if (screenMode == ScreenMode::Volume) {

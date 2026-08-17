@@ -212,8 +212,9 @@ function roomsFor(userId) {
     WHERE cm.user_id = ? GROUP BY c.id, c.name ORDER BY CASE c.id WHEN 'family' THEN 0 ELSE 1 END, c.name`).all(userId);
 }
 
-function authorizedRoom(userId, requested = 'family') {
-  const roomId = String(requested || 'family').toLowerCase();
+function authorizedRoom(userId, requested) {
+  const roomId = String(requested || '').trim().toLowerCase();
+  if (!roomId) return null;
   return db.prepare('SELECT c.id, c.name FROM conversations c JOIN conversation_members cm ON cm.conversation_id = c.id WHERE c.id = ? AND cm.user_id = ?').get(roomId, userId);
 }
 
@@ -336,7 +337,7 @@ function pcmWav(pcm, sampleRate = 8000) {
   return Buffer.concat([header, pcm]);
 }
 
-function messageRows(roomId = 'family', after = 0, limit = 100) {
+function messageRows(roomId, after = 0, limit = 100) {
   const bounded = Math.min(Math.max(limit, 1), 100);
   const rows = after > 0 ? db.prepare(`
     SELECT m.id, m.client_id, m.conversation_id, m.author_id, u.display_name AS author_name,
@@ -361,7 +362,7 @@ function messageRows(roomId = 'family', after = 0, limit = 100) {
   }));
 }
 
-function presenceRows(roomId = 'family') {
+function presenceRows(roomId) {
   const now = Date.now();
   return db.prepare(`
     SELECT u.id, u.display_name, u.short_name, p.last_seen_at, p.connected
@@ -374,7 +375,7 @@ function presenceRows(roomId = 'family') {
   }));
 }
 
-function receiptRows(roomId = 'family', after = 0, limit = 100) {
+function receiptRows(roomId, after = 0, limit = 100) {
   const bounded = Math.min(Math.max(limit, 1), 100);
   return db.prepare(`
     SELECT r.message_id, r.user_id, r.state, r.updated_at FROM receipts r JOIN messages m ON m.id = r.message_id
@@ -554,7 +555,7 @@ const server = createServer(async (req, res) => {
       const username = String(payload.username || '').trim().toLowerCase();
       const displayName = String(payload.display_name || '').trim();
       const email = String(payload.email || '').trim().toLowerCase();
-      const roomId = String(payload.room_id || 'family').toLowerCase();
+      const roomId = String(payload.room_id || '').trim().toLowerCase();
       if (!db.prepare("SELECT 1 FROM conversations WHERE id = ? AND kind IN ('shared','room')").get(roomId) || !/^[a-z0-9][a-z0-9._-]{1,31}$/.test(username) || !displayName || displayName.length > 80 || (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) {
         return json(res, 400, { error: 'invalid_invitation' });
       }
@@ -606,6 +607,7 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === '/api/messages' && req.method === 'GET') {
+      if (!url.searchParams.get('room')) return json(res, 400, { error: 'room_required' });
       const room = authorizedRoom(user, url.searchParams.get('room'));
       if (!room) return json(res, 403, { error: 'room_forbidden' });
       const messages = messageRows(room.id, Number(url.searchParams.get('after') || 0), Number(url.searchParams.get('limit') || 100));
@@ -621,11 +623,16 @@ const server = createServer(async (req, res) => {
     if (url.pathname === '/api/messages' && req.method === 'POST') {
       if (webUser(req) && !sameOrigin(req)) return json(res, 403, { error: 'origin_rejected' });
       const payload = await body(req);
+      if (!payload.room_id) return json(res, 400, { error: 'room_required' });
       const room = authorizedRoom(user, payload.room_id);
       if (!room) return json(res, 403, { error: 'room_forbidden' });
       const text = typeof payload.body === 'string' ? payload.body.trim() : '';
       const clientId = String(payload.client_id || '').slice(0, 80);
       if (!text || [...text].length > 140 || !clientId) return json(res, 400, { error: 'invalid_message', max_length: 140 });
+      const existing = db.prepare('SELECT id, conversation_id, body, type FROM messages WHERE author_id = ? AND client_id = ?').get(user, clientId);
+      if (existing && (existing.conversation_id !== room.id || existing.body !== text || existing.type !== 'text')) {
+        return json(res, 409, { error: 'client_id_conflict' });
+      }
       let result;
       try {
         result = db.prepare('INSERT INTO messages(conversation_id, author_id, client_id, body, created_at) VALUES (?, ?, ?, ?, ?)').run(room.id, user, clientId, text, Date.now());
@@ -643,10 +650,15 @@ const server = createServer(async (req, res) => {
       const clientId = String(req.headers['x-client-id'] || '').slice(0, 80);
       const sampleRate = Number(req.headers['x-sample-rate'] || 8000);
       const samples = await rawBody(req);
+      if (!req.headers['x-room-id']) return json(res, 400, { error: 'room_required' });
       const room = authorizedRoom(user, req.headers['x-room-id']);
       if (!room) return json(res, 403, { error: 'room_forbidden' });
       if (!clientId || sampleRate !== 8000 || !samples.length || samples.length > 80_000 || samples.length % 2) {
         return json(res, 400, { error: 'invalid_voice_clip', max_seconds: 5, format: 'pcm_s16le_8000_mono' });
+      }
+      const existing = db.prepare('SELECT id, conversation_id, type FROM messages WHERE author_id = ? AND client_id = ?').get(user, clientId);
+      if (existing && (existing.conversation_id !== room.id || existing.type !== 'voice')) {
+        return json(res, 409, { error: 'client_id_conflict' });
       }
       let inserted = false;
       try {
@@ -698,6 +710,7 @@ const server = createServer(async (req, res) => {
       return json(res, 200, { ok: true });
     }
     if (url.pathname === '/api/presence' && req.method === 'GET') {
+      if (!url.searchParams.get('room')) return json(res, 400, { error: 'room_required' });
       const room = authorizedRoom(user, url.searchParams.get('room'));
       if (!room) return json(res, 403, { error: 'room_forbidden' });
       return json(res, 200, { room, presence: presenceRows(room.id) });
@@ -710,6 +723,7 @@ const server = createServer(async (req, res) => {
       return;
     }
     if (url.pathname === '/api/device/sync' && req.method === 'GET' && deviceUser(req)) {
+      if (!url.searchParams.get('room')) return json(res, 400, { error: 'room_required' });
       const room = authorizedRoom(user, url.searchParams.get('room'));
       if (!room) return json(res, 403, { error: 'room_forbidden' });
       const after = Number(url.searchParams.get('after') || 0);

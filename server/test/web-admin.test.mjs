@@ -13,6 +13,9 @@ test('web admin zone is restricted to admin sessions and creates invitations', (
   assert.match(app, /currentUser\?\.role !== 'admin'/);
   assert.match(app, /api\('api\/admin\/invitations'/);
   assert.match(app, /navigator\.share/);
+  assert.match(app, /Join our SUPACHAT \$\{roomName\} room/);
+  assert.doesNotMatch(app, /Join our SUPACHAT Family room/);
+  assert.match(app, /if \(currentRoom !== requestedRoom\) return/);
 });
 
 test('newly enrolled users receive a one-time welcome modal', () => {

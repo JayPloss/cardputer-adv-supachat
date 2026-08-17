@@ -4,7 +4,7 @@ import { connect } from 'node:tls';
 
 const token = process.env.SUPACHAT_DEVICE_TOKEN;
 const host = process.env.SUPACHAT_SMOKE_HOST || 'supachat.net';
-const path = process.env.SUPACHAT_SMOKE_PATH || '/walkie';
+const path = process.env.SUPACHAT_SMOKE_PATH || '/walkie?room=family';
 if (!token) throw new Error('SUPACHAT_DEVICE_TOKEN is required');
 
 function clientTextFrame(value) {

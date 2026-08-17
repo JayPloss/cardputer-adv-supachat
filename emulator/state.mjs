@@ -16,7 +16,7 @@ export class SupaChatState {
   tone(){if(this.volume>0)this.tones++}
   bootTick(ms){if(!this.bootSkipped)this.bootElapsedMs+=ms}
   skipBoot(){this.bootSkipped=true;this.bootActive=false}
-  receive(author,body,id=author.toLowerCase()){this.messages.push({id,author,body,state:'saved'});if(author!==this.name&&this.volume>0)this.notifications++}
+  receive(author,body,id=author.toLowerCase(),room=this.currentRoom){if(room!==this.currentRoom)return false;this.messages.push({id,author,body,state:'saved'});if(author!==this.name&&this.volume>0)this.notifications++;return true}
   menu(){this.screen=this.screen==='menu'?'chat':'menu';this.tone()}
   switchRoom(direction){this.roomSelection=(this.roomSelection+direction+this.rooms.length)%this.rooms.length;this.currentRoom=this.rooms[this.roomSelection];this.roomNew[this.roomSelection]=false;this.messages=[]}
   left(){if(this.screen==='chat')this.switchRoom(-1);else if(this.screen==='menu')this.screen='chat';else this.screen='menu';this.tone()}

@@ -21,6 +21,10 @@ const inviteGenerate = document.querySelector('#invite-generate');
 const roomSelect = document.querySelector('#room-select');
 const welcomeZone = document.querySelector('#welcome-zone');
 const welcomeClose = document.querySelector('#welcome-close');
+const composerLabel = document.querySelector('#composer-label');
+const voiceRoomNote = document.querySelector('#voice-room-note');
+const welcomeTitle = document.querySelector('#welcome-title');
+const welcomeRoomCopy = document.querySelector('#welcome-room-copy');
 const newGroupForm = document.querySelector('#new-group-form');
 const groupState = document.querySelector('#group-state');
 const manageRoom = document.querySelector('#manage-room');
@@ -33,6 +37,7 @@ let messages = [];
 let currentUser = null;
 let rooms = [];
 let currentRoom = new URLSearchParams(location.search).get('room') || localStorage.getItem('supachat-room') || 'family';
+let clipRoom = '';
 
 const api = async (path, options = {}) => {
   const response = await fetch(path, { ...options, headers: { 'content-type': 'application/json', ...(options.headers || {}) } });
@@ -158,7 +163,7 @@ voiceClipButton.addEventListener('click', async () => {
     for (const chunk of clipChunks) { pcm.set(chunk, offset); offset += chunk.length; }
     voiceClipButton.textContent = 'Uploading…'; voiceClipButton.disabled = true;
     try {
-      const response = await fetch('api/voice', { method:'POST', headers:{'content-type':'application/octet-stream','x-client-id':crypto.randomUUID(),'x-sample-rate':'8000','x-room-id':currentRoom}, body:pcm });
+      const response = await fetch('api/voice', { method:'POST', headers:{'content-type':'application/octet-stream','x-client-id':crypto.randomUUID(),'x-sample-rate':'8000','x-room-id':clipRoom}, body:pcm });
       if (!response.ok) throw new Error('upload_failed');
       voiceClipButton.textContent = 'Record voice clip';
     } catch { voiceClipButton.textContent = 'Upload failed — retry'; }
@@ -167,6 +172,7 @@ voiceClipButton.addEventListener('click', async () => {
   }
   clipChunks = [];
   try {
+    clipRoom = currentRoom;
     await startCapture((chunk) => clipChunks.push(chunk));
     voiceClipButton.textContent = 'Stop + send (5s max)';
     clipTimer = setTimeout(() => voiceClipButton.click(), 5000);
@@ -223,7 +229,14 @@ async function refresh() {
   if (!rooms.some((room) => room.id === currentRoom)) currentRoom = rooms[0]?.id || 'family';
   roomSelect.innerHTML = rooms.map((room) => `<option value="${escapeHtml(room.id)}">${escapeHtml(room.name)}</option>`).join('');
   roomSelect.value = currentRoom;
-  const [{ messages: next }, { presence }] = await Promise.all([api(`api/messages?room=${encodeURIComponent(currentRoom)}&limit=100`), api(`api/presence?room=${encodeURIComponent(currentRoom)}`)]);
+  const activeRoomName = rooms.find((room) => room.id === currentRoom)?.name || 'this room';
+  composerLabel.textContent = `Message ${activeRoomName}`;
+  voiceRoomNote.textContent = `One person talks at a time. Voice clips stay in ${activeRoomName} history.`;
+  welcomeTitle.textContent = `You’re in ${activeRoomName}.`;
+  welcomeRoomCopy.textContent = `This invitation added you to the ${activeRoomName} conversation.`;
+  const requestedRoom = currentRoom;
+  const [{ messages: next }, { presence }] = await Promise.all([api(`api/messages?room=${encodeURIComponent(requestedRoom)}&limit=100`), api(`api/presence?room=${encodeURIComponent(requestedRoom)}`)]);
+  if (currentRoom !== requestedRoom) return;
   adminOpen.hidden = currentUser?.role !== 'admin';
   messages = next;
   renderMessages(true);
@@ -283,10 +296,11 @@ inviteForm.addEventListener('submit', async (event) => {
         display_name:String(data.get('display_name') || '').trim(),
         username:String(data.get('username') || '').trim(),
         email:String(data.get('email') || '').trim(),
-        room_id:String(data.get('room_id') || 'family'),
+        room_id:String(data.get('room_id') || ''),
       }),
     });
     inviteLink.href = invitation.url; inviteLink.textContent = invitation.url;
+    inviteLink.dataset.roomName = adminGroups.find((group) => group.id === invitation.room_id)?.name || invitation.room_id;
     inviteResult.hidden = false; inviteState.textContent = '';
   } catch (error) {
     inviteState.textContent = error.message === 'invalid_invitation' ? 'Check the name, username, and email.' : 'Could not generate the invite.';
@@ -294,7 +308,8 @@ inviteForm.addEventListener('submit', async (event) => {
 });
 inviteShare.addEventListener('click', async () => {
   const url = inviteLink.href;
-  if (navigator.share) await navigator.share({title:'Join SUPACHAT', text:'Join our SUPACHAT Family room', url});
+  const roomName = inviteLink.dataset.roomName || 'group';
+  if (navigator.share) await navigator.share({title:'Join SUPACHAT', text:`Join our SUPACHAT ${roomName} room`, url});
   else { await navigator.clipboard.writeText(url); inviteState.textContent = 'Invite link copied.'; }
 });
 function renderPresence(presence) {
@@ -327,7 +342,12 @@ events.addEventListener('message', (event) => {
   messages = messages.slice(-100); renderMessages(true);
   if (incoming) playNotificationSound();
 });
-events.addEventListener('receipt', async () => { ({messages} = await api(`api/messages?room=${encodeURIComponent(currentRoom)}&limit=100`)); renderMessages(); });
+events.addEventListener('receipt', async () => {
+  const requestedRoom = currentRoom;
+  const result = await api(`api/messages?room=${encodeURIComponent(requestedRoom)}&limit=100`);
+  if (currentRoom !== requestedRoom) return;
+  messages = result.messages; renderMessages();
+});
 events.onerror = () => { sendState.textContent = 'Reconnecting…'; };
-setInterval(async () => { try { renderPresence((await api(`api/presence?room=${encodeURIComponent(currentRoom)}`)).presence); sendState.textContent = 'Ready'; } catch {} }, 20_000);
+setInterval(async () => { try { const requestedRoom=currentRoom; const result=await api(`api/presence?room=${encodeURIComponent(requestedRoom)}`); if(currentRoom===requestedRoom)renderPresence(result.presence); sendState.textContent = 'Ready'; } catch {} }, 20_000);
 refresh();
