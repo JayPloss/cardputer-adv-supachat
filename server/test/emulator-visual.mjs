@@ -37,12 +37,12 @@ await page.getByRole('button', { name: 'SHIFT + / = ?' }).click();
 assert.equal((await state()).draft, '?');
 assert.equal((await state()).screen, 'chat');
 assert.ok((await state()).tones > 0);
-await page.getByRole('button', { name: '← MENU' }).click();
+await page.getByRole('button', { name: 'REAR · MENU' }).click();
 await shot('menu');
 
 async function openMenu(index) {
   await page.reload();
-  await page.getByRole('button', { name: '← MENU' }).click();
+  await page.getByRole('button', { name: 'REAR · MENU' }).click();
   for (let i = 0; i < index; i++) await page.getByRole('button', { name: '↓ .' }).click();
   await page.getByRole('button', { name: 'ENTER' }).click();
 }

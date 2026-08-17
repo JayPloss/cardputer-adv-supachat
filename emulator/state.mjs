@@ -8,7 +8,7 @@ export class SupaChatState {
     Object.assign(this,{name,screen:'chat',menuSelection:0,networkSelection:0,network:'SYNCED',ssid:'Plossco Family',
       walkie:'READY',transport:'HETZNER',recording:false,spaceHeld:false,recordedMs:0,clipReady:false,clipPending:false,
       replayAudible:false,voiceSelection:0,volume:3,draft:'',password:'',selectedSsid:'',tones:0,notifications:0,http:200,heap:181432,
-      batteryLevel:73,batteryVoltageMv:3986,externalPowerDetected:true,roomSelection:0,currentRoom:'Family',rooms:['Family','K-BUDS','Sunday Crew'],
+      batteryLevel:73,batteryVoltageMv:3986,externalPowerDetected:true,roomSelection:0,currentRoom:'Family',rooms:['Family','K-BUDS','Sunday Crew'],roomNew:[false,true,false],
       easternTime:'3:42P',
       bootElapsedMs:0,bootSkipped:false,bootActive:true,
       messages:[{id:'papa',messageId:41,author:'Papa',body:'Hey Albie — testing SupaChat.',state:'read'},{id:'juju',messageId:42,author:'Julien',body:'I found the orange channel.',state:'saved'},{id:'papa',messageId:43,author:'Papa',body:'',voice:true,state:'saved'},{id:'albie',messageId:44,author:name,body:'I am online!',state:'saved'}]});
@@ -17,10 +17,12 @@ export class SupaChatState {
   bootTick(ms){if(!this.bootSkipped)this.bootElapsedMs+=ms}
   skipBoot(){this.bootSkipped=true;this.bootActive=false}
   receive(author,body,id=author.toLowerCase()){this.messages.push({id,author,body,state:'saved'});if(author!==this.name&&this.volume>0)this.notifications++}
-  left(){if(this.screen==='chat')this.screen='menu';else if(this.screen==='menu')this.screen='chat';else this.screen='menu';this.tone()}
+  menu(){this.screen=this.screen==='menu'?'chat':'menu';this.tone()}
+  switchRoom(direction){this.roomSelection=(this.roomSelection+direction+this.rooms.length)%this.rooms.length;this.currentRoom=this.rooms[this.roomSelection];this.roomNew[this.roomSelection]=false;this.messages=[]}
+  left(){if(this.screen==='chat')this.switchRoom(-1);else if(this.screen==='menu')this.screen='chat';else this.screen='menu';this.tone()}
   up(){if(this.screen==='menu')this.menuSelection=(this.menuSelection+6)%7;else if(this.screen==='rooms')this.roomSelection=Math.max(0,this.roomSelection-1);else if(this.screen==='networks')this.networkSelection=Math.max(0,this.networkSelection-1);else if(this.screen==='walkie')this.voiceSelection=Math.max(0,this.voiceSelection-1);this.tone()}
   down(){if(this.screen==='menu')this.menuSelection=(this.menuSelection+1)%7;else if(this.screen==='rooms')this.roomSelection=Math.min(this.rooms.length-1,this.roomSelection+1);else if(this.screen==='networks')this.networkSelection=Math.min(networks.length-1,this.networkSelection+1);else if(this.screen==='walkie')this.voiceSelection=Math.min(this.messages.filter(m=>m.voice).length-1,this.voiceSelection+1);this.tone()}
-  right(){if(this.screen==='menu')this.open(menuItems[this.menuSelection]);else if(this.screen==='networks')this.selectNetwork();else if(this.screen==='volume')this.volume=Math.min(4,this.volume+1);this.tone()}
+  right(){if(this.screen==='chat')this.switchRoom(1);else if(this.screen==='menu')this.open(menuItems[this.menuSelection]);else if(this.screen==='networks')this.selectNetwork();else if(this.screen==='volume')this.volume=Math.min(4,this.volume+1);this.tone()}
   enter(){
     if(this.screen==='menu')this.open(menuItems[this.menuSelection]);
     else if(this.screen==='walkie'){this.replayAudible=!this.replayAudible;this.walkie=this.replayAudible?'PLAYING':'STOPPED'}

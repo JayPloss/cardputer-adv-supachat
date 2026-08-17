@@ -173,6 +173,15 @@ test('K-BUDS membership cannot read or write Family', async () => {
   assert.equal(family.messages.some((message) => message.client_id === 'kbuds-only-1'), false);
 });
 
+test('room discovery reports independent latest-message cursors', async () => {
+  const response = await fetch(`http://127.0.0.1:${port}/api/rooms`, {headers:{cookie}});
+  assert.equal(response.status, 200);
+  const {rooms} = await response.json();
+  const family = rooms.find(room => room.id === 'family'); const kbuds = rooms.find(room => room.id === 'k-buds');
+  assert.ok(family.latest_message_id > 0); assert.ok(kbuds.latest_message_id > 0);
+  assert.notEqual(family.latest_message_id, kbuds.latest_message_id);
+});
+
 test('Papa Authentik identity maps to existing Papa history', async () => {
   const response = await fetch(`http://127.0.0.1:${port}/api/session`, {
     headers: { 'x-forwarded-host': 'supachat.net', 'x-authentik-uid': 'uid-papa', 'x-authentik-username': 'papa', 'x-authentik-name': 'Papa' },

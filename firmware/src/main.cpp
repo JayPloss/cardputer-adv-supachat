@@ -165,7 +165,7 @@ struct ChatLine {
   bool mine;
   bool label;
 };
-struct ChatRoom { String id; String name; };
+struct ChatRoom { String id; String name; int64_t latestMessageId; int64_t seenMessageId; };
 
 uint32_t participantColour(const String &authorId, const String &authorName = "") {
   String identity = authorId + " " + authorName; identity.toLowerCase();
@@ -224,6 +224,7 @@ bool spacePttHeld = false;
 uint32_t spaceReleaseStartedAt = 0;
 bool walkieConnected = false;
 bool walkieInitialized = false;
+bool roomsInitialized = false;
 bool walkieGranted = false;
 bool audioPlaying = false;
 volatile bool messageNotificationPending = false;
@@ -1011,8 +1012,14 @@ void synchronize() {
   if (requestJson("/api/rooms", "GET", "", roomsResponse, roomsStatus) && roomsStatus == 200) {
     JsonDocument roomDocument;
     if (!deserializeJson(roomDocument, roomsResponse)) {
-      rooms.clear();
-      for (JsonObjectConst object : roomDocument["rooms"].as<JsonArrayConst>()) rooms.push_back({String(object["id"] | ""), String(object["name"] | "Room")});
+      std::vector<ChatRoom> nextRooms;
+      for (JsonObjectConst object : roomDocument["rooms"].as<JsonArrayConst>()) {
+        const String id = String(object["id"] | ""); const int64_t latest = object["latest_message_id"] | 0;
+        auto previous = std::find_if(rooms.begin(), rooms.end(), [&](const ChatRoom &room) { return room.id == id; });
+        const int64_t seen = previous != rooms.end() ? previous->seenMessageId : latest;
+        nextRooms.push_back({id, String(object["name"] | "Room"), latest, seen});
+      }
+      rooms = std::move(nextRooms); roomsInitialized = true;
       auto active = std::find_if(rooms.begin(), rooms.end(), [&](const ChatRoom &room) { return room.id == currentRoomId; });
       if (active == rooms.end() && !rooms.empty()) { currentRoomId = rooms[0].id; currentRoomName = rooms[0].name; }
       else if (active != rooms.end()) currentRoomName = active->name;
@@ -1052,6 +1059,8 @@ void synchronize() {
   for (const int64_t id : newlyRead) if (id > 0) postReadReceipt(id);
   networkStatus = "SYNCED"; renderDirty = true;
   initialSyncComplete = true;
+  auto activeRoom = std::find_if(rooms.begin(), rooms.end(), [&](const ChatRoom &room) { return room.id == currentRoomId; });
+  if (activeRoom != rooms.end()) activeRoom->seenMessageId = std::max(activeRoom->latestMessageId, lastServerId);
 }
 
 void networkTask(void *) {
@@ -1114,7 +1123,15 @@ void drawHeader(const char *title) {
 }
 
 void drawChat() {
-  auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader(currentRoomName.substring(0, 5).c_str());
+  auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader("");
+  int activeIndex = -1; for (int index = 0; index < static_cast<int>(rooms.size()); index++) if (rooms[index].id == currentRoomId) activeIndex = index;
+  const int leftIndex = rooms.size() > 1 && activeIndex >= 0 ? (activeIndex - 1 + rooms.size()) % rooms.size() : -1;
+  const int rightIndex = rooms.size() > 1 && activeIndex >= 0 ? (activeIndex + 1) % rooms.size() : -1;
+  const bool leftNew = leftIndex >= 0 && rooms[leftIndex].latestMessageId > rooms[leftIndex].seenMessageId;
+  const bool rightNew = rightIndex >= 0 && rooms[rightIndex].latestMessageId > rooms[rightIndex].seenMessageId;
+  display.setTextSize(1); display.setTextColor(leftNew ? TFT_YELLOW : TFT_DARKGREY, TFT_DARKGREEN); display.setCursor(4, 6); display.print(leftNew ? "<*" : "< ");
+  const String roomTitle = currentRoomName.substring(0, 10); display.setTextColor(TFT_WHITE, TFT_DARKGREEN); display.setCursor(50 - roomTitle.length() * 3, 6); display.print(roomTitle);
+  display.setTextColor(rightNew ? TFT_YELLOW : TFT_DARKGREY, TFT_DARKGREEN); display.setCursor(91, 6); display.print(rightNew ? "*>" : " >");
   xSemaphoreTake(stateMutex, portMAX_DELAY);
   const int end = std::max(0, static_cast<int>(messages.size()) - static_cast<int>(historyOffset));
   const int first = std::max(0, end - 10);
@@ -1359,6 +1376,15 @@ void openSelectedMenuItem() {
   renderDirty = true;
 }
 
+void switchRoom(int direction) {
+  if (rooms.size() < 2) return;
+  int active = 0; for (int index = 0; index < static_cast<int>(rooms.size()); index++) if (rooms[index].id == currentRoomId) active = index;
+  const int next = (active + direction + static_cast<int>(rooms.size())) % static_cast<int>(rooms.size());
+  currentRoomId = rooms[next].id; currentRoomName = rooms[next].name; roomSelection = next;
+  messages.clear(); lastServerId = 0; lastReceiptAt = 0; historyOffset = 0; syncOverride = true;
+  walkieSocket.disconnect(); walkieInitialized = false; networkStatus = "SWITCHING"; renderDirty = true;
+}
+
 void handleKeyboard() {
   if (!M5Cardputer.Keyboard.isChange() || !M5Cardputer.Keyboard.isPressed()) return;
   const auto keys = M5Cardputer.Keyboard.keysState();
@@ -1423,7 +1449,8 @@ void handleKeyboard() {
     xSemaphoreGive(stateMutex); playNextTone(); renderDirty = true; return;
   }
   if (goDown) { if (historyOffset > 0) historyOffset--; playNextTone(); renderDirty = true; return; }
-  if (goLeft || goRight) { screenMode = ScreenMode::Menu; playNextTone(); renderDirty = true; return; }
+  if (goLeft) { switchRoom(-1); playNextTone(); return; }
+  if (goRight) { switchRoom(1); playNextTone(); return; }
   playNextTone();
   if (keys.enter) { sendDraft(); return; }
   if (keys.del) { if (!draft.isEmpty()) draft.remove(draft.length() - 1); renderDirty = true; return; }

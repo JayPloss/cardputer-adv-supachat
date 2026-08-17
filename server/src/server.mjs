@@ -207,8 +207,9 @@ function claimPendingRoomMemberships(userId, username) {
 }
 
 function roomsFor(userId) {
-  return db.prepare(`SELECT c.id, c.name FROM conversations c JOIN conversation_members cm ON cm.conversation_id = c.id
-    WHERE cm.user_id = ? ORDER BY CASE c.id WHEN 'family' THEN 0 ELSE 1 END, c.name`).all(userId);
+  return db.prepare(`SELECT c.id, c.name, COALESCE(MAX(m.id), 0) AS latest_message_id FROM conversations c JOIN conversation_members cm ON cm.conversation_id = c.id
+    LEFT JOIN messages m ON m.conversation_id = c.id
+    WHERE cm.user_id = ? GROUP BY c.id, c.name ORDER BY CASE c.id WHEN 'family' THEN 0 ELSE 1 END, c.name`).all(userId);
 }
 
 function authorizedRoom(userId, requested = 'family') {
