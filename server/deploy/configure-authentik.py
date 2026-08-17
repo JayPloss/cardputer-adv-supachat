@@ -11,6 +11,7 @@ from django.db import transaction
 from authentik.brands.models import Brand
 from authentik.core.models import Application, Group, User
 from authentik.outposts.models import DockerServiceConnection, Outpost
+from authentik.outposts.tasks import outpost_controller
 from authentik.policies.models import PolicyBinding
 from authentik.providers.proxy.models import ProxyProvider
 from authentik.providers.oauth2.models import OAuth2Provider, RedirectURI
@@ -187,9 +188,10 @@ with transaction.atomic():
         authentik_host_browser="https://auth.supachat.net",
         authentik_host_insecure=False,
         docker_map_ports=True,
-        docker_network="le954-authentik_default",
+        docker_network="supachat-auth",
     )
     supachat_outpost.save()
     supachat_outpost.providers.add(provider)
+    transaction.on_commit(lambda: outpost_controller.send(str(supachat_outpost.pk)))
 
 print("SupaChat application, users, domain brand, and dedicated proxy outpost are configured.")

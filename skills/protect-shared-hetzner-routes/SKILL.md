@@ -1,6 +1,6 @@
 ---
 name: protect-shared-hetzner-routes
-description: Protect existing applications, Caddy routes, TLS configuration, and authentication on a shared Hetzner server. Use before deploying SupaChat or another app to le954.ca, editing Caddy, changing login or bearer authentication, rotating certificates, adding paths, restarting shared services, or diagnosing server connectivity.
+description: Protect existing applications, Caddy routes, TLS configuration, and authentication on a shared Hetzner server. Use before deploying SupaChat, editing Caddy, changing login or bearer authentication, rotating certificates, adding paths, restarting shared services, or diagnosing server connectivity.
 ---
 
 # Protect Shared Hetzner Routes
@@ -8,7 +8,7 @@ description: Protect existing applications, Caddy routes, TLS configuration, and
 Assume the host serves many unrelated production applications.
 
 1. Inventory the current route, service, container, and auth boundaries read-only.
-2. Scope SupaChat changes under `/supachat` only.
+2. Scope SupaChat changes to its dedicated virtual hosts and service only.
 3. Preserve all existing routes, middleware, cookies, login flows, headers, certificates, and redirects.
 4. Do not replace shared Caddy configuration wholesale.
 5. Do not weaken or bypass unrelated authentication.

@@ -8,5 +8,6 @@ param(
 $ErrorActionPreference = 'Stop'
 Write-Host "Setting the Authentik password for SupaChat user '$Username'."
 Write-Host 'The password is entered directly into Authentik and is not stored by this script.'
-& ssh.exe -t -i $IdentityFile $Server "docker exec -it le954-authentik-server ak changepassword $Username"
+$remoteCommand = "container=`$(docker ps --filter label=com.docker.compose.service=authentik-server --format '{{.Names}}' | head -n 1); test -n `"`$container`"; docker exec -it `"`$container`" ak changepassword $Username"
+& ssh.exe -t -i $IdentityFile $Server $remoteCommand
 if ($LASTEXITCODE -ne 0) { throw 'Authentik password change failed.' }

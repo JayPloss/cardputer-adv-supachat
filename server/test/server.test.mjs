@@ -224,7 +224,7 @@ test('SupaChat-native Authentik usernames preserve family identities', async () 
 
 test('Authentik headers are rejected outside the configured portal host', async () => {
   const response = await fetch(`http://127.0.0.1:${port}/api/session`, {
-    headers: { 'x-forwarded-host': 'le954.ca', 'x-authentik-uid': 'spoofed', 'x-authentik-username': 'attacker@example.test' },
+    headers: { 'x-forwarded-host': 'legacy.example.test', 'x-authentik-uid': 'spoofed', 'x-authentik-username': 'attacker@example.test' },
   });
   assert.equal(response.status, 401);
 });

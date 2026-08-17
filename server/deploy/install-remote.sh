@@ -22,10 +22,14 @@ find "$install_root" -type f -exec chmod 0644 {} +
 install -o root -g root -m 0600 "$env_source" /etc/supachat.env
 install -o root -g root -m 0644 "$install_root/deploy/supachat.service" /etc/systemd/system/supachat.service
 
-install -d -o root -g root -m 0755 /opt/le954-authentik/data/media/public/branding
-install -o root -g root -m 0644 "$install_root/web/supachat-logo.png" /opt/le954-authentik/data/media/public/branding/supachat-logo.png
-docker exec -i le954-authentik-server ak shell < "$install_root/deploy/configure-authentik.py"
-invite_config=$(docker exec -i le954-authentik-server ak shell < "$install_root/deploy/configure-invite-service.py" | grep '^SUPACHAT_AUTHENTIK_')
+authentik_server=$(docker ps --filter label=com.docker.compose.service=authentik-server --format '{{.Names}}' | head -n 1)
+if [[ -z "$authentik_server" ]]; then echo 'Authentik server container not found by service label.' >&2; exit 1; fi
+docker network inspect supachat-auth >/dev/null 2>&1 || docker network create --driver bridge supachat-auth >/dev/null
+docker exec -u 0 "$authentik_server" install -d -o root -g root -m 0755 /data/media/public/branding
+docker cp "$install_root/web/supachat-logo.png" "$authentik_server:/data/media/public/branding/supachat-logo.png"
+docker exec -u 0 "$authentik_server" chmod 0644 /data/media/public/branding/supachat-logo.png
+docker exec -i "$authentik_server" ak shell < "$install_root/deploy/configure-authentik.py"
+invite_config=$(docker exec -i "$authentik_server" ak shell < "$install_root/deploy/configure-invite-service.py" | grep '^SUPACHAT_AUTHENTIK_')
 sed -i '/^SUPACHAT_AUTHENTIK_/d' /etc/supachat.env
 printf '%s\n' "$invite_config" >> /etc/supachat.env
 
