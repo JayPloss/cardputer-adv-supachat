@@ -11,7 +11,7 @@
   <div class="app-shell" data-vi-container="true">
     <header class="topbar">
       <div class="brand-lockup"><img class="brand-logo" src="supachat-logo.png" alt="SupaChat"><p class="eyebrow">FAMILY / ONE LITTLE ROOM, ALWAYS WAITING</p></div>
-      <div class="header-tools"><div class="presence" id="presence" aria-live="polite"></div><div class="session-tools"><button id="sound-toggle" class="quiet-button" type="button" aria-pressed="true">Sound: on</button><button id="logout" class="quiet-button" type="button">Log out</button></div></div>
+      <div class="header-tools"><div class="presence" id="presence" aria-live="polite"></div><div class="session-tools"><button id="admin-open" class="quiet-button" type="button" hidden>Admin</button><button id="sound-toggle" class="quiet-button" type="button" aria-pressed="true">Sound: on</button><button id="logout" class="quiet-button" type="button">Log out</button></div></div>
     </header>
     <div class="workspace">
       <section class="chat-panel" aria-label="Family text chat">
@@ -33,6 +33,27 @@
         <p class="walkie-note">One person talks at a time. Voice clips stay in family history.</p>
       </aside>
     </div>
+    <dialog id="admin-zone" class="admin-zone" aria-labelledby="admin-title">
+      <form id="invite-form" class="admin-card" data-vi-container="true">
+        <div class="admin-heading">
+          <div><p class="eyebrow">ADMIN ZONE</p><h2 id="admin-title">Invite someone</h2><p>Generate a one-use sign-up link. It expires in seven days.</p></div>
+          <button id="admin-close" class="admin-close" type="button" aria-label="Close admin zone">×</button>
+        </div>
+        <label for="invite-name">Name</label>
+        <input id="invite-name" name="display_name" autocomplete="name" placeholder="Aunt Sarah" required maxlength="80">
+        <label for="invite-username">Username</label>
+        <input id="invite-username" name="username" autocomplete="username" placeholder="sarah" required maxlength="80">
+        <label for="invite-email">Email <span>(optional)</span></label>
+        <input id="invite-email" name="email" type="email" autocomplete="email" placeholder="sarah@example.com" maxlength="160">
+        <p id="invite-state" class="invite-state" role="status" aria-live="polite"></p>
+        <div id="invite-result" class="invite-result" hidden>
+          <strong>Invite ready</strong>
+          <a id="invite-link" href="#" target="_blank" rel="noreferrer"></a>
+          <button id="invite-share" type="button">Share invite</button>
+        </div>
+        <button id="invite-generate" class="invite-generate" type="submit">Generate one-time link</button>
+      </form>
+    </dialog>
   </div>
   <script type="module" src="app.js"></script>
 </body>

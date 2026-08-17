@@ -1,0 +1,49 @@
+import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { chromium } from 'playwright';
+
+const webRoot = join(import.meta.dirname, '..', 'web');
+const server = createServer((request, response) => {
+  const name = request.url === '/' ? 'index.html' : request.url.slice(1);
+  const mime = name.endsWith('.css') ? 'text/css' : name.endsWith('.js') ? 'text/javascript' : name.endsWith('.png') ? 'image/png' : 'text/html';
+  try { response.writeHead(200, {'content-type':mime}); response.end(readFileSync(join(webRoot, name))); }
+  catch { response.writeHead(404); response.end(); }
+});
+await new Promise((resolve) => server.listen(18876, '127.0.0.1', resolve));
+
+const browser = await chromium.launch({headless:true});
+try {
+  for (const viewport of [{width:390,height:844},{width:1440,height:900}]) {
+    const page = await browser.newPage({viewport});
+    await page.route('**/api/**', async (route) => {
+      const url = route.request().url();
+      const json = url.includes('/session') ? {user:{id:'papa',display_name:'Papa',role:'admin'}} : url.includes('/messages') ? {messages:[]} : url.includes('/presence') ? {presence:[]} : {url:'https://auth.supachat.net/if/flow/supachat-invitation-enrollment/?itoken=test'};
+      await route.fulfill({status:url.includes('/invitations') ? 201 : 200,contentType:'application/json',body:JSON.stringify(json)});
+    });
+    await page.addInitScript(() => {
+      window.EventSource = class { addEventListener() {} };
+      window.WebSocket = class { static OPEN = 1; constructor() { this.readyState = 0; } };
+    });
+    await page.goto('http://127.0.0.1:18876/', {waitUntil:'networkidle'});
+    await page.locator('#admin-open').click();
+    await page.locator('#invite-name').fill('Aunt Sarah');
+    await page.locator('#invite-username').fill('sarah');
+    await page.locator('#invite-generate').click();
+    await page.locator('#invite-result:not([hidden])').waitFor();
+    assert.match(await page.locator('#invite-link').getAttribute('href'), /^https:\/\/auth\.supachat\.net\/if\/flow\//);
+    const geometry = await page.evaluate(() => {
+      const dialog = document.querySelector('#admin-zone').getBoundingClientRect();
+      const card = document.querySelector('#invite-form');
+      return {bodyWidth:document.body.scrollWidth,viewportWidth:document.documentElement.clientWidth,dialog:dialog.toJSON(),cardScrollHeight:card.scrollHeight,cardClientHeight:card.clientHeight};
+    });
+    assert.ok(geometry.bodyWidth <= geometry.viewportWidth + 1, `horizontal overflow at ${viewport.width}px`);
+    assert.ok(geometry.dialog.x >= 0 && geometry.dialog.x + geometry.dialog.width <= viewport.width, `dialog escapes viewport at ${viewport.width}px`);
+    assert.ok(geometry.dialog.y >= 0 && geometry.dialog.y + geometry.dialog.height <= viewport.height, `dialog escapes viewport height at ${viewport.width}px`);
+    assert.ok(geometry.cardScrollHeight <= geometry.cardClientHeight + 1, `admin controls overflow their card at ${viewport.width}px`);
+    await page.screenshot({path:join(process.env.TEMP || '.',`supachat-admin-${viewport.width}x${viewport.height}.png`),fullPage:true});
+    await page.close();
+  }
+} finally { await browser.close(); await new Promise((resolve) => server.close(resolve)); }
+console.log('supachat_web_admin_layout=PASS');

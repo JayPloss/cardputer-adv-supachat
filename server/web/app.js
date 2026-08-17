@@ -9,6 +9,15 @@ const voiceClipButton = document.querySelector('#voice-clip');
 const pttButton = document.querySelector('#ptt');
 const walkieState = document.querySelector('#walkie-state');
 const soundToggle = document.querySelector('#sound-toggle');
+const adminOpen = document.querySelector('#admin-open');
+const adminZone = document.querySelector('#admin-zone');
+const adminClose = document.querySelector('#admin-close');
+const inviteForm = document.querySelector('#invite-form');
+const inviteState = document.querySelector('#invite-state');
+const inviteResult = document.querySelector('#invite-result');
+const inviteLink = document.querySelector('#invite-link');
+const inviteShare = document.querySelector('#invite-share');
+const inviteGenerate = document.querySelector('#invite-generate');
 let messages = [];
 let currentUser = null;
 
@@ -198,10 +207,38 @@ connectWalkie();
 async function refresh() {
   const [{ user }, { messages: next }, { presence }] = await Promise.all([api('api/session'), api('api/messages?limit=100'), api('api/presence')]);
   currentUser = user;
+  adminOpen.hidden = currentUser?.role !== 'admin';
   messages = next;
   renderMessages(true);
   renderPresence(presence);
 }
+adminOpen.addEventListener('click', () => adminZone.showModal());
+adminClose.addEventListener('click', () => adminZone.close());
+adminZone.addEventListener('click', (event) => { if (event.target === adminZone) adminZone.close(); });
+inviteForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const data = new FormData(inviteForm);
+  inviteGenerate.disabled = true; inviteState.textContent = 'Generating…'; inviteResult.hidden = true;
+  try {
+    const invitation = await api('api/admin/invitations', {
+      method:'POST',
+      body:JSON.stringify({
+        display_name:String(data.get('display_name') || '').trim(),
+        username:String(data.get('username') || '').trim(),
+        email:String(data.get('email') || '').trim(),
+      }),
+    });
+    inviteLink.href = invitation.url; inviteLink.textContent = invitation.url;
+    inviteResult.hidden = false; inviteState.textContent = '';
+  } catch (error) {
+    inviteState.textContent = error.message === 'invalid_invitation' ? 'Check the name, username, and email.' : 'Could not generate the invite.';
+  } finally { inviteGenerate.disabled = false; }
+});
+inviteShare.addEventListener('click', async () => {
+  const url = inviteLink.href;
+  if (navigator.share) await navigator.share({title:'Join SUPACHAT', text:'Join our SUPACHAT Family room', url});
+  else { await navigator.clipboard.writeText(url); inviteState.textContent = 'Invite link copied.'; }
+});
 function renderPresence(presence) {
   presenceEl.innerHTML = presence.map((person) => `<div class="person ${identityClass(person.user_id)}"><strong><span class="dot ${person.status}"></span>${escapeHtml(person.display_name)}</strong><small>${person.status === 'online' ? 'online' : person.last_seen_at ? `seen ${time(person.last_seen_at)}` : 'offline'}</small></div>`).join('');
 }
