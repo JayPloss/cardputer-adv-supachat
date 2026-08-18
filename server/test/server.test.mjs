@@ -224,7 +224,9 @@ test('duels are reciprocal, secret until both choose, and scoped to a shared roo
   const papa={authorization:`Bearer ${nativeSessionToken}`,'content-type':'application/json'}; const albie={authorization:`Bearer ${deviceToken}`,'content-type':'application/json'};
   const challenge=(headers,opponent)=>fetch(`http://127.0.0.1:${port}/api/duels/challenge`,{method:'POST',headers,body:JSON.stringify({room_id:'k-buds',opponent})}).then(r=>r.json());
   const pending=await challenge(papa,'Albie'); assert.equal(pending.duel.status,'pending');
-  const accepted=await challenge(albie,'Papa'); assert.equal(accepted.duel.status,'active'); const id=accepted.duel.id;
+  assert.equal(pending.duel.can_cancel,true); assert.equal(pending.duel.can_accept,false);
+  const acceptedResponse=await fetch(`http://127.0.0.1:${port}/api/duels/${pending.duel.id}/accept`,{method:'POST',headers:albie,body:JSON.stringify({room_id:'k-buds'})});
+  assert.equal(acceptedResponse.status,200); const accepted=await acceptedResponse.json(); assert.equal(accepted.duel.status,'active'); assert.equal(accepted.duel.can_choose,true); const id=accepted.duel.id;
   const choose=(headers,spell)=>fetch(`http://127.0.0.1:${port}/api/duels/${id}/choice`,{method:'POST',headers,body:JSON.stringify({room_id:'k-buds',spell})}).then(r=>r.json());
   const locked=await choose(papa,'Sectum Sempra'); assert.equal(locked.duel.my_choice_locked,true); assert.equal(JSON.stringify(locked).includes('sectumsempra'),false);
   let state=(await choose(albie,'Langlock')).duel; assert.equal(state.challenger_score,1);

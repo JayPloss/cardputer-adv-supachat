@@ -35,6 +35,7 @@ await page.reload();
 await shot('chat');
 await page.evaluate(()=>{window.supachatState.completeDuel(true);window.renderSupachat();});
 assert.equal((await state()).duel.status,'complete');await shot('chat-duel-won');
+await page.getByRole('button',{name:'REAR · MENU'}).click();await page.getByRole('button',{name:'↓ .'}).click();await page.getByRole('button',{name:'↓ .'}).click();await page.getByRole('button',{name:'ENTER'}).click();await shot('duel-victory');
 await page.getByRole('button',{name:'ENTER'}).click();assert.equal((await state()).duel,null);
 await page.reload();
 await page.getByRole('button', { name: 'SHIFT + / = ?' }).click();
@@ -44,24 +45,27 @@ assert.ok((await state()).tones > 0);
 await page.getByRole('button', { name: 'REAR · MENU' }).click();
 await shot('menu');
 
-async function openMenu(index) {
+async function openMenu(pageIndex,index) {
   await page.reload();
   await page.getByRole('button', { name: 'REAR · MENU' }).click();
+  if(pageIndex)await page.getByRole('button',{name:'PAGE ▶'}).click();
   for (let i = 0; i < index; i++) await page.getByRole('button', { name: '↓ .' }).click();
   await page.getByRole('button', { name: 'ENTER' }).click();
 }
 
-await openMenu(1); await shot('rooms'); await page.getByRole('button', { name: '↓ .' }).click(); await page.getByRole('button', { name: 'ENTER' }).click(); assert.equal((await state()).currentRoom, 'K-BUDS');
-await openMenu(3); await shot('walkie-ready');
+await openMenu(0,2);await shot('duel-select');await page.getByRole('button',{name:'↑ ;'}).click();assert.equal((await state()).duelSelection,0);await shot('duel-protego-selected');await page.getByRole('button',{name:'ENTER'}).click();await shot('duel-locked');
+await page.evaluate(()=>{window.supachatState.receiveChallenge('Papa');window.renderSupachat();});await shot('duel-incoming');
+await openMenu(0,1); await shot('rooms'); await page.getByRole('button', { name: '↓ .' }).click(); await page.getByRole('button', { name: 'ENTER' }).click(); assert.equal((await state()).currentRoom, 'K-BUDS');
+await openMenu(0,3); await shot('walkie-ready');
 const ptt = page.getByRole('button', { name: 'HOLD SPACE · PTT' });
 const box = await ptt.boundingBox(); assert.ok(box);
 await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2); await page.mouse.down();
 await page.waitForTimeout(250); await shot('walkie-recording'); await page.mouse.up();
 assert.equal((await state()).clipReady, true); await page.getByRole('button', { name: 'ENTER' }).click();
 assert.equal((await state()).replayAudible, true); await shot('walkie-replay');
-await openMenu(4); await shot('volume');
-await openMenu(5); await shot('networks'); await page.getByRole('button', { name: 'ENTER' }).click(); await shot('network-password');
-await openMenu(6); await shot('status');
+await openMenu(1,1); await shot('volume');
+await openMenu(1,2); await shot('networks'); await page.getByRole('button', { name: 'ENTER' }).click(); await shot('network-password');
+await openMenu(1,3); await shot('status');
 await page.reload(); await page.getByLabel('Sync fault injection').selectOption('io');
 assert.equal((await state()).network, 'SYNC IO -1'); await shot('chat-sync-io');
 await browser.close();

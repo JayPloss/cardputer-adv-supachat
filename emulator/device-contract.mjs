@@ -67,6 +67,14 @@ const shiftedSlash = { shift: true, word: ['?'], physicalRight: true };
 const navigationChord = !(shiftedSlash.shift || false);
 assert.equal(navigationChord && shiftedSlash.physicalRight, false);
 assert.equal(shiftedSlash.word[0], '?');
+assert.match(firmware, /if\(screenMode==ScreenMode::Duel\)/,
+  'duel controls must live in the dedicated screen, outside chat text entry');
+assert.doesNotMatch(firmware, /character=='1'\?"protego"/,
+  'number keys must remain ordinary chat input');
+assert.match(firmware, /serviceDuelSfx\(\); serviceMessageNotification\(\)/,
+  'duel sound effects must run non-blockingly ahead of message motifs');
+assert.match(firmware, /voiceRecording \|\| audioPlaying \|\| duelSfxActive/,
+  'duel sounds must yield to microphone and voice playback');
 
 const bootStep = Number(firmware.match(/kBootTuneStepMs = (\d+)/)[1]);
 const bootTuneBody = firmware.match(/kBootTuneFrequencies\[\] = \{([\s\S]*?)\};/)[1];

@@ -28,6 +28,9 @@
 #endif
 
 namespace {
+struct DuelToneStep { uint16_t frequency; uint16_t durationMs; uint16_t gapMs; };
+enum class DuelSfxCue : uint8_t { None, Challenge, Countdown, Select, Lock, Impact, Victory, Defeat, Neutral };
+
 constexpr char kApiBase[] = "https://supachat.net";
 constexpr char kApiHost[] = "supachat.net";
 // SHA-256 fingerprint for supachat.net's current leaf certificate.
@@ -35,7 +38,7 @@ constexpr char kApiHost[] = "supachat.net";
 constexpr char kTlsFingerprint[] = "E7 09 64 D3 D6 B2 1D 03 F9 0E 81 59 6C FA 37 28 6C 69 37 5A AB C6 8A 0F DB C1 6D A0 87 9E 8F 15";
 constexpr char kDeviceName[] = SUPACHAT_DEVICE_NAME;
 constexpr char kDeviceId[] = SUPACHAT_DEVICE_ID;
-constexpr char kFirmwareVersion[] = "v0.42";
+constexpr char kFirmwareVersion[] = "v0.43";
 constexpr size_t kMessageLimit = 140;
 constexpr size_t kHistoryLimit = 100;
 constexpr uint32_t kToneIntervalMs = 40;
@@ -108,6 +111,17 @@ constexpr uint16_t kMessageNotificationFrequencies[] = {622, 831, 698};
 constexpr uint16_t kMessageNotificationDurations[] = {90, 90, 180};
 constexpr uint32_t kMessageNotificationGapMs = 70;
 constexpr size_t kMessageNotificationLength = sizeof(kMessageNotificationFrequencies) / sizeof(kMessageNotificationFrequencies[0]);
+constexpr uint32_t kDuelCountdownMs = 1200;
+constexpr uint32_t kDuelRevealMs = 1200;
+constexpr uint32_t kDuelAnimationFrameMs = 70;
+constexpr DuelToneStep kDuelChallengeSfx[] = {{523,90,55},{659,120,0}};
+constexpr DuelToneStep kDuelCountdownSfx[] = {{392,80,180},{392,80,180},{392,80,180},{784,180,0}};
+constexpr DuelToneStep kDuelSelectSfx[] = {{587,70,0}};
+constexpr DuelToneStep kDuelLockSfx[] = {{440,60,30},{880,100,0}};
+constexpr DuelToneStep kDuelImpactSfx[] = {{988,70,20},{330,170,0}};
+constexpr DuelToneStep kDuelVictorySfx[] = {{523,100,35},{659,100,35},{784,100,35},{1047,220,0}};
+constexpr DuelToneStep kDuelDefeatSfx[] = {{494,130,40},{392,130,40},{294,220,0}};
+constexpr DuelToneStep kDuelNeutralSfx[] = {{392,110,45},{349,170,0}};
 // Retain the tested scheduling code, but do not suppress messaging until the
 // family explicitly decides to re-enable quiet hours.
 constexpr bool kBlackoutEnabled = false;
@@ -173,6 +187,7 @@ struct ChatLine {
   bool label;
 };
 struct ChatRoom { String id; String name; int64_t latestMessageId; int64_t seenMessageId; };
+struct DuelOpponent { String id; String name; String status; };
 
 uint32_t participantColour(const String &authorId, const String &authorName = "") {
   String identity = authorId + " " + authorName; identity.toLowerCase();
@@ -182,7 +197,7 @@ uint32_t participantColour(const String &authorId, const String &authorName = ""
   return TFT_WHITE;
 }
 
-enum class ScreenMode { Chat, Menu, Rooms, Volume, Walkie, Status, Networks, NetworkPassword };
+enum class ScreenMode { Chat, Menu, Duel, Rooms, Volume, Walkie, Status, Networks, NetworkPassword };
 
 Preferences preferences;
 M5Canvas uiCanvas(&M5Cardputer.Display);
@@ -191,6 +206,7 @@ std::vector<WifiProfile> wifiProfiles;
 std::vector<ScannedNetwork> scannedNetworks;
 std::vector<ChatMessage> messages;
 std::vector<ChatRoom> rooms;
+std::vector<DuelOpponent> duelOpponents;
 String currentRoomId = "family";
 String currentRoomName = "Family";
 // Retained clips stream to microSD. The small fallback keeps voice usable
@@ -243,8 +259,11 @@ volatile bool voiceDownloadActive = false;
 int64_t voicePlayingMessageId = 0;
 int voiceInboxSelection = 0;
 int menuSelection = 0;
+int menuPage = 0;
 int roomSelection = 0;
 int networkSelection = 0;
+int duelOpponentSelection = 0;
+int duelSpellSelection = -1;
 uint8_t volumeLevel = kDefaultVolumeLevel;
 int64_t lastServerId = 0;
 int64_t lastReceiptAt = 0;
@@ -270,8 +289,21 @@ String duelWinnerId;
 int duelChallengerScore = 0;
 int duelOpponentScore = 0;
 bool duelChoiceLocked = false;
+bool duelChallengedByMe = false;
+bool duelCanAccept = false;
+bool duelCanDecline = false;
+bool duelCanCancel = false;
+bool duelCanChoose = false;
+bool duelAttention = false;
+bool duelResultSfxPending = false;
+int duelRoundNumber = 0;
+int64_t duelLastRoundResolvedAt = 0;
+String duelLastChallengerSpell;
+String duelLastOpponentSpell;
+String duelLastRoundWinnerId;
 String duelSpellPending;
 String duelActionPending;
+String duelChallengePending;
 int64_t reactionPendingMessageId = 0;
 bool typingState = false;
 bool typingDirty = false;
@@ -280,12 +312,22 @@ String typingNotice;
 uint32_t lastDraftQueuedAt = 0;
 
 void serviceMessageNotification();
+void startDuelSfx(DuelSfxCue cue);
 uint32_t lastToneAt = 0;
 uint32_t lastRenderAt = 0;
+uint32_t lastDuelAnimationAt = 0;
+uint32_t duelCountdownStartedAt = 0;
+uint32_t duelRevealStartedAt = 0;
+uint32_t duelTerminalStartedAt = 0;
 uint32_t bootNonce = 0;
 uint32_t clientSequence = 0;
 size_t songPosition = 0;
 size_t messageNotificationPosition = 0;
+const DuelToneStep *duelSfxSteps = nullptr;
+size_t duelSfxLength = 0;
+size_t duelSfxPosition = 0;
+uint32_t nextDuelSfxAt = 0;
+bool duelSfxActive = false;
 size_t historyOffset = 0;
 size_t voiceSampleCount = 0;
 size_t voiceCapturedTotal = 0;
@@ -521,7 +563,7 @@ bool localBlackout() {
 }
 
 void playNextTone() {
-  if (voiceRecording || audioPlaying || messageNotificationActive) return;
+  if (voiceRecording || audioPlaying || messageNotificationActive || duelSfxActive) return;
   const uint32_t now = millis();
   if (now - lastToneAt < kToneIntervalMs || kKeypressSongLength == 0) return;
   lastToneAt = now;
@@ -530,9 +572,36 @@ void playNextTone() {
   songPosition = (songPosition + 1) % kKeypressSongLength;
 }
 
+void startDuelSfx(DuelSfxCue cue) {
+  if (volumeLevel == 0 || cue == DuelSfxCue::None) return;
+  switch (cue) {
+    case DuelSfxCue::Challenge: duelSfxSteps=kDuelChallengeSfx;duelSfxLength=sizeof(kDuelChallengeSfx)/sizeof(kDuelChallengeSfx[0]);break;
+    case DuelSfxCue::Countdown: duelSfxSteps=kDuelCountdownSfx;duelSfxLength=sizeof(kDuelCountdownSfx)/sizeof(kDuelCountdownSfx[0]);break;
+    case DuelSfxCue::Select: duelSfxSteps=kDuelSelectSfx;duelSfxLength=sizeof(kDuelSelectSfx)/sizeof(kDuelSelectSfx[0]);break;
+    case DuelSfxCue::Lock: duelSfxSteps=kDuelLockSfx;duelSfxLength=sizeof(kDuelLockSfx)/sizeof(kDuelLockSfx[0]);break;
+    case DuelSfxCue::Impact: duelSfxSteps=kDuelImpactSfx;duelSfxLength=sizeof(kDuelImpactSfx)/sizeof(kDuelImpactSfx[0]);break;
+    case DuelSfxCue::Victory: duelSfxSteps=kDuelVictorySfx;duelSfxLength=sizeof(kDuelVictorySfx)/sizeof(kDuelVictorySfx[0]);break;
+    case DuelSfxCue::Defeat: duelSfxSteps=kDuelDefeatSfx;duelSfxLength=sizeof(kDuelDefeatSfx)/sizeof(kDuelDefeatSfx[0]);break;
+    case DuelSfxCue::Neutral: duelSfxSteps=kDuelNeutralSfx;duelSfxLength=sizeof(kDuelNeutralSfx)/sizeof(kDuelNeutralSfx[0]);break;
+    default: duelSfxSteps=nullptr;duelSfxLength=0;return;
+  }
+  duelSfxPosition=0; nextDuelSfxAt=millis(); duelSfxActive=true;
+}
+
+void serviceDuelSfx() {
+  if (volumeLevel == 0) { duelSfxActive=false;duelSfxPosition=0;return; }
+  if (!duelSfxActive || voiceRecording || audioPlaying) return;
+  const uint32_t now=millis(); if (static_cast<int32_t>(now-nextDuelSfxAt)<0)return;
+  if (duelSfxPosition>=duelSfxLength) { duelSfxActive=false;return; }
+  const DuelToneStep &step=duelSfxSteps[duelSfxPosition++];
+  M5Cardputer.Speaker.setVolume(kVolumeValues[volumeLevel]);
+  M5Cardputer.Speaker.tone(step.frequency,step.durationMs);
+  nextDuelSfxAt=now+step.durationMs+step.gapMs;
+}
+
 void serviceMessageNotification() {
   if (volumeLevel == 0) { messageNotificationPending = false; messageNotificationActive = false; return; }
-  if (voiceRecording || audioPlaying) return;
+  if (voiceRecording || audioPlaying || duelSfxActive) return;
   const uint32_t now = millis();
   if (!messageNotificationActive) {
     if (!messageNotificationPending) return;
@@ -1064,12 +1133,43 @@ void postReadReceipt(int64_t messageId) {
   requestJson("/api/receipts", "POST", "{\"message_id\":" + String(messageId) + ",\"state\":\"read\"}", response, status);
 }
 
+bool duelTerminalStatus(const String &status) {
+  return status=="complete"||status=="declined"||status=="cancelled"||status=="expired";
+}
+
 void updateDuel(JsonVariantConst value) {
-  if (value.isNull()) { duelId=0; duelStatus=""; duelChoiceLocked=false; duelWinnerId=""; return; }
+  const int64_t previousId=duelId; const String previousStatus=duelStatus; const int64_t previousRoundResolvedAt=duelLastRoundResolvedAt;
+  if (value.isNull()) {
+    duelId=0;duelStatus="";duelChoiceLocked=false;duelWinnerId="";duelChallengedByMe=false;
+    duelCanAccept=false;duelCanDecline=false;duelCanCancel=false;duelCanChoose=false;duelRoundNumber=0;
+    duelLastRoundResolvedAt=0;duelLastChallengerSpell="";duelLastOpponentSpell="";duelLastRoundWinnerId="";
+    duelSpellSelection=-1;duelCountdownStartedAt=0;duelRevealStartedAt=0;duelTerminalStartedAt=0;return;
+  }
   duelId=value["id"]|0; duelStatus=String(value["status"]|""); duelChoiceLocked=value["my_choice_locked"]|false;
   duelChallenger=String(value["challenger"]["display_name"]|"?"); duelOpponent=String(value["opponent"]["display_name"]|"?");
   duelChallengerScore=value["challenger_score"]|0; duelOpponentScore=value["opponent_score"]|0;
   duelWinnerId=String(value["winner_id"]|"");
+  duelChallengedByMe=value["challenged_by_me"]|false;duelCanAccept=value["can_accept"]|false;duelCanDecline=value["can_decline"]|false;
+  duelCanCancel=value["can_cancel"]|false;duelCanChoose=value["can_choose"]|false;duelRoundNumber=value["round_number"]|0;
+  JsonVariantConst lastRound=value["last_round"];
+  duelLastRoundResolvedAt=lastRound.isNull()?0:(lastRound["resolved_at"]|0LL);
+  duelLastChallengerSpell=lastRound.isNull()?String(""):String(lastRound["challenger_spell"]|"");
+  duelLastOpponentSpell=lastRound.isNull()?String(""):String(lastRound["opponent_spell"]|"");
+  duelLastRoundWinnerId=lastRound.isNull()?String(""):String(lastRound["winner_id"]|"");
+  const uint32_t now=millis();
+  if ((duelId!=previousId||previousStatus!=duelStatus)&&duelStatus=="pending"&&!duelChallengedByMe) {
+    duelAttention=true;startDuelSfx(DuelSfxCue::Challenge);
+  }
+  if (duelStatus=="active"&&(duelId!=previousId||previousStatus=="pending")) {
+    duelCountdownStartedAt=now;duelSpellSelection=-1;startDuelSfx(DuelSfxCue::Countdown);
+  }
+  if (duelLastRoundResolvedAt>0&&duelLastRoundResolvedAt!=previousRoundResolvedAt) {
+    duelRevealStartedAt=now;duelSpellSelection=-1;duelResultSfxPending=duelTerminalStatus(duelStatus);startDuelSfx(DuelSfxCue::Impact);
+  }
+  if (duelTerminalStatus(duelStatus)&&(duelId!=previousId||!duelTerminalStatus(previousStatus))) {
+    duelAttention=true;duelTerminalStartedAt=now;
+    if (duelRevealStartedAt==0) startDuelSfx(duelStatus=="complete"?(duelWinnerId==kDeviceId?DuelSfxCue::Victory:DuelSfxCue::Defeat):DuelSfxCue::Neutral);
+  }
 }
 
 void serviceMessagingActions() {
@@ -1081,13 +1181,20 @@ void serviceMessagingActions() {
     String response; int status=0; const int64_t id=reactionPendingMessageId;
     if (requestJson("/api/messages/"+String(id)+"/reactions","POST","{\"emoji\":\"👍\"}",response,status)&&status==200) reactionPendingMessageId=0;
   }
+  if (!duelChallengePending.isEmpty()) {
+    String response;int status=0;const String payload="{\"room_id\":\""+jsonEscape(currentRoomId)+"\",\"opponent\":\""+jsonEscape(duelChallengePending)+"\"}";
+    if(requestJson("/api/duels/challenge","POST",payload,response,status)){
+      if(status==200){JsonDocument result;if(!deserializeJson(result,response))updateDuel(result["duel"]);duelChallengePending="";}
+      else{networkStatus="DUEL HTTP "+String(status);duelChallengePending="";renderDirty=true;}
+    }
+  }
   if (!duelSpellPending.isEmpty()&&duelId>0) {
     String response; int status=0; const String payload="{\"room_id\":\""+jsonEscape(currentRoomId)+"\",\"spell\":\""+jsonEscape(duelSpellPending)+"\"}";
-    if (requestJson("/api/duels/"+String(duelId)+"/choice","POST",payload,response,status)&&status==200) { JsonDocument result;if(!deserializeJson(result,response))updateDuel(result["duel"]);duelSpellPending=""; }
+    if (requestJson("/api/duels/"+String(duelId)+"/choice","POST",payload,response,status)) { if(status==200){JsonDocument result;if(!deserializeJson(result,response))updateDuel(result["duel"]);}else{networkStatus="DUEL HTTP "+String(status);duelChoiceLocked=false;}duelSpellPending="";renderDirty=true; }
   }
   if (!duelActionPending.isEmpty()&&duelId>0) {
     String response; int status=0; const String action=duelActionPending; const String payload="{\"room_id\":\""+jsonEscape(currentRoomId)+"\"}";
-    if (requestJson("/api/duels/"+String(duelId)+"/"+action,"POST",payload,response,status)&&status==200) { JsonDocument result;if(!deserializeJson(result,response))updateDuel(result["duel"]);duelActionPending=""; }
+    if (requestJson("/api/duels/"+String(duelId)+"/"+action,"POST",payload,response,status)) { if(status==200){JsonDocument result;if(!deserializeJson(result,response))updateDuel(result["duel"]);}else networkStatus="DUEL HTTP "+String(status);duelActionPending="";renderDirty=true; }
   }
 }
 
@@ -1123,6 +1230,11 @@ void synchronize() {
   }
   JsonDocument document; if (deserializeJson(document, response)) { networkStatus = "BAD DATA"; renderDirty = true; return; }
   updateDuel(document["duel"]);
+  duelOpponents.clear();for(JsonObjectConst person:document["presence"].as<JsonArrayConst>()){
+    const String id=String(person["id"]|"");if(id.isEmpty()||id==kDeviceId)continue;
+    duelOpponents.push_back({id,String(person["display_name"]|id),String(person["status"]|"offline")});
+  }
+  if(!duelOpponents.empty())duelOpponentSelection=std::min(duelOpponentSelection,static_cast<int>(duelOpponents.size())-1);else duelOpponentSelection=0;
   typingNotice=""; for(JsonObjectConst person:document["typing"].as<JsonArrayConst>()){if(!typingNotice.isEmpty())typingNotice+=", ";typingNotice+=String(person["display_name"]|"Someone");} if(!typingNotice.isEmpty())typingNotice+=" typing";
   std::vector<int64_t> newlyRead;
   xSemaphoreTake(stateMutex, portMAX_DELAY);
@@ -1266,25 +1378,88 @@ void drawChat() {
   display.setTextColor(TFT_YELLOW, TFT_BLACK); display.setCursor(3, 112); display.print("> ");
   display.setTextColor(TFT_WHITE, TFT_BLACK); display.print(draft.substring(draft.length() > 34 ? draft.length() - 34 : 0));
   display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(3, 126);
-  if (duelId > 0 && duelStatus == "active") display.print(duelChoiceLocked ? "DUEL: spell locked" : "DUEL 1:P 2:S 3:L 4:G");
-  else if (duelId > 0 && duelStatus == "complete") display.print(duelWinnerId == kDeviceId ? "DUEL WON ENT:DONE" : "DUEL LOST ENT:DONE");
-  else if (duelId > 0 && (duelStatus == "declined" || duelStatus == "cancelled" || duelStatus == "expired")) display.print(("DUEL "+duelStatus+" ENT:DONE").substring(0,28));
+  if (duelId > 0 && duelStatus == "active") display.print(duelChoiceLocked ? "DUEL LOCKED - OPEN MENU" : "DUEL READY - OPEN MENU");
+  else if (duelId > 0 && duelStatus == "pending") display.print(duelChallengedByMe ? "DUEL WAITING - OPEN MENU" : "DUEL CHALLENGE - MENU");
+  else if (duelId > 0 && duelTerminalStatus(duelStatus)) display.print("DUEL RESULT - OPEN MENU");
   else if (!typingNotice.isEmpty()) display.print(typingNotice.substring(0, 28));
   display.setCursor(198, 126); display.printf("%d/140", draft.length());
 }
 
-const char *kMenuItems[] = {"BACK TO CHAT", "ROOMS", "SYNC NOW", "VOICE MESSAGES", "VOLUME", "NETWORKS", "STATUS"};
+const char *kMenuItems[2][4] = {
+  {"CHAT", "ROOMS", "DUELS", "VOICE MESSAGES"},
+  {"SYNC NOW", "VOLUME", "NETWORKS", "STATUS"},
+};
 void drawMenu() {
-  auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader("MENU");
+  auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader(menuPage==0?"MENU COMMS":"MENU DEVICE");
   display.setTextSize(1);
-  for (int index = 0; index < 7; index++) {
-    const int y = 21 + index * 13; const bool selected = index == menuSelection;
-    display.fillRoundRect(6, y, 228, 12, 4, selected ? TFT_GREEN : TFT_DARKGREY);
+  for (int index = 0; index < 4; index++) {
+    const int y = 25 + index * 20; const bool selected = index == menuSelection;
+    display.fillRoundRect(6, y, 228, 17, 4, selected ? TFT_GREEN : TFT_DARKGREY);
     display.setTextColor(selected ? TFT_BLACK : TFT_WHITE, selected ? TFT_GREEN : TFT_DARKGREY);
-    display.setCursor(13, y + 4); display.print(kMenuItems[index]);
+    display.setCursor(13, y + 5); display.print(kMenuItems[menuPage][index]);
+    if(menuPage==0&&index==2&&duelAttention){display.setCursor(220,y+5);display.print("*");}
   }
   display.setTextSize(1); display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 117);
-  display.print("ARROWS MOVE       OK SELECT");
+  display.printf("< PAGE  %d/2  PAGE >   ENTER",menuPage+1);
+}
+
+void drawDuelArrow(int centerX,int centerY,int direction,uint32_t colour){
+  auto &display=uiCanvas;
+  if(direction==0)display.fillTriangle(centerX,centerY-4,centerX-4,centerY+3,centerX+4,centerY+3,colour);
+  else if(direction==1)display.fillTriangle(centerX+4,centerY,centerX-3,centerY-4,centerX-3,centerY+4,colour);
+  else if(direction==2)display.fillTriangle(centerX,centerY+4,centerX-4,centerY-3,centerX+4,centerY-3,colour);
+  else display.fillTriangle(centerX-4,centerY,centerX+3,centerY-4,centerX+3,centerY+4,colour);
+}
+
+void drawDuelOption(int x,int y,int width,const char *before,const char *after,int direction,bool selected){
+  auto &display=uiCanvas;const uint32_t background=selected?TFT_GREEN:TFT_DARKGREY;const uint32_t foreground=selected?TFT_BLACK:TFT_WHITE;
+  display.fillRoundRect(x,y,width,18,5,background);display.setTextColor(foreground,background);display.setTextSize(1);
+  const int contentWidth=(strlen(before)+strlen(after))*6+12;const int start=x+(width-contentWidth)/2;
+  display.setCursor(start,y+5);display.print(before);const int arrowX=start+strlen(before)*6+5;drawDuelArrow(arrowX,y+9,direction,foreground);
+  display.setCursor(arrowX+7,y+5);display.print(after);
+}
+
+void drawDuelReveal(){
+  auto &display=uiCanvas;const uint32_t elapsed=millis()-duelRevealStartedAt;const int travel=std::min<int>(70,elapsed/10);const int shake=elapsed>720?((elapsed/kDuelAnimationFrameMs)%2?2:-2):0;
+  display.setTextColor(participantColour("",duelChallenger),TFT_BLACK);display.setCursor(5+shake,31);display.print(duelChallenger.substring(0,10));
+  display.setTextColor(participantColour("",duelOpponent),TFT_BLACK);const String opponent=duelOpponent.substring(0,10);display.setCursor(235-opponent.length()*6+shake,31);display.print(opponent);
+  display.drawLine(28+travel,61,38+travel,61,TFT_YELLOW);display.fillCircle(40+travel,61,3,TFT_YELLOW);
+  display.drawLine(212-travel,74,202-travel,74,TFT_MAGENTA);display.fillCircle(200-travel,74,3,TFT_MAGENTA);
+  if(elapsed>650){display.drawCircle(120+shake,68,8+(elapsed/70)%9,TFT_WHITE);display.drawCircle(120-shake,68,18+(elapsed/70)%7,TFT_YELLOW);}
+  display.setTextColor(TFT_DARKGREY,TFT_BLACK);display.setCursor(5,94);display.print(duelLastChallengerSpell.substring(0,15));
+  const String spell=duelLastOpponentSpell.substring(0,15);display.setCursor(235-spell.length()*6,94);display.print(spell);
+  if(elapsed>850){display.setTextColor(TFT_GREEN,TFT_BLACK);display.setCursor(84,109);display.print(duelLastRoundWinnerId.isEmpty()?"BLOCKED":duelLastRoundWinnerId==kDeviceId?"POINT YOU":"POINT THEM");}
+}
+
+void drawDuel(){
+  auto &display=uiCanvas;display.fillScreen(TFT_BLACK);drawHeader("DUEL");display.setTextSize(1);
+  if(duelId<=0){
+    display.setTextColor(TFT_YELLOW,TFT_BLACK);display.setCursor(6,25);display.print(("CHALLENGE · "+currentRoomName).substring(0,36));
+    if(duelOpponents.empty()){display.setTextColor(TFT_DARKGREY,TFT_BLACK);display.setCursor(38,64);display.print("NO OTHER MEMBERS");}
+    else{const int first=std::max(0,duelOpponentSelection-2);for(int row=0;row<4&&first+row<static_cast<int>(duelOpponents.size());row++){const int index=first+row,y=39+row*17;const bool selected=index==duelOpponentSelection;display.fillRoundRect(6,y,228,15,4,selected?TFT_GREEN:TFT_DARKGREY);display.setTextColor(selected?TFT_BLACK:participantColour(duelOpponents[index].id,duelOpponents[index].name),selected?TFT_GREEN:TFT_DARKGREY);display.setCursor(12,y+4);display.printf("%-20s %s",duelOpponents[index].name.substring(0,20).c_str(),duelOpponents[index].status.substring(0,7).c_str());}}
+    display.setTextColor(TFT_DARKGREY,TFT_BLACK);display.setCursor(6,123);display.print(duelChallengePending.isEmpty()?"UP/DOWN CHOOSE  ENTER DUEL":"SENDING CHALLENGE...");return;
+  }
+  display.setTextColor(TFT_WHITE,TFT_BLACK);display.setCursor(82,22);display.printf("%d  -  %d",duelChallengerScore,duelOpponentScore);
+  if(duelStatus=="pending"){
+    const bool pulse=(millis()/280)%2;display.drawRoundRect(8,37,224,56,10,pulse?TFT_MAGENTA:TFT_DARKGREY);
+    display.setTextColor(participantColour("",duelChallenger),TFT_BLACK);display.setCursor(18,48);display.print(duelChallenger.substring(0,13));display.setTextColor(TFT_WHITE,TFT_BLACK);display.print("  VS  ");display.setTextColor(participantColour("",duelOpponent),TFT_BLACK);display.print(duelOpponent.substring(0,13));
+    display.setTextColor(TFT_YELLOW,TFT_BLACK);display.setCursor(duelChallengedByMe?65:54,72);display.print(duelChallengedByMe?"WAITING FOR ANSWER":"YOU ARE CHALLENGED");
+    display.setTextColor(TFT_DARKGREY,TFT_BLACK);display.setCursor(6,117);display.print(duelChallengedByMe?"DEL CANCEL        MENU BACK":"ENTER ACCEPT  DEL DECLINE");return;
+  }
+  const uint32_t countdownElapsed=duelCountdownStartedAt?millis()-duelCountdownStartedAt:kDuelCountdownMs;
+  if(duelStatus=="active"&&countdownElapsed<kDuelCountdownMs){const int phase=countdownElapsed/300;const String word=phase<3?String(3-phase):String("DUEL!");display.setTextSize(4);display.setTextColor(phase<3?TFT_YELLOW:TFT_GREEN,TFT_BLACK);display.setCursor(120-word.length()*12,49);display.print(word);display.setTextSize(1);return;}
+  if(duelRevealStartedAt&&millis()-duelRevealStartedAt<kDuelRevealMs){drawDuelReveal();return;}
+  if(duelStatus=="active"){
+    if(duelChoiceLocked){const int frame=(millis()/kDuelAnimationFrameMs)%12;display.setTextColor(TFT_GREEN,TFT_BLACK);display.setTextSize(2);display.setCursor(48,52);display.print("SPELL LOCKED");display.setTextSize(1);display.setTextColor(TFT_DARKGREY,TFT_BLACK);display.setCursor(59,80);display.print("WAITING FOR RIVAL");display.fillCircle(120+(frame<6?frame:12-frame)*3-9,101,3,TFT_MAGENTA);display.setCursor(6,123);display.print("MENU BACK · RESULT AUTOPLAYS");return;}
+    drawDuelOption(84,27,72,"PRO","TEGO",0,duelSpellSelection==0);
+    drawDuelOption(4,57,83,"LEVI","CORP",3,duelSpellSelection==3);
+    drawDuelOption(153,57,82,"SEC","TUM",1,duelSpellSelection==1);
+    drawDuelOption(82,87,78,"LANG","LOCK",2,duelSpellSelection==2);
+    display.setTextColor(duelSpellSelection<0?TFT_DARKGREY:TFT_YELLOW,TFT_BLACK);display.setCursor(6,117);display.print(duelSpellSelection<0?"ARROWS CHOOSE · ENTER CAST":"ENTER CAST · ARROWS CHANGE");return;
+  }
+  const bool complete=duelStatus=="complete";const bool won=complete&&duelWinnerId==kDeviceId;const uint32_t resultColour=complete?(won?TFT_GREEN:TFT_RED):TFT_YELLOW;
+  if(millis()-duelTerminalStartedAt<1600){for(int i=0;i<14;i++){const int px=(i*37+(millis()/35)*(i%3+1))%238;const int py=27+(i*19)%70;display.fillCircle(px,py,1,i%2?resultColour:TFT_WHITE);}}
+  display.setTextSize(3);display.setTextColor(resultColour,TFT_BLACK);const String result=complete?(won?"VICTORY":"DEFEAT"):duelStatus;display.setCursor(120-result.length()*9,48);display.print(result);display.setTextSize(1);display.setTextColor(TFT_WHITE,TFT_BLACK);display.setCursor(82,84);display.printf("FINAL %d - %d",duelChallengerScore,duelOpponentScore);display.setTextColor(TFT_DARKGREY,TFT_BLACK);display.setCursor(6,120);display.print("ENTER DONE          MENU BACK");
 }
 
 void drawRooms() {
@@ -1380,12 +1555,22 @@ void drawNetworkPassword() {
 
 void render() {
   if (screenMode == ScreenMode::Chat) drawChat(); else if (screenMode == ScreenMode::Menu) drawMenu(); else if (screenMode == ScreenMode::Rooms) drawRooms();
+  else if (screenMode == ScreenMode::Duel) drawDuel();
   else if (screenMode == ScreenMode::Volume) drawVolume();
   else if (screenMode == ScreenMode::Walkie) drawWalkie();
   else if (screenMode == ScreenMode::Status) drawStatus();
   else if (screenMode == ScreenMode::NetworkPassword) drawNetworkPassword(); else drawNetworks();
   if (uiCanvasReady) uiCanvas.pushSprite(0, 0);
   renderDirty = false; lastRenderAt = millis();
+}
+
+void serviceDuelAnimations(){
+  const uint32_t now=millis();
+  if(duelCountdownStartedAt&&now-duelCountdownStartedAt>=kDuelCountdownMs)duelCountdownStartedAt=0;
+  if(duelRevealStartedAt&&now-duelRevealStartedAt>=kDuelRevealMs){duelRevealStartedAt=0;if(duelResultSfxPending){duelResultSfxPending=false;startDuelSfx(duelStatus=="complete"?(duelWinnerId==kDeviceId?DuelSfxCue::Victory:DuelSfxCue::Defeat):DuelSfxCue::Neutral);}}
+  if(screenMode!=ScreenMode::Duel||now-lastDuelAnimationAt<kDuelAnimationFrameMs)return;
+  const bool animated=duelStatus=="pending"||(duelStatus=="active"&&(duelChoiceLocked||duelCountdownStartedAt||duelRevealStartedAt))||(duelTerminalStatus(duelStatus)&&now-duelTerminalStartedAt<1600);
+  if(animated){lastDuelAnimationAt=now;renderDirty=true;}
 }
 
 bool containsKey(const Keyboard_Class::KeysState &keys, char wanted) {
@@ -1466,13 +1651,17 @@ void joinSelectedNetwork() {
 }
 
 void openSelectedMenuItem() {
-  if (menuSelection == 0) screenMode = ScreenMode::Chat;
-  else if (menuSelection == 1) screenMode = ScreenMode::Rooms;
-  else if (menuSelection == 2) { syncOverride = true; networkStatus = "SYNC REQUESTED"; screenMode = ScreenMode::Chat; }
-  else if (menuSelection == 3) { screenMode = ScreenMode::Walkie; walkieStatus = "READY"; }
-  else if (menuSelection == 4) screenMode = ScreenMode::Volume;
-  else if (menuSelection == 5) { screenMode = ScreenMode::Networks; scanForNetworks(); }
-  else screenMode = ScreenMode::Status;
+  if(menuPage==0){
+    if(menuSelection==0)screenMode=ScreenMode::Chat;
+    else if(menuSelection==1)screenMode=ScreenMode::Rooms;
+    else if(menuSelection==2){screenMode=ScreenMode::Duel;duelAttention=false;if(duelId<=0)duelSpellSelection=-1;}
+    else{screenMode=ScreenMode::Walkie;walkieStatus="READY";}
+  }else{
+    if(menuSelection==0){syncOverride=true;networkStatus="SYNC REQUESTED";screenMode=ScreenMode::Chat;}
+    else if(menuSelection==1)screenMode=ScreenMode::Volume;
+    else if(menuSelection==2){screenMode=ScreenMode::Networks;scanForNetworks();}
+    else screenMode=ScreenMode::Status;
+  }
   renderDirty = true;
 }
 
@@ -1482,6 +1671,7 @@ void selectRoom(int next) {
   saveHistoryLocked();
   currentRoomId = rooms[next].id; currentRoomName = rooms[next].name; roomSelection = next;
   messages.clear(); lastServerId = 0; lastReceiptAt = 0; historyOffset = 0; syncOverride = true;
+  updateDuel(JsonVariantConst());duelOpponents.clear();duelChallengePending="";duelActionPending="";duelSpellPending="";
   loadHistory();
   xSemaphoreGive(stateMutex);
   walkieSocket.disconnect(); walkieInitialized = false; networkStatus = "SWITCHING"; renderDirty = true;
@@ -1504,11 +1694,29 @@ void handleKeyboard() {
   const bool goLeft = navigationChord && navLeft();
   const bool goRight = navigationChord && navRight();
   if (screenMode == ScreenMode::Menu) {
-    if (goUp) { menuSelection = (menuSelection + 6) % 7; playNextTone(); }
-    else if (goDown) { menuSelection = (menuSelection + 1) % 7; playNextTone(); }
-    else if (goLeft) { screenMode = ScreenMode::Chat; playNextTone(); }
-    else if (goRight || keys.enter) { openSelectedMenuItem(); playNextTone(); }
+    if (goUp) { menuSelection = (menuSelection + 3) % 4; playNextTone(); }
+    else if (goDown) { menuSelection = (menuSelection + 1) % 4; playNextTone(); }
+    else if (goLeft) { menuPage = (menuPage + 1) % 2; playNextTone(); }
+    else if (goRight) { menuPage = (menuPage + 1) % 2; playNextTone(); }
+    else if (keys.enter) { openSelectedMenuItem(); playNextTone(); }
     renderDirty = true; return;
+  }
+  if(screenMode==ScreenMode::Duel){
+    if(duelId<=0){
+      if(goUp&&duelOpponentSelection>0){duelOpponentSelection--;playNextTone();}
+      else if(goDown&&duelOpponentSelection+1<static_cast<int>(duelOpponents.size())){duelOpponentSelection++;playNextTone();}
+      else if(keys.enter&&!duelOpponents.empty()&&duelChallengePending.isEmpty()){duelChallengePending=duelOpponents[duelOpponentSelection].id;networkStatus="CHALLENGING";startDuelSfx(DuelSfxCue::Challenge);}
+    }else if(duelStatus=="pending"){
+      if(keys.enter&&duelCanAccept&&duelActionPending.isEmpty()){duelActionPending="accept";networkStatus="ACCEPTING";startDuelSfx(DuelSfxCue::Countdown);}
+      else if(keys.del&&duelActionPending.isEmpty()&&(duelCanCancel||duelCanDecline)){duelActionPending=duelCanCancel?"cancel":"decline";networkStatus=duelCanCancel?"CANCELLING":"DECLINING";startDuelSfx(DuelSfxCue::Neutral);}
+    }else if(duelStatus=="active"&&!duelChoiceLocked&&!duelCountdownStartedAt&&!duelRevealStartedAt){
+      int next=-1;if(goUp)next=0;else if(goRight)next=1;else if(goDown)next=2;else if(goLeft)next=3;
+      if(next>=0){duelSpellSelection=next;startDuelSfx(DuelSfxCue::Select);}
+      else if(keys.enter&&duelSpellSelection>=0&&duelSpellPending.isEmpty()){
+        static const char *spells[]={"protego","sectumsempra","langlock","levicorpus"};duelSpellPending=spells[duelSpellSelection];duelChoiceLocked=true;networkStatus="SPELL LOCKED";startDuelSfx(DuelSfxCue::Lock);
+      }
+    }else if(duelTerminalStatus(duelStatus)&&keys.enter&&duelActionPending.isEmpty()){duelActionPending="acknowledge";networkStatus="DUEL CLOSED";startDuelSfx(DuelSfxCue::Neutral);}
+    renderDirty=true;return;
   }
   if (screenMode == ScreenMode::Rooms) {
     if (goUp && roomSelection > 0) roomSelection--;
@@ -1559,12 +1767,6 @@ void handleKeyboard() {
   if (goDown) { if (historyOffset > 0) historyOffset--; playNextTone(); renderDirty = true; return; }
   if (goLeft) { switchRoom(-1); playNextTone(); return; }
   if (goRight) { switchRoom(1); playNextTone(); return; }
-  if (duelId>0&&(duelStatus=="complete"||duelStatus=="declined"||duelStatus=="cancelled"||duelStatus=="expired")&&keys.enter&&draft.isEmpty()) {
-    duelActionPending="acknowledge";networkStatus="DUEL CLOSED";playNextTone();renderDirty=true;return;
-  }
-  if (duelId>0&&duelStatus=="active"&&!duelChoiceLocked&&draft.isEmpty()) {
-    for(const char character:keys.word){const char* spell=character=='1'?"protego":character=='2'?"sectumsempra":character=='3'?"levicorpus":character=='4'?"langlock":nullptr;if(spell){duelSpellPending=spell;duelChoiceLocked=true;networkStatus="SPELL LOCKED";playNextTone();renderDirty=true;return;}}
-  }
   playNextTone();
   if (keys.enter) { sendDraft(); return; }
   if (keys.del) { if (!draft.isEmpty()) draft.remove(draft.length() - 1); typingState=!draft.isEmpty();typingDirty=true;typingChangedAt=millis();renderDirty = true; return; }
@@ -1603,7 +1805,7 @@ void setup() {
 }
 
 void loop() {
-  M5Cardputer.update(); sampleBattery(); serviceClockRender(); handleKeyboard(); captureVoice(); serviceAudioPlayback(); serviceMessageNotification();
+  M5Cardputer.update(); sampleBattery(); serviceClockRender(); handleKeyboard(); captureVoice(); serviceAudioPlayback(); serviceDuelSfx(); serviceMessageNotification(); serviceDuelAnimations();
   if(typingState&&millis()-typingChangedAt>2000){typingState=false;typingDirty=true;}
   if (screenMode == ScreenMode::Walkie) {
     const bool spacePressed = M5Cardputer.Keyboard.isPressed() && M5Cardputer.Keyboard.keysState().space;

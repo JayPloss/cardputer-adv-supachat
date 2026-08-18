@@ -17,6 +17,7 @@ test('Protego blocks and its third consecutive use forfeits', () => {
 
 test('duel command accepts friendly brackets but not extra prose', () => {
   assert.equal(parseChallenge('duel <Albie>'), 'Albie');
+  assert.equal(parseChallenge('\\duel Albie'), 'Albie');
   assert.equal(parseChallenge('DUEL Julien!'), 'Julien');
   assert.equal(parseChallenge('please duel Albie'), null);
 });

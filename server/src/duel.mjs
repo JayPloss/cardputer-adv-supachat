@@ -27,6 +27,6 @@ export function resolveRound(firstSpell, secondSpell, firstProtegoStreak = 0, se
 }
 
 export function parseChallenge(text) {
-  const match = String(text || '').trim().match(/^duel\s+<?([^<>]+?)>?[!.]?$/i);
+  const match = String(text || '').trim().match(/^\\?duel\s+<?([^<>]+?)>?[!.]?$/i);
   return match ? match[1].trim() : null;
 }

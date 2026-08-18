@@ -492,7 +492,10 @@ function duelState(user, roomId, duelId = null) {
   const opponent = db.prepare('SELECT id, display_name, short_name FROM users WHERE id=?').get(duel.opponent_id);
   const ownChoice = db.prepare('SELECT 1 FROM duel_choices WHERE duel_id=? AND round_number=? AND user_id=?').get(duel.id, duel.round_number, user);
   const lastRound = db.prepare('SELECT * FROM duel_rounds WHERE duel_id=? ORDER BY round_number DESC LIMIT 1').get(duel.id);
-  return {...duel, challenger, opponent, challenged_by_me:duel.challenger_id===user, my_choice_locked:Boolean(ownChoice), last_round:lastRound||null};
+  const challengedByMe=duel.challenger_id===user;
+  return {...duel, challenger, opponent, challenged_by_me:challengedByMe, my_choice_locked:Boolean(ownChoice), last_round:lastRound||null,
+    can_accept:duel.status==='pending'&&!challengedByMe, can_decline:duel.status==='pending'&&!challengedByMe,
+    can_cancel:duel.status==='pending'&&challengedByMe, can_choose:duel.status==='active'&&!ownChoice};
 }
 
 function challengeDuel(user, roomId, opponentName) {
@@ -537,6 +540,13 @@ function finishPendingDuel(user,roomId,duelId,action){
   if(action==='decline'&&duel.opponent_id!==user)return {error:'only_opponent_can_decline'};
   const now=Date.now(); const status=action==='cancel'?'cancelled':'declined';
   db.prepare('UPDATE duels SET status=?,completed_at=?,terminal_reason=?,updated_at=? WHERE id=?').run(status,now,status,now,duel.id);
+  publish('duel',{conversation_id:roomId,duel_id:duel.id}); return {duel:duelState(user,roomId,duel.id)};
+}
+
+function acceptPendingDuel(user,roomId,duelId){
+  const duel=db.prepare("SELECT * FROM duels WHERE id=? AND conversation_id=? AND status='pending' AND opponent_id=?").get(duelId,roomId,user);
+  if(!duel)return {error:'duel_not_acceptible'};
+  const now=Date.now(); db.prepare("UPDATE duels SET status='active',updated_at=? WHERE id=?").run(now,duel.id);
   publish('duel',{conversation_id:roomId,duel_id:duel.id}); return {duel:duelState(user,roomId,duel.id)};
 }
 
@@ -674,11 +684,11 @@ const server = createServer(async (req, res) => {
       const payload=await body(req); const room=authorizedRoom(user,payload.room_id); if(!room)return json(res,payload.room_id?403:400,{error:payload.room_id?'room_forbidden':'room_required'});
       const result=chooseDuelSpell(user,room.id,Number(duelChoicePath[1]),payload.spell); return json(res,result.error?409:200,result);
     }
-    const duelActionPath=url.pathname.match(/^\/api\/duels\/(\d+)\/(decline|cancel|acknowledge)$/);
+    const duelActionPath=url.pathname.match(/^\/api\/duels\/(\d+)\/(accept|decline|cancel|acknowledge)$/);
     if(duelActionPath&&req.method==='POST'){
       if(webUser(req)&&!sameOrigin(req))return json(res,403,{error:'origin_rejected'});
       const payload=await body(req); const room=authorizedRoom(user,payload.room_id); if(!room)return json(res,payload.room_id?403:400,{error:payload.room_id?'room_forbidden':'room_required'});
-      const action=duelActionPath[2]; const result=action==='acknowledge'?acknowledgeDuel(user,room.id,Number(duelActionPath[1])):finishPendingDuel(user,room.id,Number(duelActionPath[1]),action);
+      const action=duelActionPath[2]; const result=action==='acknowledge'?acknowledgeDuel(user,room.id,Number(duelActionPath[1])):action==='accept'?acceptPendingDuel(user,room.id,Number(duelActionPath[1])):finishPendingDuel(user,room.id,Number(duelActionPath[1]),action);
       return json(res,result.error?409:200,result);
     }
 
