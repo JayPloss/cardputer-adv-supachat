@@ -166,7 +166,9 @@ The deployed hosted stack is deliberately small:
 - SQLite for initial storage
 - A responsive static web client using server-sent events, with polling fallback for presence
 
-Devices are pre-registered by an operator. The current tool writes Albie's hashed server credential counterpart and private device token separately, then provisions the device token and known networks directly into NVS. Full user/device administration and one-time interactive enrollment are later portal features.
+Cardputer devices are pre-registered by an operator and keep separate bearer credentials. Web and Android members enroll through one-time Authentik invitations targeted to a specific room. Administrators can create rooms, manage membership, review safety reports, and process account-deletion requests from the web portal.
+
+Public Play-policy pages are served at `/privacy`, `/terms`, and `/delete-account`. Interactive web and Android users must accept the current community standards before posting; managed Cardputer device credentials retain their existing protocol. Message reporting, user blocking, and deletion requests are stored in SQLite and exposed to the administrator safety queue.
 
 Version 1 is expected to use TLS without end-to-end message encryption. A shared group-key design may be added later, but its browser key management and lost-device recovery costs must be resolved first.
 

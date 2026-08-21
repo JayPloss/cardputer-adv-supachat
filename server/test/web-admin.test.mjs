@@ -10,12 +10,24 @@ test('web admin zone is restricted to admin sessions and creates invitations', (
   assert.match(html, /id="admin-zone"/);
   assert.match(html, /id="invite-form"/);
   assert.match(html, /id="invite-room"/);
+  assert.match(html, /id="compliance-queue"/);
   assert.match(app, /currentUser\?\.role !== 'admin'/);
   assert.match(app, /api\('api\/admin\/invitations'/);
+  assert.match(app, /api\('api\/admin\/compliance'/);
   assert.match(app, /navigator\.share/);
   assert.match(app, /Join our SUPACHAT \$\{roomName\} room/);
   assert.doesNotMatch(app, /Join our SUPACHAT Family room/);
   assert.match(app, /if \(currentRoom !== requestedRoom\) return/);
+});
+
+test('web client requires current policy acceptance and exposes safety links', () => {
+  assert.match(html, /id="safety-open"/);
+  assert.match(html, /id="policy-zone"/);
+  assert.match(html, /href="\/privacy"/);
+  assert.match(html, /href="\/terms"/);
+  assert.match(html, /href="\/delete-account"/);
+  assert.match(app, /api\('api\/policy\/accept'/);
+  assert.match(app, /policyRequired = !session\.policy\?\.accepted_at/);
 });
 
 test('newly enrolled users receive a one-time welcome modal', () => {

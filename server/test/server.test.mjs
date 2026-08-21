@@ -60,6 +60,14 @@ test('health endpoint is public', async () => {
   assert.equal((await response.json()).service, 'supachat');
 });
 
+test('privacy, terms, and account deletion pages are public', async () => {
+  for (const [path, pattern] of [['privacy', /Privacy policy/], ['terms', /community standards/], ['delete-account', /Delete an account/]]) {
+    const response = await fetch(`http://127.0.0.1:${port}/${path}`);
+    assert.equal(response.status, 200);
+    assert.match(await response.text(), pattern);
+  }
+});
+
 test('Papa signs in and receives a secure session', async () => {
   const response = await fetch(`http://127.0.0.1:${port}/login`, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'papa', password }),
@@ -67,6 +75,13 @@ test('Papa signs in and receives a secure session', async () => {
   assert.equal(response.status, 200);
   cookie = response.headers.get('set-cookie').split(';')[0];
   assert.match(response.headers.get('set-cookie'), /HttpOnly; Secure; SameSite=Strict/);
+  const session = await fetch(`http://127.0.0.1:${port}/api/session`, {headers:{cookie}}).then((result) => result.json());
+  assert.equal(session.policy.version, '2026-08-21');
+  assert.equal(session.policy.accepted_at, null);
+  const accepted = await fetch(`http://127.0.0.1:${port}/api/policy/accept`, {
+    method:'POST', headers:{cookie,'content-type':'application/json'}, body:JSON.stringify({version:session.policy.version}),
+  });
+  assert.equal(accepted.status, 200);
 });
 
 test('native Authentik exchange issues an isolated app session for Papa', async () => {
@@ -83,6 +98,11 @@ test('native Authentik exchange issues an isolated app session for Papa', async 
   });
   assert.equal(profile.status, 200);
   assert.equal((await profile.json()).auth, 'native');
+  const accepted = await fetch(`http://127.0.0.1:${port}/api/policy/accept`, {
+    method:'POST', headers:{authorization:`Bearer ${session.token}`,'content-type':'application/json'},
+    body:JSON.stringify({version:'2026-08-21'}),
+  });
+  assert.equal(accepted.status, 200);
 });
 
 test('only Papa can create a one-time password setup link', async () => {
@@ -141,6 +161,15 @@ test('an authenticated invitee claims only the room targeted by the invitation',
   const profile = (await session.json()).user;
   assert.match(profile.id, /^web-[0-9a-f]{16}$/);
   assert.equal(profile.display_name, 'Friendly Person');
+  const rejectedPost = await fetch(`http://127.0.0.1:${port}/api/messages`, {
+    method:'POST', headers:{...headers,origin:'https://supachat.net','content-type':'application/json'},
+    body:JSON.stringify({client_id:'before-policy',body:'should not post',room_id:'family'}),
+  });
+  assert.equal(rejectedPost.status, 428);
+  const accepted = await fetch(`http://127.0.0.1:${port}/api/policy/accept`, {
+    method:'POST', headers:{...headers,origin:'https://supachat.net','content-type':'application/json'}, body:JSON.stringify({version:'2026-08-21'}),
+  });
+  assert.equal(accepted.status, 200);
   const sent = await fetch(`http://127.0.0.1:${port}/api/messages`, {
     method: 'POST', headers: { ...headers, origin: 'https://supachat.net', 'content-type': 'application/json' },
     body: JSON.stringify({ client_id: 'friend-test-1', body: 'hello from authentik', room_id: 'family' }),
@@ -162,10 +191,68 @@ test('Papa creates a group and adds and removes an existing user', async () => {
   assert.deepEqual(groups.groups.find(group=>group.id==='sunday-crew').members.map(member=>member.id), ['papa']);
 });
 
+test('members can report, block, and unblock objectionable messages', async () => {
+  const sent = await fetch(`http://127.0.0.1:${port}/api/messages`, {
+    method:'POST', headers:{authorization:`Bearer ${deviceToken}`,'content-type':'application/json'},
+    body:JSON.stringify({client_id:'moderation-test-1',body:'reportable test message',room_id:'family'}),
+  });
+  assert.equal(sent.status, 201);
+  const message = (await sent.json()).message;
+  const headers = {authorization:`Bearer ${nativeSessionToken}`,'content-type':'application/json'};
+  const report = await fetch(`http://127.0.0.1:${port}/api/moderation/reports`, {
+    method:'POST', headers, body:JSON.stringify({message_id:message.id,category:'harassment'}),
+  });
+  assert.equal(report.status, 201);
+  const blocked = await fetch(`http://127.0.0.1:${port}/api/moderation/blocks`, {
+    method:'POST', headers, body:JSON.stringify({user_id:'albie'}),
+  });
+  assert.equal(blocked.status, 200);
+  const blockedList = await fetch(`http://127.0.0.1:${port}/api/moderation/blocks`, {headers}).then((response) => response.json());
+  assert.equal(blockedList.blocked.some((item) => item.id === 'albie'), true);
+  const hiddenHistory = await fetch(`http://127.0.0.1:${port}/api/messages?room=family`, {headers}).then((response) => response.json());
+  assert.equal(hiddenHistory.messages.some((item) => item.id === message.id), false);
+  const unblocked = await fetch(`http://127.0.0.1:${port}/api/moderation/blocks/albie`, {method:'DELETE',headers});
+  assert.equal(unblocked.status, 200);
+  const restoredHistory = await fetch(`http://127.0.0.1:${port}/api/messages?room=family`, {headers}).then((response) => response.json());
+  assert.equal(restoredHistory.messages.some((item) => item.id === message.id), true);
+});
+
+test('account deletion requests are accepted in-app and from the public page', async () => {
+  const authenticated = await fetch(`http://127.0.0.1:${port}/api/account/deletion`, {
+    method:'POST', headers:{authorization:`Bearer ${nativeSessionToken}`,'content-type':'application/json'}, body:'{}',
+  });
+  assert.equal(authenticated.status, 201);
+  const duplicate = await fetch(`http://127.0.0.1:${port}/api/account/deletion`, {
+    method:'POST', headers:{authorization:`Bearer ${nativeSessionToken}`,'content-type':'application/json'}, body:'{}',
+  });
+  assert.equal(duplicate.status, 200);
+  assert.equal((await duplicate.json()).request_id, (await authenticated.json()).request_id);
+  const publicRequest = await fetch(`http://127.0.0.1:${port}/api/account/deletion/public`, {
+    method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({contact:'friend@example.test'}),
+  });
+  assert.equal(publicRequest.status, 201);
+  const compliance = await fetch(`http://127.0.0.1:${port}/api/admin/compliance`, {
+    headers:{authorization:`Bearer ${nativeSessionToken}`},
+  });
+  assert.equal(compliance.status, 200);
+  const queue = await compliance.json();
+  assert.equal(queue.reports.some((item) => item.category === 'harassment'), true);
+  assert.equal(queue.deletion_requests.length >= 2, true);
+  const resolvedReport = await fetch(`http://127.0.0.1:${port}/api/admin/compliance/reports/${queue.reports[0].id}`, {
+    method:'PATCH', headers:{authorization:`Bearer ${nativeSessionToken}`,'content-type':'application/json'}, body:JSON.stringify({status:'resolved'}),
+  });
+  assert.equal(resolvedReport.status, 200);
+  const completedDeletion = await fetch(`http://127.0.0.1:${port}/api/admin/compliance/deletions/${queue.deletion_requests[0].id}`, {
+    method:'PATCH', headers:{authorization:`Bearer ${nativeSessionToken}`,'content-type':'application/json'}, body:JSON.stringify({status:'completed'}),
+  });
+  assert.equal(completedDeletion.status, 200);
+});
+
 test('K-BUDS membership cannot read or write Family', async () => {
   const headers = { 'x-forwarded-host': 'supachat.net', 'x-authentik-uid': 'uid-kbuds-1', 'x-authentik-username': 'knowltown.friend', 'x-authentik-name': 'Knowlton Friend', 'x-authentik-groups': 'SupaChat K-BUDS' };
   const session = await fetch(`http://127.0.0.1:${port}/api/session`, { headers }).then((response) => response.json());
   assert.deepEqual(session.rooms.map((room) => room.id), ['k-buds']);
+  assert.equal((await fetch(`http://127.0.0.1:${port}/api/policy/accept`, {method:'POST',headers:{...headers,origin:'https://supachat.net','content-type':'application/json'},body:JSON.stringify({version:session.policy.version})})).status, 200);
   assert.equal((await fetch(`http://127.0.0.1:${port}/api/messages?room=family`, { headers })).status, 403);
   const sent = await fetch(`http://127.0.0.1:${port}/api/messages`, { method:'POST', headers:{...headers,origin:'https://supachat.net','content-type':'application/json'}, body:JSON.stringify({client_id:'kbuds-only-1',body:'hello K-BUDS',room_id:'k-buds'}) });
   assert.equal(sent.status, 201);

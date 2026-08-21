@@ -30,6 +30,7 @@ const config = {
     papa: process.env.SUPACHAT_PAPA_DEVICE_TOKEN_HASH || '',
   },
 };
+const policyVersion = '2026-08-21';
 
 const authentikIdentityMap = new Map([
   ['papa', 'papa'],
@@ -118,7 +119,45 @@ db.exec(`
     updated_at INTEGER NOT NULL,
     last_error TEXT
   );
+  CREATE TABLE IF NOT EXISTS policy_acceptances (
+    user_id TEXT NOT NULL REFERENCES users(id),
+    version TEXT NOT NULL,
+    accepted_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, version)
+  );
+  CREATE TABLE IF NOT EXISTS user_blocks (
+    blocker_id TEXT NOT NULL REFERENCES users(id),
+    blocked_user_id TEXT NOT NULL REFERENCES users(id),
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (blocker_id, blocked_user_id),
+    CHECK (blocker_id <> blocked_user_id)
+  );
+  CREATE TABLE IF NOT EXISTS moderation_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    reporter_id TEXT NOT NULL REFERENCES users(id),
+    message_id INTEGER REFERENCES messages(id),
+    reported_user_id TEXT NOT NULL REFERENCES users(id),
+    conversation_id TEXT REFERENCES conversations(id),
+    category TEXT NOT NULL,
+    details TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'reviewed', 'resolved')),
+    created_at INTEGER NOT NULL,
+    resolved_at INTEGER,
+    resolved_by TEXT REFERENCES users(id)
+  );
+  CREATE TABLE IF NOT EXISTS account_deletion_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT REFERENCES users(id),
+    contact TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL CHECK (source IN ('authenticated', 'public')),
+    status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'verified', 'completed', 'rejected')),
+    requested_at INTEGER NOT NULL,
+    resolved_at INTEGER,
+    resolution_note TEXT NOT NULL DEFAULT ''
+  );
   CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id, id);
+  CREATE INDEX IF NOT EXISTS idx_moderation_reports_status ON moderation_reports(status, created_at);
+  CREATE INDEX IF NOT EXISTS idx_deletion_requests_status ON account_deletion_requests(status, requested_at);
 `);
 try { db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('admin', 'member'))"); } catch (error) {
   if (!String(error).includes('duplicate column')) throw error;
@@ -136,20 +175,25 @@ db.prepare("INSERT OR IGNORE INTO conversation_members(conversation_id, user_id)
 db.prepare("INSERT OR IGNORE INTO conversation_members(conversation_id, user_id) VALUES ('family', ?)").run('juju');
 for (const userId of ['papa', 'albie', 'juju']) db.prepare("INSERT OR IGNORE INTO conversation_members(conversation_id, user_id) VALUES ('k-buds', ?)").run(userId);
 
-const clients = new Set();
+const clients = new Map();
 const longPolls = new Set();
 const walkieClients = new Map();
 const walkieSpeakers = new Map();
 const loginAttempts = new Map();
+const publicDeletionAttempts = new Map();
 const assets = new Map([
   ['/app.css', ['text/css; charset=utf-8', readFileSync(join(webRoot, 'app.css'))]],
   ['/controls.css', ['text/css; charset=utf-8', readFileSync(join(webRoot, 'controls.css'))]],
   ['/admin.css', ['text/css; charset=utf-8', readFileSync(join(webRoot, 'admin.css'))]],
   ['/app.js', ['text/javascript; charset=utf-8', readFileSync(join(webRoot, 'app.js'))]],
   ['/supachat-logo.png', ['image/png', readFileSync(join(webRoot, 'supachat-logo.png'))]],
+  ['/policy.css', ['text/css; charset=utf-8', readFileSync(join(webRoot, 'policy.css'))]],
 ]);
 const loginHtml = readFileSync(join(webRoot, 'login.html'));
 const appHtml = readFileSync(join(webRoot, 'index.html'));
+const privacyHtml = readFileSync(join(webRoot, 'privacy.html'));
+const termsHtml = readFileSync(join(webRoot, 'terms.html'));
+const deleteAccountHtml = readFileSync(join(webRoot, 'delete-account.html'));
 
 function json(res, status, value, headers = {}) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...headers });
@@ -189,6 +233,10 @@ function requestHost(req) {
   return String(req.headers['x-forwarded-host'] || req.headers.host || '').split(':')[0].toLowerCase();
 }
 
+function requestIp(req) {
+  return String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown').split(',')[0].trim();
+}
+
 function authentikUserId(username, uid) {
   return authentikIdentityMap.get(String(username).toLowerCase())
     || `web-${createHash('sha256').update(String(uid)).digest('hex').slice(0, 16)}`;
@@ -216,6 +264,14 @@ function authorizedRoom(userId, requested) {
   const roomId = String(requested || '').trim().toLowerCase();
   if (!roomId) return null;
   return db.prepare('SELECT c.id, c.name FROM conversations c JOIN conversation_members cm ON cm.conversation_id = c.id WHERE c.id = ? AND cm.user_id = ?').get(roomId, userId);
+}
+
+function policyAcceptedAt(userId) {
+  return db.prepare('SELECT accepted_at FROM policy_acceptances WHERE user_id = ? AND version = ?').get(userId, policyVersion)?.accepted_at || null;
+}
+
+function requiresPolicyAcceptance(req) {
+  return !deviceUser(req);
 }
 
 function webUser(req) {
@@ -283,7 +339,8 @@ async function sendExpoNotifications(message) {
   if (!config.expoPushEnabled) return;
   const devices = db.prepare(`SELECT nd.id, nd.token FROM notification_devices nd
     JOIN conversation_members cm ON cm.user_id = nd.user_id
-    WHERE nd.provider = 'expo' AND nd.enabled = 1 AND nd.user_id <> ? AND cm.conversation_id = ?`).all(message.author_id, message.conversation_id);
+    WHERE nd.provider = 'expo' AND nd.enabled = 1 AND nd.user_id <> ? AND cm.conversation_id = ?
+      AND NOT EXISTS (SELECT 1 FROM user_blocks b WHERE b.blocker_id = nd.user_id AND b.blocked_user_id = ?)`).all(message.author_id, message.conversation_id, message.author_id);
   if (!devices.length) return;
   const payloads = devices.map((device) => ({
     to: device.token,
@@ -337,21 +394,25 @@ function pcmWav(pcm, sampleRate = 8000) {
   return Buffer.concat([header, pcm]);
 }
 
-function messageRows(roomId, after = 0, limit = 100) {
+function messageRows(roomId, after = 0, limit = 100, viewerId = null) {
   const bounded = Math.min(Math.max(limit, 1), 100);
   const rows = after > 0 ? db.prepare(`
     SELECT m.id, m.client_id, m.conversation_id, m.author_id, u.display_name AS author_name,
            u.short_name AS author_short, m.type, m.body, m.created_at
     FROM messages m JOIN users u ON u.id = m.author_id
-    WHERE m.conversation_id = ? AND m.id > ? ORDER BY m.id ASC LIMIT ?
-  `).all(roomId, after, bounded) : db.prepare(`
+    WHERE m.conversation_id = ? AND m.id > ?
+      AND (? IS NULL OR NOT EXISTS (SELECT 1 FROM user_blocks b WHERE b.blocker_id = ? AND b.blocked_user_id = m.author_id))
+    ORDER BY m.id ASC LIMIT ?
+  `).all(roomId, after, viewerId, viewerId, bounded) : db.prepare(`
     SELECT * FROM (
       SELECT m.id, m.client_id, m.conversation_id, m.author_id, u.display_name AS author_name,
              u.short_name AS author_short, m.type, m.body, m.created_at
       FROM messages m JOIN users u ON u.id = m.author_id
-      WHERE m.conversation_id = ? ORDER BY m.id DESC LIMIT ?
+      WHERE m.conversation_id = ?
+        AND (? IS NULL OR NOT EXISTS (SELECT 1 FROM user_blocks b WHERE b.blocker_id = ? AND b.blocked_user_id = m.author_id))
+      ORDER BY m.id DESC LIMIT ?
     ) ORDER BY id ASC
-  `).all(roomId, bounded);
+  `).all(roomId, viewerId, viewerId, bounded);
   return rows.map((row) => ({
     ...row, conversation_name: db.prepare('SELECT name FROM conversations WHERE id = ?').get(row.conversation_id)?.name,
     receipts: db.prepare('SELECT user_id, state, updated_at FROM receipts WHERE message_id = ?').all(row.id),
@@ -392,7 +453,10 @@ function touchPresence(user, connected = true) {
 
 function publish(event, payload) {
   const packet = `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
-  for (const res of clients) res.write(packet);
+  for (const [res, clientUser] of clients) {
+    if (event === 'message' && db.prepare('SELECT 1 FROM user_blocks WHERE blocker_id = ? AND blocked_user_id = ?').get(clientUser, payload.author_id)) continue;
+    res.write(packet);
+  }
   for (const wake of longPolls) wake();
   longPolls.clear();
 }
@@ -422,7 +486,12 @@ function websocketFrame(payload, opcode = 1) {
 
 function walkieBroadcast(roomId, value, opcode = 1, except = null) {
   const frame = websocketFrame(opcode === 1 ? JSON.stringify(value) : value, opcode);
-  for (const [socket, client] of walkieClients) if (client.roomId === roomId && socket !== except && !socket.destroyed) socket.write(frame);
+  const sourceUser = except ? walkieClients.get(except)?.user : value?.user;
+  for (const [socket, client] of walkieClients) {
+    if (client.roomId !== roomId || socket === except || socket.destroyed) continue;
+    if (sourceUser && db.prepare('SELECT 1 FROM user_blocks WHERE blocker_id = ? AND blocked_user_id = ?').get(client.user, sourceUser)) continue;
+    socket.write(frame);
+  }
 }
 
 function releaseWalkie(roomId, user, reason = 'released') {
@@ -442,6 +511,32 @@ const server = createServer(async (req, res) => {
   try {
     if (url.pathname === '/healthz') {
       return json(res, 200, { ok: true, service: 'supachat', time: Date.now() });
+    }
+    const publicPages = new Map([
+      ['/privacy', privacyHtml], ['/privacy.html', privacyHtml],
+      ['/terms', termsHtml], ['/terms.html', termsHtml],
+      ['/delete-account', deleteAccountHtml], ['/delete-account.html', deleteAccountHtml],
+    ]);
+    if (publicPages.has(url.pathname) && req.method === 'GET') {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'public, max-age=300' });
+      return res.end(publicPages.get(url.pathname));
+    }
+    if (url.pathname === '/api/account/deletion/public' && req.method === 'POST') {
+      if (!sameOrigin(req)) return json(res, 403, { error: 'origin_rejected' });
+      const ip = requestIp(req);
+      const attempts = publicDeletionAttempts.get(ip) || [];
+      const recent = attempts.filter((time) => time > Date.now() - 24 * 60 * 60_000);
+      if (recent.length >= 3) return json(res, 429, { error: 'try_later' });
+      const payload = await body(req);
+      const contact = String(payload.contact || '').trim().slice(0, 160);
+      const website = String(payload.website || '').trim();
+      if (website) return json(res, 200, { ok: true });
+      if (!contact || !(/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact) || /^[a-z0-9][a-z0-9._-]{1,31}$/i.test(contact))) {
+        return json(res, 400, { error: 'invalid_contact' });
+      }
+      db.prepare("INSERT INTO account_deletion_requests(contact, source, requested_at) VALUES (?, 'public', ?)").run(contact, Date.now());
+      publicDeletionAttempts.set(ip, [...recent, Date.now()]);
+      return json(res, 201, { ok: true });
     }
     if (url.pathname === '/login' && req.method === 'GET') {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
@@ -504,12 +599,112 @@ const server = createServer(async (req, res) => {
 
     if (url.pathname === '/api/session' && req.method === 'GET') {
       const profile = db.prepare('SELECT id, display_name, short_name, role FROM users WHERE id = ?').get(user);
-      return json(res, 200, { user: profile, rooms: roomsFor(user), auth: deviceUser(req) ? 'device' : nativeUser(req) ? 'native' : (String(req.headers['x-authentik-uid'] || '') ? 'authentik' : 'legacy') });
+      return json(res, 200, {
+        user: profile,
+        rooms: roomsFor(user),
+        auth: deviceUser(req) ? 'device' : nativeUser(req) ? 'native' : (String(req.headers['x-authentik-uid'] || '') ? 'authentik' : 'legacy'),
+        policy: { version: policyVersion, accepted_at: policyAcceptedAt(user) },
+      });
     }
 
     if (url.pathname === '/api/rooms' && req.method === 'GET') return json(res, 200, { rooms: roomsFor(user) });
 
+    if (url.pathname === '/api/policy/accept' && req.method === 'POST') {
+      if (webUser(req) && !sameOrigin(req)) return json(res, 403, { error: 'origin_rejected' });
+      const payload = await body(req);
+      if (payload.version !== policyVersion) return json(res, 409, { error: 'policy_version_changed', policy_version: policyVersion });
+      const acceptedAt = Date.now();
+      db.prepare('INSERT OR REPLACE INTO policy_acceptances(user_id, version, accepted_at) VALUES (?, ?, ?)').run(user, policyVersion, acceptedAt);
+      return json(res, 200, { ok: true, version: policyVersion, accepted_at: acceptedAt });
+    }
+
+    if (url.pathname === '/api/account/deletion' && req.method === 'POST') {
+      if (deviceUser(req)) return json(res, 403, { error: 'interactive_session_required' });
+      if (webUser(req) && !sameOrigin(req)) return json(res, 403, { error: 'origin_rejected' });
+      const existing = db.prepare("SELECT id, requested_at FROM account_deletion_requests WHERE user_id = ? AND status IN ('open','verified') ORDER BY id DESC LIMIT 1").get(user);
+      if (existing) return json(res, 200, { ok: true, request_id: existing.id, requested_at: existing.requested_at });
+      const result = db.prepare("INSERT INTO account_deletion_requests(user_id, source, requested_at) VALUES (?, 'authenticated', ?)").run(user, Date.now());
+      const created = db.prepare('SELECT id, requested_at FROM account_deletion_requests WHERE id = ?').get(result.lastInsertRowid);
+      return json(res, 201, { ok: true, request_id: created.id, requested_at: created.requested_at });
+    }
+
+    if (url.pathname === '/api/moderation/reports' && req.method === 'POST') {
+      if (deviceUser(req)) return json(res, 403, { error: 'interactive_session_required' });
+      if (webUser(req) && !sameOrigin(req)) return json(res, 403, { error: 'origin_rejected' });
+      const payload = await body(req);
+      const messageId = Number(payload.message_id);
+      const category = String(payload.category || '').trim().toLowerCase();
+      const details = String(payload.details || '').trim().slice(0, 500);
+      if (!Number.isInteger(messageId) || !['harassment', 'hate_or_abuse', 'sexual_or_unsafe', 'spam', 'other'].includes(category)) {
+        return json(res, 400, { error: 'invalid_report' });
+      }
+      const reported = db.prepare(`SELECT m.id, m.author_id, m.conversation_id FROM messages m
+        JOIN conversation_members cm ON cm.conversation_id = m.conversation_id
+        WHERE m.id = ? AND cm.user_id = ?`).get(messageId, user);
+      if (!reported) return json(res, 404, { error: 'message_not_found' });
+      if (reported.author_id === user) return json(res, 400, { error: 'cannot_report_self' });
+      const duplicate = db.prepare("SELECT id FROM moderation_reports WHERE reporter_id = ? AND message_id = ? AND status <> 'resolved'").get(user, messageId);
+      if (duplicate) return json(res, 200, { ok: true, report_id: duplicate.id });
+      const result = db.prepare(`INSERT INTO moderation_reports(reporter_id, message_id, reported_user_id, conversation_id, category, details, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`).run(user, messageId, reported.author_id, reported.conversation_id, category, details, Date.now());
+      return json(res, 201, { ok: true, report_id: Number(result.lastInsertRowid) });
+    }
+
+    if (url.pathname === '/api/moderation/blocks' && req.method === 'GET') {
+      if (deviceUser(req)) return json(res, 403, { error: 'interactive_session_required' });
+      const blocked = db.prepare(`SELECT u.id, u.display_name, u.short_name, b.created_at FROM user_blocks b
+        JOIN users u ON u.id = b.blocked_user_id WHERE b.blocker_id = ? ORDER BY u.display_name`).all(user);
+      return json(res, 200, { blocked });
+    }
+    if (url.pathname === '/api/moderation/blocks' && req.method === 'POST') {
+      if (deviceUser(req)) return json(res, 403, { error: 'interactive_session_required' });
+      if (webUser(req) && !sameOrigin(req)) return json(res, 403, { error: 'origin_rejected' });
+      const payload = await body(req); const blockedUserId = String(payload.user_id || '');
+      if (!blockedUserId || blockedUserId === user || !db.prepare('SELECT 1 FROM users WHERE id = ? AND revoked_at IS NULL').get(blockedUserId)) {
+        return json(res, 400, { error: 'invalid_block' });
+      }
+      db.prepare('INSERT OR IGNORE INTO user_blocks(blocker_id, blocked_user_id, created_at) VALUES (?, ?, ?)').run(user, blockedUserId, Date.now());
+      return json(res, 200, { ok: true });
+    }
+    const unblockPath = url.pathname.match(/^\/api\/moderation\/blocks\/([^/]+)$/);
+    if (unblockPath && req.method === 'DELETE') {
+      if (deviceUser(req)) return json(res, 403, { error: 'interactive_session_required' });
+      if (webUser(req) && !sameOrigin(req)) return json(res, 403, { error: 'origin_rejected' });
+      db.prepare('DELETE FROM user_blocks WHERE blocker_id = ? AND blocked_user_id = ?').run(user, decodeURIComponent(unblockPath[1]));
+      return json(res, 200, { ok: true });
+    }
+
     const admin = db.prepare('SELECT role FROM users WHERE id = ?').get(user)?.role === 'admin';
+    if (url.pathname === '/api/admin/compliance' && req.method === 'GET') {
+      if (!admin) return json(res, 403, { error: 'admin_required' });
+      const reports = db.prepare(`SELECT r.id, r.reporter_id, reporter.display_name AS reporter_name, r.message_id,
+        r.reported_user_id, reported.display_name AS reported_user_name, r.conversation_id, r.category, r.details, r.status, r.created_at
+        FROM moderation_reports r JOIN users reporter ON reporter.id = r.reporter_id JOIN users reported ON reported.id = r.reported_user_id
+        WHERE r.status <> 'resolved' ORDER BY r.created_at ASC`).all();
+      const deletionRequests = db.prepare(`SELECT d.id, d.user_id, u.display_name, d.contact, d.source, d.status, d.requested_at
+        FROM account_deletion_requests d LEFT JOIN users u ON u.id = d.user_id
+        WHERE d.status NOT IN ('completed','rejected') ORDER BY d.requested_at ASC`).all();
+      return json(res, 200, { reports, deletion_requests: deletionRequests });
+    }
+    const reportStatusPath = url.pathname.match(/^\/api\/admin\/compliance\/reports\/(\d+)$/);
+    if (reportStatusPath && req.method === 'PATCH') {
+      if (!admin) return json(res, 403, { error: 'admin_required' });
+      if (webUser(req) && !sameOrigin(req)) return json(res, 403, { error: 'origin_rejected' });
+      const payload = await body(req); const status = String(payload.status || '');
+      if (!['reviewed', 'resolved'].includes(status)) return json(res, 400, { error: 'invalid_status' });
+      const result = db.prepare('UPDATE moderation_reports SET status = ?, resolved_at = ?, resolved_by = ? WHERE id = ?').run(status, status === 'resolved' ? Date.now() : null, user, Number(reportStatusPath[1]));
+      return result.changes ? json(res, 200, { ok: true }) : json(res, 404, { error: 'report_not_found' });
+    }
+    const deletionStatusPath = url.pathname.match(/^\/api\/admin\/compliance\/deletions\/(\d+)$/);
+    if (deletionStatusPath && req.method === 'PATCH') {
+      if (!admin) return json(res, 403, { error: 'admin_required' });
+      if (webUser(req) && !sameOrigin(req)) return json(res, 403, { error: 'origin_rejected' });
+      const payload = await body(req); const status = String(payload.status || '');
+      const note = String(payload.resolution_note || '').trim().slice(0, 500);
+      if (!['verified', 'completed', 'rejected'].includes(status)) return json(res, 400, { error: 'invalid_status' });
+      const result = db.prepare('UPDATE account_deletion_requests SET status = ?, resolved_at = ?, resolution_note = ? WHERE id = ?').run(status, ['completed','rejected'].includes(status) ? Date.now() : null, note, Number(deletionStatusPath[1]));
+      return result.changes ? json(res, 200, { ok: true }) : json(res, 404, { error: 'deletion_request_not_found' });
+    }
     if (url.pathname === '/api/admin/groups' && req.method === 'GET') {
       if (!admin) return json(res, 403, { error: 'admin_required' });
       const groups = db.prepare(`SELECT c.id, c.name, COUNT(cm.user_id) AS member_count FROM conversations c
@@ -610,7 +805,7 @@ const server = createServer(async (req, res) => {
       if (!url.searchParams.get('room')) return json(res, 400, { error: 'room_required' });
       const room = authorizedRoom(user, url.searchParams.get('room'));
       if (!room) return json(res, 403, { error: 'room_forbidden' });
-      const messages = messageRows(room.id, Number(url.searchParams.get('after') || 0), Number(url.searchParams.get('limit') || 100));
+      const messages = messageRows(room.id, Number(url.searchParams.get('after') || 0), Number(url.searchParams.get('limit') || 100), user);
       if (webUser(req)) {
         for (const message of messages) {
           if (message.author_id !== user && setReceipt(message.id, user, 'read')) {
@@ -618,10 +813,11 @@ const server = createServer(async (req, res) => {
           }
         }
       }
-      return json(res, 200, { room, messages: messageRows(room.id, Number(url.searchParams.get('after') || 0), Number(url.searchParams.get('limit') || 100)) });
+      return json(res, 200, { room, messages: messageRows(room.id, Number(url.searchParams.get('after') || 0), Number(url.searchParams.get('limit') || 100), user) });
     }
     if (url.pathname === '/api/messages' && req.method === 'POST') {
       if (webUser(req) && !sameOrigin(req)) return json(res, 403, { error: 'origin_rejected' });
+      if (requiresPolicyAcceptance(req) && !policyAcceptedAt(user)) return json(res, 428, { error: 'policy_acceptance_required', policy_version: policyVersion });
       const payload = await body(req);
       if (!payload.room_id) return json(res, 400, { error: 'room_required' });
       const room = authorizedRoom(user, payload.room_id);
@@ -641,12 +837,13 @@ const server = createServer(async (req, res) => {
       }
       const row = db.prepare('SELECT id FROM messages WHERE author_id = ? AND client_id = ?').get(user, clientId);
       setReceipt(row.id, user, 'server');
-      const message = messageRows(room.id, row.id - 1, 1)[0];
+      const message = messageRows(room.id, row.id - 1, 1, user)[0];
       if (result) { publish('message', message); sendExpoNotifications(message); }
       return json(res, result ? 201 : 200, { message });
     }
     if (url.pathname === '/api/voice' && req.method === 'POST') {
       if (webUser(req) && !sameOrigin(req)) return json(res, 403, { error: 'origin_rejected' });
+      if (requiresPolicyAcceptance(req) && !policyAcceptedAt(user)) return json(res, 428, { error: 'policy_acceptance_required', policy_version: policyVersion });
       const clientId = String(req.headers['x-client-id'] || '').slice(0, 80);
       const sampleRate = Number(req.headers['x-sample-rate'] || 8000);
       const samples = await rawBody(req);
@@ -679,7 +876,7 @@ const server = createServer(async (req, res) => {
       }
       const row = db.prepare('SELECT id FROM messages WHERE author_id = ? AND client_id = ?').get(user, clientId);
       setReceipt(row.id, user, 'server');
-      const message = messageRows(room.id, row.id - 1, 1)[0];
+      const message = messageRows(room.id, row.id - 1, 1, user)[0];
       if (inserted) { publish('message', message); sendExpoNotifications(message); }
       return json(res, inserted ? 201 : 200, { message });
     }
@@ -687,7 +884,8 @@ const server = createServer(async (req, res) => {
     if (voiceMatch && req.method === 'GET') {
       const clip = db.prepare(`SELECT vc.* FROM voice_clips vc JOIN messages m ON m.id = vc.message_id
         JOIN conversation_members cm ON cm.conversation_id = m.conversation_id
-        WHERE vc.message_id = ? AND cm.user_id = ?`).get(Number(voiceMatch[1]), user);
+        WHERE vc.message_id = ? AND cm.user_id = ?
+          AND NOT EXISTS (SELECT 1 FROM user_blocks b WHERE b.blocker_id = ? AND b.blocked_user_id = m.author_id)`).get(Number(voiceMatch[1]), user, user);
       if (!clip) return json(res, 404, { error: 'voice_not_found' });
       const pcm = readFileSync(join(voiceDir, clip.file_name));
       const wantsWav = url.searchParams.get('format') === 'wav';
@@ -718,7 +916,7 @@ const server = createServer(async (req, res) => {
     if (url.pathname === '/api/events' && req.method === 'GET' && webUser(req)) {
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive', 'x-accel-buffering': 'no' });
       res.write(`event: ready\ndata: ${JSON.stringify({ time: Date.now() })}\n\n`);
-      clients.add(res);
+      clients.set(res, user);
       req.on('close', () => clients.delete(res));
       return;
     }
@@ -730,7 +928,7 @@ const server = createServer(async (req, res) => {
       const receiptsAfter = Number(url.searchParams.get('receipts_after') || 0);
       const limit = Math.min(Math.max(Number(url.searchParams.get('limit') || 100), 1), 100);
       const shouldWait = url.searchParams.get('wait') !== '0';
-      let messages = messageRows(room.id, after, limit);
+      let messages = messageRows(room.id, after, limit, user);
       let receipts = receiptRows(room.id, receiptsAfter, limit);
       if (shouldWait && !messages.length && !receipts.length) {
         await new Promise((resolve) => {
@@ -739,7 +937,7 @@ const server = createServer(async (req, res) => {
           longPolls.add(wake);
           res.on('close', () => { clearTimeout(timer); longPolls.delete(wake); resolve(); });
         });
-        messages = messageRows(room.id, after, limit);
+        messages = messageRows(room.id, after, limit, user);
         receipts = receiptRows(room.id, receiptsAfter, limit);
       }
       for (const message of messages) {
@@ -764,6 +962,7 @@ server.on('upgrade', (req, socket) => {
   const validUpgrade = String(req.headers.upgrade || '').toLowerCase() === 'websocket' && req.headers['sec-websocket-version'] === '13';
   const deviceBearer = String(req.headers.authorization || '').startsWith('Bearer ');
   if (!user || !room || !key || !validUpgrade) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); return socket.destroy(); }
+  if (requiresPolicyAcceptance(req) && !policyAcceptedAt(user)) { socket.write('HTTP/1.1 428 Precondition Required\r\n\r\n'); return socket.destroy(); }
   if (!deviceBearer && !sameOrigin(req)) { socket.write('HTTP/1.1 403 Forbidden\r\n\r\n'); return socket.destroy(); }
   const accept = createHash('sha1').update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
   socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);

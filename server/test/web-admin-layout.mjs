@@ -20,7 +20,8 @@ try {
     const page = await browser.newPage({viewport});
     await page.route('**/api/**', async (route) => {
       const url = route.request().url();
-      const json = url.includes('/session') ? {user:{id:'papa',display_name:'Papa',role:'admin'},rooms:[{id:'family',name:'Family'},{id:'k-buds',name:'K-BUDS'}]} : url.includes('/messages') ? {messages:[]} : url.includes('/presence') ? {presence:[]} : {url:'https://auth.supachat.net/if/flow/supachat-invitation-enrollment/?itoken=test'};
+      const groups = [{id:'family',name:'Family',member_count:3,members:[{id:'papa',display_name:'Papa',kind:'web'}]},{id:'k-buds',name:'K-BUDS',member_count:1,members:[{id:'papa',display_name:'Papa',kind:'web'}]}];
+      const json = url.includes('/session') ? {user:{id:'papa',display_name:'Papa',role:'admin'},rooms:[{id:'family',name:'Family'},{id:'k-buds',name:'K-BUDS'}],policy:{version:'2026-08-21',accepted_at:Date.now()}} : url.includes('/admin/compliance') ? {reports:[],deletion_requests:[]} : url.includes('/admin/groups') ? {groups,users:groups[0].members} : url.includes('/messages') ? {messages:[]} : url.includes('/presence') ? {presence:[]} : {url:'https://auth.supachat.net/if/flow/supachat-invitation-enrollment/?itoken=test'};
       await route.fulfill({status:url.includes('/invitations') ? 201 : 200,contentType:'application/json',body:JSON.stringify(json)});
     });
     await page.addInitScript(() => {

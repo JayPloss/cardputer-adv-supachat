@@ -12,7 +12,7 @@
   <div class="app-shell" data-vi-container="true">
     <header class="topbar">
       <div class="brand-lockup"><img class="brand-logo" src="supachat-logo.png" alt="SupaChat"><div><p class="eyebrow">PRIVATE ROOMS / ALWAYS WAITING</p><label class="room-picker" for="room-select">Room<select id="room-select" aria-label="Current room"></select></label></div></div>
-      <div class="header-tools"><div class="presence" id="presence" aria-live="polite"></div><div class="session-tools"><button id="admin-open" class="quiet-button" type="button" hidden>Admin</button><button id="sound-toggle" class="quiet-button" type="button" aria-pressed="true">Sound: on</button><button id="logout" class="quiet-button" type="button">Log out</button></div></div>
+      <div class="header-tools"><div class="presence" id="presence" aria-live="polite"></div><div class="session-tools"><button id="admin-open" class="quiet-button" type="button" hidden>Admin</button><button id="safety-open" class="quiet-button" type="button">Safety</button><button id="sound-toggle" class="quiet-button" type="button" aria-pressed="true">Sound: on</button><button id="logout" class="quiet-button" type="button">Log out</button></div></div>
     </header>
     <div class="workspace">
       <section class="chat-panel" aria-label="Family text chat">
@@ -57,6 +57,7 @@
           <button id="invite-share" type="button">Share invite</button>
         </div>
         <button id="invite-generate" class="invite-generate" type="submit">Generate one-time link</button></form>
+        <div class="admin-section"><div class="admin-heading"><div><h3>Safety queue</h3><p>Review member reports and account-deletion requests.</p></div><button id="compliance-refresh" class="quiet-button" type="button">Refresh</button></div><p id="compliance-state" class="invite-state" role="status"></p><div id="compliance-queue" class="group-members"></div></div>
       </section>
     </dialog>
     <dialog id="welcome-zone" class="welcome-zone" aria-labelledby="welcome-title">
@@ -71,6 +72,20 @@
           <li><strong>Presence</strong><span>The names at the top show who is around.</span></li>
         </ul>
         <button id="welcome-close" class="welcome-close" type="button">Start chatting</button>
+      </section>
+    </dialog>
+    <dialog id="policy-zone" class="welcome-zone" aria-labelledby="policy-title">
+      <section class="welcome-card" data-vi-container="true">
+        <p class="eyebrow">SAFETY &amp; PRIVACY</p>
+        <h2 id="policy-title">Keep SupaChat safe.</h2>
+        <p>Before posting, accept the <a href="/terms" target="_blank" rel="noreferrer">Terms and community standards</a> and review the <a href="/privacy" target="_blank" rel="noreferrer">Privacy policy</a>.</p>
+        <ul class="welcome-concepts">
+          <li><strong>Respect private rooms</strong><span>Do not share invitations or room content outside their intended audience.</span></li>
+          <li><strong>Report concerns</strong><span>Contact <a href="mailto:info@supachat.net">info@supachat.net</a>. Message-level reporting is available in the Android app.</span></li>
+          <li><strong>Control your account</strong><span><a href="/delete-account" target="_blank" rel="noreferrer">Request account deletion</a> at any time.</span></li>
+        </ul>
+        <button id="policy-accept" class="welcome-close" type="button">Accept and continue</button>
+        <button id="policy-close" class="quiet-button" type="button">Close</button>
       </section>
     </dialog>
   </div>

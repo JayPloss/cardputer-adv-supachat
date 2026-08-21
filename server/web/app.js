@@ -9,6 +9,10 @@ const voiceClipButton = document.querySelector('#voice-clip');
 const pttButton = document.querySelector('#ptt');
 const walkieState = document.querySelector('#walkie-state');
 const soundToggle = document.querySelector('#sound-toggle');
+const safetyOpen = document.querySelector('#safety-open');
+const policyZone = document.querySelector('#policy-zone');
+const policyAccept = document.querySelector('#policy-accept');
+const policyClose = document.querySelector('#policy-close');
 const adminOpen = document.querySelector('#admin-open');
 const adminZone = document.querySelector('#admin-zone');
 const adminClose = document.querySelector('#admin-close');
@@ -31,6 +35,9 @@ const manageRoom = document.querySelector('#manage-room');
 const groupMembers = document.querySelector('#group-members');
 const existingUser = document.querySelector('#existing-user');
 const addMember = document.querySelector('#add-member');
+const complianceRefresh = document.querySelector('#compliance-refresh');
+const complianceState = document.querySelector('#compliance-state');
+const complianceQueue = document.querySelector('#compliance-queue');
 let adminGroups = []; let adminUsers = [];
 const welcomeRequested = new URLSearchParams(location.search).get('welcome') === '1';
 let messages = [];
@@ -38,6 +45,8 @@ let currentUser = null;
 let rooms = [];
 let currentRoom = new URLSearchParams(location.search).get('room') || localStorage.getItem('supachat-room') || 'family';
 let clipRoom = '';
+let policyVersion = '';
+let policyRequired = false;
 
 const api = async (path, options = {}) => {
   const response = await fetch(path, { ...options, headers: { 'content-type': 'application/json', ...(options.headers || {}) } });
@@ -226,6 +235,10 @@ connectWalkie();
 async function refresh() {
   const session = await api('api/session');
   currentUser = session.user; rooms = session.rooms || [];
+  policyVersion = session.policy?.version || '';
+  policyRequired = !session.policy?.accepted_at;
+  policyClose.hidden = policyRequired;
+  if (policyRequired && !policyZone.open) policyZone.showModal();
   if (!rooms.some((room) => room.id === currentRoom)) currentRoom = rooms[0]?.id || 'family';
   roomSelect.innerHTML = rooms.map((room) => `<option value="${escapeHtml(room.id)}">${escapeHtml(room.name)}</option>`).join('');
   roomSelect.value = currentRoom;
@@ -241,12 +254,23 @@ async function refresh() {
   messages = next;
   renderMessages(true);
   renderPresence(presence);
-  if (welcomeRequested) {
+  if (welcomeRequested && !policyRequired) {
     const welcomeKey = `supachat-welcomed:${currentUser.id}`;
     if (!localStorage.getItem(welcomeKey)) welcomeZone.showModal();
     else clearWelcomeMarker();
   }
 }
+safetyOpen.addEventListener('click', () => { policyRequired = false; policyClose.hidden = false; if (!policyZone.open) policyZone.showModal(); });
+policyClose.addEventListener('click', () => { if (!policyRequired) policyZone.close(); });
+policyZone.addEventListener('cancel', (event) => { if (policyRequired) event.preventDefault(); });
+policyAccept.addEventListener('click', async () => {
+  policyAccept.disabled = true;
+  try {
+    await api('api/policy/accept', {method:'POST',body:JSON.stringify({version:policyVersion})});
+    policyRequired = false; policyClose.hidden = false; policyZone.close(); await refresh();
+  } catch { policyAccept.textContent = 'Could not save — try again'; }
+  finally { policyAccept.disabled = false; }
+});
 roomSelect.addEventListener('change', async () => {
   currentRoom = roomSelect.value;
   localStorage.setItem('supachat-room', currentRoom);
@@ -278,7 +302,24 @@ async function loadAdminGroups(selected = manageRoom.value) {
   inviteForm.elements.room_id.innerHTML = adminGroups.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join('');
   if (group) inviteForm.elements.room_id.value = group.id;
 }
-adminOpen.addEventListener('click', async () => { adminZone.showModal(); try { await loadAdminGroups(currentRoom); } catch { groupState.textContent = 'Could not load groups.'; } });
+async function loadComplianceQueue() {
+  complianceState.textContent = 'Loading…';
+  try {
+    const data = await api('api/admin/compliance');
+    const reports = data.reports.map((report) => `<div class="group-member"><span><strong>Report: ${escapeHtml(report.category.replaceAll('_',' '))}</strong><small>${escapeHtml(report.reporter_name)} reported ${escapeHtml(report.reported_user_name)} · ${escapeHtml(report.conversation_id)} message ${report.message_id}</small></span><button type="button" data-compliance-kind="reports" data-compliance-id="${report.id}" data-compliance-status="resolved">Resolve</button></div>`);
+    const deletions = data.deletion_requests.map((request) => `<div class="group-member"><span><strong>Delete account</strong><small>${escapeHtml(request.display_name || request.contact || 'Unknown account')} · ${escapeHtml(request.source)}</small></span><button type="button" data-compliance-kind="deletions" data-compliance-id="${request.id}" data-compliance-status="completed">Complete</button></div>`);
+    complianceQueue.innerHTML = [...reports,...deletions].join('') || '<p class="empty-inline">Nothing waiting.</p>';
+    complianceState.textContent = '';
+  } catch { complianceState.textContent = 'Could not load the safety queue.'; }
+}
+adminOpen.addEventListener('click', async () => { adminZone.showModal(); await Promise.allSettled([loadAdminGroups(currentRoom),loadComplianceQueue()]); });
+complianceRefresh.addEventListener('click', loadComplianceQueue);
+complianceQueue.addEventListener('click', async (event) => {
+  const button = event.target.closest('[data-compliance-kind]'); if (!button) return;
+  button.disabled = true;
+  try { await api(`api/admin/compliance/${button.dataset.complianceKind}/${button.dataset.complianceId}`, {method:'PATCH',body:JSON.stringify({status:button.dataset.complianceStatus})}); await loadComplianceQueue(); }
+  catch { complianceState.textContent = 'Could not update that item.'; button.disabled = false; }
+});
 adminClose.addEventListener('click', () => adminZone.close());
 adminZone.addEventListener('click', (event) => { if (event.target === adminZone) adminZone.close(); });
 manageRoom.addEventListener('change', () => loadAdminGroups(manageRoom.value));

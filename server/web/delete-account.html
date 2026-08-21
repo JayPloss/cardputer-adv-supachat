@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Delete a SupaChat account</title><link rel="stylesheet" href="policy.css"></head>
+<body><main data-vi-container="true">
+  <header><img src="supachat-logo.png" alt="SupaChat"><a href="/">Return to SupaChat</a></header>
+  <h1>Delete an account</h1>
+  <p>The fastest option is <strong>Account → Safety &amp; privacy → Request account deletion</strong> in the Android app. If you cannot sign in, submit the username or email associated with the account below.</p>
+  <p>We verify requests before deleting an account. Deletion covers the SupaChat account profile, room memberships, notification destinations, and user content where removal is legally and operationally appropriate. Safety records and restricted backup copies may be retained temporarily when required.</p>
+  <form id="deletion-form">
+    <label for="contact">SupaChat username or account email</label>
+    <input id="contact" name="contact" maxlength="160" autocomplete="username" required>
+    <div class="hidden-field" aria-hidden="true"><label for="website">Website</label><input id="website" name="website" tabindex="-1" autocomplete="off"></div>
+    <button id="submit-request" type="submit">Request account deletion</button>
+    <p id="request-state" role="status" aria-live="polite"></p>
+  </form>
+  <p>You may also email <a href="mailto:info@supachat.net?subject=SupaChat%20account%20deletion">info@supachat.net</a>.</p>
+  <footer><a href="/privacy">Privacy policy</a> · <a href="/terms">Terms and community standards</a></footer>
+  <script>
+    const form = document.querySelector('#deletion-form');
+    const state = document.querySelector('#request-state');
+    const button = document.querySelector('#submit-request');
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault(); button.disabled = true; state.textContent = 'Submitting…';
+      const data = new FormData(form);
+      try {
+        const response = await fetch('/api/account/deletion/public', {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({contact:String(data.get('contact') || '').trim(),website:String(data.get('website') || '')})});
+        if (!response.ok) throw new Error((await response.json()).error || 'request_failed');
+        form.reset(); state.textContent = 'Request received. We will verify the account before deletion.';
+      } catch (error) { state.textContent = error.message === 'try_later' ? 'Too many requests. Try again tomorrow or email us.' : 'Could not submit. Check the username or email, or contact info@supachat.net.'; }
+      finally { button.disabled = false; }
+    });
+  </script>
+</main></body></html>
