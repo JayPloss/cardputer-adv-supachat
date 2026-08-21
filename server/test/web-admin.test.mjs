@@ -4,6 +4,7 @@ import test from 'node:test';
 
 const html = readFileSync(new URL('../web/index.html', import.meta.url), 'utf8');
 const app = readFileSync(new URL('../web/app.js', import.meta.url), 'utf8');
+const caddyPatch = readFileSync(new URL('../deploy/patch-caddy.py', import.meta.url), 'utf8');
 
 test('web admin zone is restricted to admin sessions and creates invitations', () => {
   assert.match(html, /id="admin-open"[^>]+hidden/);
@@ -28,6 +29,13 @@ test('web client requires current policy acceptance and exposes safety links', (
   assert.match(html, /href="\/delete-account"/);
   assert.match(app, /api\('api\/policy\/accept'/);
   assert.match(app, /policyRequired = !session\.policy\?\.accepted_at/);
+});
+
+test('policy and deletion routes bypass portal login without exposing chat', () => {
+  assert.match(caddyPatch, /@supachat_public path \/healthz \/privacy[\s\S]*\/api\/account\/deletion\/public/);
+  assert.match(caddyPatch, /reverse_proxy @supachat_public 127\.0\.0\.1:8094/);
+  assert.doesNotMatch(caddyPatch, /@supachat_public[^\n]*(?:\/api\/messages|\/api\/session|\/api\/admin)/);
+  assert.ok(caddyPatch.indexOf('reverse_proxy @supachat_public') < caddyPatch.indexOf('forward_auth @supachat_browser'));
 });
 
 test('newly enrolled users receive a one-time welcome modal', () => {

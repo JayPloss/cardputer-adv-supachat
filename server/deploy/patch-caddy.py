@@ -15,6 +15,9 @@ supachat.net {
     route {
         reverse_proxy /outpost.goauthentik.io/* 127.0.0.1:9000
 
+        @supachat_public path /healthz /privacy /privacy.html /terms /terms.html /delete-account /delete-account.html /policy.css /supachat-logo.png /api/account/deletion/public
+        reverse_proxy @supachat_public 127.0.0.1:8094
+
         @supachat_browser not header Authorization "Bearer *"
         forward_auth @supachat_browser 127.0.0.1:9000 {
             uri /outpost.goauthentik.io/auth/caddy
