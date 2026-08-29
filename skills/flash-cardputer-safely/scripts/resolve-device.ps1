@@ -4,6 +4,7 @@ $known = @{
   '28:84:85:75:75:A0' = @{ Name='Albie'; Environment='cardputer-adv' }
   '28:84:85:75:5E:FC' = @{ Name='Julien'; Environment='juju' }
   '28:84:85:76:A4:94' = @{ Name='Papa'; Environment='papa' }
+  '28:84:85:75:CA:70' = @{ Name='Emmanuelle'; Environment='emmanuelle' }
 }
 $port = [regex]::Match($output, '(?m)^\s*(COM\d+)\s*$').Groups[1].Value
 $mac = [regex]::Match($output, 'SER=([0-9A-F:]{17})').Groups[1].Value.ToUpperInvariant()

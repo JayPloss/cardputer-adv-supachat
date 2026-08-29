@@ -28,6 +28,10 @@ const config = {
     albie: process.env.SUPACHAT_ALBIE_DEVICE_TOKEN_HASH || '',
     juju: process.env.SUPACHAT_JUJU_DEVICE_TOKEN_HASH || '',
     papa: process.env.SUPACHAT_PAPA_DEVICE_TOKEN_HASH || '',
+    emmanuelle: process.env.SUPACHAT_EMMANUELLE_DEVICE_TOKEN_HASH || '',
+    andrew: process.env.SUPACHAT_ANDREW_DEVICE_TOKEN_HASH || '',
+    naomie: process.env.SUPACHAT_NAOMIE_DEVICE_TOKEN_HASH || '',
+    theo: process.env.SUPACHAT_THEO_DEVICE_TOKEN_HASH || '',
   },
 };
 const policyVersion = '2026-08-21';
@@ -36,6 +40,7 @@ const authentikIdentityMap = new Map([
   ['papa', 'papa'],
   ['albie', 'albie'],
   ['julien', 'juju'],
+  ['josee', 'josee'],
 ]);
 if (config.papaAuthentikUsername) authentikIdentityMap.set(config.papaAuthentikUsername, 'papa');
 
@@ -162,18 +167,31 @@ db.exec(`
 try { db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('admin', 'member'))"); } catch (error) {
   if (!String(error).includes('duplicate column')) throw error;
 }
+try { db.exec("ALTER TABLE conversation_members ADD COLUMN display_name TEXT"); } catch (error) {
+  if (!String(error).includes('duplicate column')) throw error;
+}
 
 const seed = db.prepare('INSERT OR IGNORE INTO users(id, display_name, short_name, kind) VALUES (?, ?, ?, ?)');
 seed.run('papa', 'Papa', 'Papa', 'web');
 seed.run('albie', 'Albie', 'Albie', 'device');
 seed.run('juju', 'Julien', 'Juju', 'device');
+seed.run('josee', 'Josée', 'Josée', 'web');
+seed.run('emmanuelle', 'Emmanuelle', 'Emma', 'device');
+seed.run('andrew', 'Andrew', 'Andrew', 'device');
+seed.run('naomie', 'Naomie', 'Naomie', 'device');
+seed.run('theo', 'Théo', 'Théo', 'device');
 db.prepare("UPDATE users SET role = 'admin' WHERE id = 'papa'").run();
 db.prepare("INSERT OR IGNORE INTO conversations(id, name, kind) VALUES ('family', 'Family', 'shared')").run();
 db.prepare("INSERT OR IGNORE INTO conversations(id, name, kind) VALUES ('k-buds', 'K-BUDS', 'room')").run();
+db.prepare("INSERT OR IGNORE INTO conversations(id, name, kind) VALUES ('wolfpack', 'Wolfpack', 'room')").run();
 db.prepare("INSERT OR IGNORE INTO conversation_members(conversation_id, user_id) VALUES ('family', ?)").run('papa');
 db.prepare("INSERT OR IGNORE INTO conversation_members(conversation_id, user_id) VALUES ('family', ?)").run('albie');
 db.prepare("INSERT OR IGNORE INTO conversation_members(conversation_id, user_id) VALUES ('family', ?)").run('juju');
+db.prepare("INSERT OR IGNORE INTO conversation_members(conversation_id, user_id) VALUES ('family', ?)").run('theo');
 for (const userId of ['papa', 'albie', 'juju']) db.prepare("INSERT OR IGNORE INTO conversation_members(conversation_id, user_id) VALUES ('k-buds', ?)").run(userId);
+for (const userId of ['papa', 'josee', 'emmanuelle', 'andrew', 'naomie']) db.prepare("INSERT OR IGNORE INTO conversation_members(conversation_id, user_id) VALUES ('wolfpack', ?)").run(userId);
+db.prepare("UPDATE conversation_members SET display_name = 'Jay' WHERE conversation_id = 'wolfpack' AND user_id = 'papa'").run();
+db.prepare("UPDATE conversation_members SET display_name = 'Jay' WHERE conversation_id <> 'family' AND user_id = 'papa'").run();
 
 const clients = new Map();
 const longPolls = new Set();
@@ -397,17 +415,19 @@ function pcmWav(pcm, sampleRate = 8000) {
 function messageRows(roomId, after = 0, limit = 100, viewerId = null) {
   const bounded = Math.min(Math.max(limit, 1), 100);
   const rows = after > 0 ? db.prepare(`
-    SELECT m.id, m.client_id, m.conversation_id, m.author_id, u.display_name AS author_name,
+    SELECT m.id, m.client_id, m.conversation_id, m.author_id, COALESCE(cm.display_name, u.display_name) AS author_name,
            u.short_name AS author_short, m.type, m.body, m.created_at
     FROM messages m JOIN users u ON u.id = m.author_id
+      JOIN conversation_members cm ON cm.conversation_id = m.conversation_id AND cm.user_id = m.author_id
     WHERE m.conversation_id = ? AND m.id > ?
       AND (? IS NULL OR NOT EXISTS (SELECT 1 FROM user_blocks b WHERE b.blocker_id = ? AND b.blocked_user_id = m.author_id))
     ORDER BY m.id ASC LIMIT ?
   `).all(roomId, after, viewerId, viewerId, bounded) : db.prepare(`
     SELECT * FROM (
-      SELECT m.id, m.client_id, m.conversation_id, m.author_id, u.display_name AS author_name,
+      SELECT m.id, m.client_id, m.conversation_id, m.author_id, COALESCE(cm.display_name, u.display_name) AS author_name,
              u.short_name AS author_short, m.type, m.body, m.created_at
       FROM messages m JOIN users u ON u.id = m.author_id
+        JOIN conversation_members cm ON cm.conversation_id = m.conversation_id AND cm.user_id = m.author_id
       WHERE m.conversation_id = ?
         AND (? IS NULL OR NOT EXISTS (SELECT 1 FROM user_blocks b WHERE b.blocker_id = ? AND b.blocked_user_id = m.author_id))
       ORDER BY m.id DESC LIMIT ?
@@ -426,9 +446,9 @@ function messageRows(roomId, after = 0, limit = 100, viewerId = null) {
 function presenceRows(roomId) {
   const now = Date.now();
   return db.prepare(`
-    SELECT u.id, u.display_name, u.short_name, p.last_seen_at, p.connected
+    SELECT u.id, COALESCE(cm.display_name, u.display_name) AS display_name, u.short_name, p.last_seen_at, p.connected
     FROM users u JOIN conversation_members cm ON cm.user_id = u.id LEFT JOIN presence p ON p.user_id = u.id
-    WHERE u.revoked_at IS NULL AND cm.conversation_id = ? ORDER BY u.display_name
+    WHERE u.revoked_at IS NULL AND cm.conversation_id = ? ORDER BY COALESCE(cm.display_name, u.display_name)
   `).all(roomId).map((row) => ({
     ...row,
     status: row.connected && now - row.last_seen_at < 45_000 ? 'online' :
@@ -709,8 +729,8 @@ const server = createServer(async (req, res) => {
       if (!admin) return json(res, 403, { error: 'admin_required' });
       const groups = db.prepare(`SELECT c.id, c.name, COUNT(cm.user_id) AS member_count FROM conversations c
         LEFT JOIN conversation_members cm ON cm.conversation_id = c.id WHERE c.kind IN ('shared','room') GROUP BY c.id ORDER BY c.name`).all();
-      const members = db.prepare(`SELECT cm.conversation_id, u.id, u.display_name, u.short_name, u.kind, u.role
-        FROM conversation_members cm JOIN users u ON u.id = cm.user_id ORDER BY u.display_name`).all();
+      const members = db.prepare(`SELECT cm.conversation_id, u.id, COALESCE(cm.display_name, u.display_name) AS display_name, u.short_name, u.kind, u.role
+        FROM conversation_members cm JOIN users u ON u.id = cm.user_id ORDER BY COALESCE(cm.display_name, u.display_name)`).all();
       const users = db.prepare('SELECT id, display_name, short_name, kind, role FROM users WHERE revoked_at IS NULL ORDER BY display_name').all();
       return json(res, 200, { groups: groups.map((group) => ({ ...group, members: members.filter((member) => member.conversation_id === group.id) })), users });
     }
@@ -722,7 +742,7 @@ const server = createServer(async (req, res) => {
       if (!/^[a-z0-9][a-z0-9-]{1,39}$/.test(id) || name.length < 2 || name.length > 60) return json(res, 400, { error: 'invalid_group' });
       try { db.prepare("INSERT INTO conversations(id, name, kind) VALUES (?, ?, 'room')").run(id, name); }
       catch (error) { if (String(error).includes('UNIQUE')) return json(res, 409, { error: 'group_exists' }); throw error; }
-      db.prepare('INSERT INTO conversation_members(conversation_id, user_id) VALUES (?, ?)').run(id, user);
+      db.prepare('INSERT INTO conversation_members(conversation_id, user_id, display_name) VALUES (?, ?, ?)').run(id, user, user === 'papa' ? 'Jay' : null);
       return json(res, 201, { group: { id, name, members: [db.prepare('SELECT id, display_name, short_name, kind, role FROM users WHERE id = ?').get(user)] } });
     }
     const memberPath = url.pathname.match(/^\/api\/admin\/groups\/([^/]+)\/members(?:\/([^/]+))?$/);
@@ -734,7 +754,7 @@ const server = createServer(async (req, res) => {
       if (req.method === 'POST') {
         const payload = await body(req); const memberId = String(payload.user_id || '');
         if (!db.prepare('SELECT 1 FROM users WHERE id = ? AND revoked_at IS NULL').get(memberId)) return json(res, 404, { error: 'user_not_found' });
-        db.prepare('INSERT OR IGNORE INTO conversation_members(conversation_id, user_id) VALUES (?, ?)').run(roomId, memberId);
+        db.prepare('INSERT OR IGNORE INTO conversation_members(conversation_id, user_id, display_name) VALUES (?, ?, ?)').run(roomId, memberId, memberId === 'papa' && roomId !== 'family' ? 'Jay' : null);
         return json(res, 200, { ok: true });
       }
       const memberId = decodeURIComponent(memberPath[2] || '');

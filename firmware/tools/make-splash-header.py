@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 from PIL import Image, ImageEnhance, ImageOps
 
@@ -10,11 +11,23 @@ SOURCES = {
     "albie": ROOT / "assets" / "boot" / "supachat-albie-source.png",
     "juju": ROOT / "assets" / "boot" / "supachat-julien-source.png",
     "papa": ROOT / "assets" / "boot" / "supachat-logo-source.png",
+    "emmanuelle": ROOT / "assets" / "boot" / "supachat-emmanuelle-source.png",
 }
 
 
 def rgb565(red: int, green: int, blue: int) -> int:
     return ((red & 0xF8) << 8) | ((green & 0xFC) << 3) | (blue >> 3)
+
+
+def unpack_rgb565(value: int) -> tuple[int, int, int]:
+    return ((value >> 11) & 0x1F) << 3, ((value >> 5) & 0x3F) << 2, (value & 0x1F) << 3
+
+
+assert rgb565(255, 0, 0) == 0xF800
+assert rgb565(0, 255, 0) == 0x07E0
+assert rgb565(0, 0, 255) == 0x001F
+assert rgb565(255, 255, 255) == 0xFFFF
+assert rgb565(0, 0, 0) == 0x0000
 
 
 include_dir = ROOT / "include"
@@ -24,7 +37,8 @@ selector = include_dir / "splash_logo.h"
 selector.write_text(
     '#pragma once\n\n#if defined(SUPACHAT_DEVICE_JUJU)\n'
     '#include "splash_logo_juju.h"\n#elif defined(SUPACHAT_DEVICE_PAPA)\n'
-    '#include "splash_logo_papa.h"\n#else\n'
+    '#include "splash_logo_papa.h"\n#elif defined(SUPACHAT_DEVICE_EMMANUELLE)\n'
+    '#include "splash_logo_emmanuelle.h"\n#else\n'
     '#include "splash_logo_albie.h"\n#endif\n',
     encoding="utf-8",
     newline="\n",
@@ -64,6 +78,29 @@ for identity, source_path in SOURCES.items():
             )
             output.write(f"    {values},\n")
         output.write("};\n")
+
+    emitted = [int(value, 16) for value in re.findall(r"0x([0-9A-F]{4})", header.read_text(encoding="utf-8"))]
+    if emitted != pixels or len(emitted) != WIDTH * HEIGHT:
+        raise SystemExit(f"RGB565 array mismatch for {identity}")
+    decoded = [unpack_rgb565(value) for value in emitted]
+    source_pixels = list(image.getdata())
+    for index, (expected, actual) in enumerate(zip(source_pixels, decoded)):
+        if abs(expected[0] - actual[0]) > 7 or abs(expected[1] - actual[1]) > 3 or abs(expected[2] - actual[2]) > 7:
+            x, y = index % WIDTH, index // WIDTH
+            raise SystemExit(f"RGB565 decode mismatch for {identity} at ({x},{y}): {expected} != {actual}")
+    reference_indexes = {
+        max(range(len(source_pixels)), key=lambda i: source_pixels[i][0] - source_pixels[i][1] - source_pixels[i][2]),
+        max(range(len(source_pixels)), key=lambda i: source_pixels[i][1] - source_pixels[i][0] - source_pixels[i][2]),
+        max(range(len(source_pixels)), key=lambda i: source_pixels[i][2] - source_pixels[i][0] - source_pixels[i][1]),
+        max(range(len(source_pixels)), key=lambda i: sum(source_pixels[i])),
+        min(range(len(source_pixels)), key=lambda i: sum(source_pixels[i])),
+    }
+    if len(reference_indexes) < 5:
+        raise SystemExit(f"Insufficient distinct RGB565 reference pixels for {identity}")
+    for index in reference_indexes:
+        if emitted[index] != rgb565(*source_pixels[index]):
+            x, y = index % WIDTH, index // WIDTH
+            raise SystemExit(f"RGB565 reference mismatch for {identity} at ({x},{y})")
 
     print(preview)
     print(header)

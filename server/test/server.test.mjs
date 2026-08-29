@@ -327,6 +327,26 @@ test('Papa sends a 140-character message idempotently', async () => {
   assert.equal(history.messages.filter((message) => message.client_id === payload.client_id).length, 1);
 });
 
+test('Wolfpack uses Jay as Papa\'s room-specific display name', async () => {
+  const sent = await fetch(`http://127.0.0.1:${port}/api/messages`, {
+    method: 'POST', headers: { cookie, 'content-type': 'application/json' },
+    body: JSON.stringify({ client_id: 'wolfpack-jay-test', body: 'hello wolfpack', room_id: 'wolfpack' }),
+  });
+  assert.equal(sent.status, 201);
+  const history = await fetch(`http://127.0.0.1:${port}/api/messages?room=wolfpack`, { headers: { cookie } }).then((response) => response.json());
+  assert.equal(history.messages.find((message) => message.client_id === 'wolfpack-jay-test').author_name, 'Jay');
+  const family = await fetch(`http://127.0.0.1:${port}/api/messages?room=family`, { headers: { cookie } }).then((response) => response.json());
+  assert.equal(family.messages.find((message) => message.author_id === 'papa').author_name, 'Papa');
+});
+
+test('Papa is Jay in every non-Family room and Théo belongs to Family', async () => {
+  const kbudsPresence = await fetch(`http://127.0.0.1:${port}/api/presence?room=k-buds`, { headers: { cookie } }).then((response) => response.json());
+  assert.equal(kbudsPresence.presence.find((person) => person.id === 'papa').display_name, 'Jay');
+  const familyPresence = await fetch(`http://127.0.0.1:${port}/api/presence?room=family`, { headers: { cookie } }).then((response) => response.json());
+  assert.equal(familyPresence.presence.find((person) => person.id === 'papa').display_name, 'Papa');
+  assert.equal(familyPresence.presence.find((person) => person.id === 'theo').display_name, 'Théo');
+});
+
 test('messages over 140 characters are rejected', async () => {
   const response = await fetch(`http://127.0.0.1:${port}/api/messages`, {
     method: 'POST', headers: { cookie, 'content-type': 'application/json' },
