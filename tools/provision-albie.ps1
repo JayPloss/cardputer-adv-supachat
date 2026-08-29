@@ -1,6 +1,6 @@
 param(
     [string]$Port = 'COM4',
-    [ValidateSet('albie', 'juju', 'papa', 'emmanuelle', 'naomie')][string]$DeviceKey = 'albie',
+    [ValidateSet('albie', 'juju', 'papa', 'emmanuelle', 'naomie', 'andrew')][string]$DeviceKey = 'albie',
     [string]$CredentialsFile = 'C:\Users\PC\OneDrive - Plossco\00_Jay-VSCode-Assets\Assets\projects\assets-cardputer-adv-supachat\private\supachat-credentials.json',
     [string]$Python = 'C:\dev\repos\personal-projects\milffinder-field-control\.venv\Scripts\python.exe'
 )

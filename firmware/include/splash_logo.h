@@ -8,6 +8,8 @@
 #include "splash_logo_emmanuelle.h"
 #elif defined(SUPACHAT_DEVICE_NAOMIE)
 #include "splash_logo_naomie.h"
+#elif defined(SUPACHAT_DEVICE_ANDREW)
+#include "splash_logo_andrew.h"
 #else
 #include "splash_logo_albie.h"
 #endif

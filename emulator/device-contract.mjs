@@ -88,6 +88,8 @@ assert.match(drawBootFunction, /setCursor\(4, 125\)[\s\S]*print\(kFirmwareVersio
   'firmware version must appear at the splash bottom-left');
 assert.match(bootFunction, /for \(;;\)/, 'boot attract screen must continue until input');
 assert.match(bootFunction, /step % kBootTuneLength/, 'the complete boot arrangement must loop');
+assert.match(bootFunction, /Speaker\.tone\(kBootTuneFrequencies\[noteIndex\], kBootTuneNoteMs, 0, true\)/,
+  'startup tones must reuse one virtual channel instead of accumulating across automatic channels');
 assert.doesNotMatch(bootFunction, /fillRect/, 'boot loop must not draw over the custom splash art');
 assert.doesNotMatch(bootFunction, /serviceMessageNotification\(\)/,
   'incoming-message tones must not interrupt the startup melody');
