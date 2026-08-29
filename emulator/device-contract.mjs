@@ -89,10 +89,8 @@ assert.match(drawBootFunction, /setCursor\(4, 125\)[\s\S]*print\(kFirmwareVersio
 assert.match(bootFunction, /for \(;;\)/, 'boot attract screen must continue until input');
 assert.match(bootFunction, /step % kBootTuneLength/, 'the complete boot arrangement must loop');
 assert.doesNotMatch(bootFunction, /fillRect/, 'boot loop must not draw over the custom splash art');
-assert.match(bootFunction, /serviceMessageNotification\(\)/,
-  'boot lobby must service incoming-message audio');
-assert.match(bootFunction, /!messageNotificationPending && !messageNotificationActive/,
-  'notification audio must take priority over the looping melody');
+assert.doesNotMatch(bootFunction, /serviceMessageNotification\(\)/,
+  'incoming-message tones must not interrupt the startup melody');
 assert.match(bootFunction, /Keyboard\.isPressed\(\) \|\| M5Cardputer\.BtnA\.isPressed\(\)/,
   'boot wait loop must accept any keyboard key or rear button as skip');
 

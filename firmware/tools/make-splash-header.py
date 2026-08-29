@@ -12,6 +12,7 @@ SOURCES = {
     "juju": ROOT / "assets" / "boot" / "supachat-julien-source.png",
     "papa": ROOT / "assets" / "boot" / "supachat-logo-source.png",
     "emmanuelle": ROOT / "assets" / "boot" / "supachat-emmanuelle-source.png",
+    "naomie": ROOT / "assets" / "boot" / "supachat-naomie-source.png",
 }
 
 
@@ -38,7 +39,8 @@ selector.write_text(
     '#pragma once\n\n#if defined(SUPACHAT_DEVICE_JUJU)\n'
     '#include "splash_logo_juju.h"\n#elif defined(SUPACHAT_DEVICE_PAPA)\n'
     '#include "splash_logo_papa.h"\n#elif defined(SUPACHAT_DEVICE_EMMANUELLE)\n'
-    '#include "splash_logo_emmanuelle.h"\n#else\n'
+    '#include "splash_logo_emmanuelle.h"\n#elif defined(SUPACHAT_DEVICE_NAOMIE)\n'
+    '#include "splash_logo_naomie.h"\n#else\n'
     '#include "splash_logo_albie.h"\n#endif\n',
     encoding="utf-8",
     newline="\n",

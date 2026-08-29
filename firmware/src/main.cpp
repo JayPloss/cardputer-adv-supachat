@@ -354,14 +354,12 @@ void showBootSplash() {
   size_t step = 0;
   for (;;) {
     const size_t noteIndex = step % kBootTuneLength;
-    serviceMessageNotification();
-    if (!messageNotificationPending && !messageNotificationActive && kBootTuneFrequencies[noteIndex] > 0) {
+    if (kBootTuneFrequencies[noteIndex] > 0) {
       M5Cardputer.Speaker.tone(kBootTuneFrequencies[noteIndex], kBootTuneNoteMs);
     }
     target += kBootTuneStepMs;
     while (static_cast<int32_t>(target - millis()) > 0) {
       M5Cardputer.update();
-      serviceMessageNotification();
       if (M5Cardputer.Keyboard.isPressed() || M5Cardputer.BtnA.isPressed()) {
         M5Cardputer.Speaker.stop(); return;
       }
