@@ -90,6 +90,10 @@ assert.match(bootFunction, /for \(;;\)/, 'boot attract screen must continue unti
 assert.match(bootFunction, /step % kBootTuneLength/, 'the complete boot arrangement must loop');
 assert.match(bootFunction, /Speaker\.tone\(kBootTuneFrequencies\[noteIndex\], kBootTuneNoteMs, 0, true\)/,
   'startup tones must reuse one virtual channel instead of accumulating across automatic channels');
+assert.match(bootFunction, /const uint32_t target = millis\(\) \+ kBootTuneStepMs/,
+  'startup notes must schedule from actual submission time so stalls cannot create catch-up bursts');
+assert.doesNotMatch(bootFunction, /target \+= kBootTuneStepMs/,
+  'startup melody must never compress overdue notes to catch up with a cumulative deadline');
 assert.doesNotMatch(bootFunction, /fillRect/, 'boot loop must not draw over the custom splash art');
 assert.doesNotMatch(bootFunction, /serviceMessageNotification\(\)/,
   'incoming-message tones must not interrupt the startup melody');

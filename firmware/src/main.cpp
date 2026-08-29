@@ -350,14 +350,15 @@ void drawBootSplash() {
 
 void showBootSplash() {
   M5Cardputer.Speaker.setVolume(kVolumeValues[volumeLevel]);
-  uint32_t target = millis();
   size_t step = 0;
   for (;;) {
     const size_t noteIndex = step % kBootTuneLength;
     if (kBootTuneFrequencies[noteIndex] > 0) {
       M5Cardputer.Speaker.tone(kBootTuneFrequencies[noteIndex], kBootTuneNoteMs, 0, true);
     }
-    target += kBootTuneStepMs;
+    // Schedule from the time this note was actually submitted. A cumulative
+    // deadline causes overdue notes to fire back-to-back after a device stall.
+    const uint32_t target = millis() + kBootTuneStepMs;
     while (static_cast<int32_t>(target - millis()) > 0) {
       M5Cardputer.update();
       if (M5Cardputer.Keyboard.isPressed() || M5Cardputer.BtnA.isPressed()) {
