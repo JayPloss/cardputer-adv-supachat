@@ -2,6 +2,10 @@
 
 Persistent private mesh chat for Cardputer ADV handhelds using ESP-NOW for infrastructure-free peer-to-peer communication and optional WiFi backhaul through a Hetzner-hosted peer.
 
+## Source provenance
+
+A repository's currently checked-out branch or worktree is only local filesystem state and may be arbitrarily stale. It must never be treated as evidence of recent work, build provenance, authoritative source, feature scope, release intent, or authorization. Inspect dated commits across all relevant refs and SupaChat repositories for recency; use recorded ref/commit metadata for existing artifacts; and select an explicit ref and commit before choosing a clean build worktree.
+
 > **Status (August 2026):** Text chat is working through the deployed Node/SQLite service and authenticated web portal at `https://supachat.net/`. The first walkie build adds raw-PCM voice clips and authenticated live PTT through Hetzner. Both child variants compile; physical two-device audio acceptance remains a release gate.
 
 ## What this project is
