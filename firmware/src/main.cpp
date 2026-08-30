@@ -80,9 +80,38 @@ constexpr gpio_num_t kSdMosiPin = GPIO_NUM_14;
 constexpr gpio_num_t kSdCsPin = GPIO_NUM_12;
 constexpr uint32_t kBootTuneStepMs = 250;
 constexpr uint32_t kBootTuneNoteMs = 145;
-// Generated from the complete vocal-melody channel in keypress-song.mid.
-constexpr auto &kBootTuneFrequencies = kKeypressSongFrequencies;
-constexpr size_t kBootTuneLength = kKeypressSongLength;
+constexpr uint16_t kBootTuneFrequencies[] = {
+    196, 247, 294, 392, 0, 294, 330, 294,
+    247, 196, 220, 247, 294, 0, 392, 370,
+    330, 262, 330, 392, 494, 440, 392, 0,
+    196, 294, 392, 494, 587, 523, 392, 294,
+    196, 247, 294, 392, 440, 392, 330, 294,
+    220, 262, 330, 440, 0, 392, 330, 294,
+    247, 294, 370, 494, 440, 392, 370, 330,
+    262, 330, 392, 523, 0, 494, 440, 392,
+    294, 370, 440, 587, 523, 494, 440, 392,
+    330, 392, 494, 659, 0, 587, 523, 494,
+    392, 330, 294, 247, 220, 247, 294, 330,
+    440, 392, 330, 294, 0, 247, 294, 392,
+    196, 294, 330, 392, 494, 392, 330, 294,
+    220, 330, 392, 440, 523, 440, 392, 330,
+    247, 370, 440, 494, 587, 494, 440, 370,
+    262, 392, 494, 523, 659, 587, 523, 494,
+    294, 440, 523, 587, 0, 523, 494, 440,
+    330, 494, 587, 659, 784, 659, 587, 523,
+    392, 523, 659, 784, 0, 659, 523, 392,
+    370, 494, 587, 740, 659, 587, 494, 440,
+    330, 440, 523, 659, 587, 523, 440, 392,
+    294, 392, 494, 587, 523, 494, 392, 330,
+    262, 330, 440, 523, 494, 440, 392, 330,
+    247, 294, 392, 494, 440, 392, 330, 294,
+    220, 262, 330, 440, 392, 330, 294, 262,
+    196, 247, 294, 392, 0, 494, 440, 392,
+    330, 294, 247, 220, 196, 220, 247, 294,
+    392, 370, 330, 294, 247, 294, 330, 370,
+    392, 494, 587, 784, 659, 587, 494, 392,
+};
+constexpr size_t kBootTuneLength = sizeof(kBootTuneFrequencies) / sizeof(kBootTuneFrequencies[0]);
 constexpr uint16_t kMessageNotificationFrequencies[] = {622, 831, 698};
 constexpr uint16_t kMessageNotificationDurations[] = {90, 90, 180};
 constexpr uint32_t kMessageNotificationGapMs = 70;
@@ -484,7 +513,7 @@ void playNextTone() {
   if (now - lastToneAt < kToneIntervalMs || kKeypressSongLength == 0) return;
   lastToneAt = now;
   M5Cardputer.Speaker.setVolume(kVolumeValues[volumeLevel]);
-  M5Cardputer.Speaker.tone(kKeypressSongFrequencies[songPosition], kToneDurationMs);
+  M5Cardputer.Speaker.tone(kKeypressSongFrequencies[songPosition], kToneDurationMs, 0, true);
   songPosition = (songPosition + 1) % kKeypressSongLength;
 }
 

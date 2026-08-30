@@ -70,19 +70,17 @@ assert.equal(navigationChord && shiftedSlash.physicalRight, false);
 assert.equal(shiftedSlash.word[0], '?');
 
 const bootStep = Number(firmware.match(/kBootTuneStepMs = (\d+)/)[1]);
-const bootTuneBody = songHeader.match(/kKeypressSongFrequencies\[\] = \{([\s\S]*?)\};/)[1];
+const bootTuneBody = firmware.match(/kBootTuneFrequencies\[\] = \{([\s\S]*?)\};/)[1];
 const bootNotes = [...bootTuneBody.matchAll(/\b\d+\b/g)].map(match => Number(match[0]));
-assert.equal(bootNotes.length, 85, 'boot arrangement must contain every source-MIDI vocal note');
-assert.match(firmware, /kBootTuneFrequencies = kKeypressSongFrequencies/,
-  'boot melody must use the MIDI-generated vocal track rather than a hand-authored approximation');
-assert.match(firmware, /kBootTuneLength = kKeypressSongLength/,
-  'boot melody length must follow the complete generated source track');
+assert.equal(bootNotes.length, 232, 'boot arrangement must retain its complete original 232 steps');
 assert.equal(Number(firmware.match(/kBootTuneNoteMs = (\d+)/)[1]), 145,
   'boot notes must retain MiLFFINDER timing rather than being stretched');
-assert.deepEqual(bootNotes.slice(-16), [
-  370, 370, 330, 370, 330, 415, 494, 494,
-  494, 415, 659, 494, 554, 494, 415, 494,
-], 'boot tune must retain the complete source-MIDI chorus ending');
+assert.deepEqual(bootNotes.slice(0, 32), [
+  196, 247, 294, 392, 0, 294, 330, 294,
+  247, 196, 220, 247, 294, 0, 392, 370,
+  330, 262, 330, 392, 494, 440, 392, 0,
+  196, 294, 392, 494, 587, 523, 392, 294,
+], 'startup song must remain the original complete splash arrangement');
 const bootFunction = firmware.slice(firmware.indexOf('void showBootSplash()'), firmware.indexOf('String cleanField'));
 const firmwareVersion = firmware.match(/kFirmwareVersion\[\] = "(v\d+\.\d{2})"/);
 assert.ok(firmwareVersion, 'splash firmware version must use exactly two decimal places');
@@ -106,7 +104,11 @@ assert.match(bootFunction, /Keyboard\.isPressed\(\) \|\| M5Cardputer\.BtnA\.isPr
 const notificationBody = firmware.match(/kMessageNotificationFrequencies\[\] = \{([^}]+)\}/)[1];
 const notificationNotes = [...notificationBody.matchAll(/\d+/g)].map(match => Number(match[0]));
 const keypressBody = songHeader.match(/kKeypressSongFrequencies\[\] = \{([\s\S]*?)\};/)[1];
-const keypressNotes = new Set([...keypressBody.matchAll(/\d+/g)].map(match => Number(match[0])));
+const keypressSequence = [...keypressBody.matchAll(/\d+/g)].map(match => Number(match[0]));
+assert.equal(keypressSequence.length, 85, 'key feedback must contain every regenerated source-MIDI vocal note');
+assert.match(firmware, /Speaker\.tone\(kKeypressSongFrequencies\[songPosition\], kToneDurationMs, 0, true\)/,
+  'key feedback must replace the active note on one channel instead of queueing tones');
+const keypressNotes = new Set(keypressSequence);
 assert.equal(notificationNotes.some(note => keypressNotes.has(note)), false,
   'received-message motif must use pitches distinct from the keypress melody');
 const syncFunction = firmware.slice(firmware.indexOf('void synchronize()'), firmware.indexOf('void networkTask'));
