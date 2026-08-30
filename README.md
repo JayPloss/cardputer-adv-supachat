@@ -242,7 +242,7 @@ Expected behavior:
 - Reboot behavior should be configurable; version 1 may restart from the beginning.
 - The feature can be muted independently of message and delivery chirps.
 
-The firmware build should convert the MIDI into a compact, flash-friendly note-event table with precomputed frequencies. The handheld does not need a general-purpose MIDI parser or repeated floating-point note conversion at runtime.
+The firmware build converts the source MIDI's 53-note verse and the complete 78-note Hooktheory chorus into one compact, flash-friendly table with precomputed frequencies. The source MIDI ends during the chorus, so the converter detects that partial chorus opening and replaces its truncated tail with the complete transcription. The handheld does not need a general-purpose MIDI parser or repeated floating-point note conversion at runtime.
 
 Keyboard capture must run on every `M5Cardputer.update()` loop. Display rendering should be independently throttled to roughly 20 fps so rapid typing and audio feedback cannot stall or flicker the chat UI.
 

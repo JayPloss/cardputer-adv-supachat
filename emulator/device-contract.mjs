@@ -116,7 +116,7 @@ const notificationBody = firmware.match(/kMessageNotificationFrequencies\[\] = \
 const notificationNotes = [...notificationBody.matchAll(/\d+/g)].map(match => Number(match[0]));
 const keypressBody = songHeader.match(/kKeypressSongFrequencies\[\] = \{([\s\S]*?)\};/)[1];
 const keypressSequence = [...keypressBody.matchAll(/\d+/g)].map(match => Number(match[0]));
-assert.equal(keypressSequence.length, 85, 'key feedback must contain every regenerated source-MIDI vocal note');
+assert.equal(keypressSequence.length, 131, 'key feedback must contain the MIDI verse and complete Hooktheory chorus');
 assert.match(firmware, /Speaker\.tone\(kKeypressSongFrequencies\[songPosition\], kToneDurationMs, 0, true\)/,
   'key feedback must replace the active note on one channel instead of queueing tones');
 const keypressNotes = new Set(keypressSequence);

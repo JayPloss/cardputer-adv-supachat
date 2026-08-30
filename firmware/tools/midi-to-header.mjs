@@ -74,15 +74,28 @@ for (const channel of [...channelCounts.keys()].sort((a, b) => a - b)) {
   console.log(`  lyric alignment ch ${channel + 1}: exact=${exact}, within60=${near}`);
 }
 // This particular MIDI is a multichannel arrangement. MIDI channel 4 is the
-// vocal melody: its note onsets align with every embedded lyric timestamp.
-// Transpose that whole voice by one octave as a unit so intervals and key stay
-// intact while remaining clear on the tiny speaker.
+// vocal melody, but the source file ends partway through the chorus. Preserve
+// its verse, then replace that partial tail with the complete chorus transcribed
+// in E major from Hooktheory. Typing supplies the rhythm, so this table retains
+// the complete pitched-note order while deliberately omitting rests/durations.
 const leadChannel = 3; // MIDI channel 4, zero based.
 const leadNotes = notes.filter((event) => event.channel === leadChannel);
 if (!leadNotes.length) throw new Error('vocal melody channel 4 has no notes');
-const playableNotes = leadNotes.map(({ note }) => note + 12);
+const chorusDegrees = `3 5 2 2 1 1 4 3 2 2 4 5 6 4 4 3 3 2 1 2 1 3 5 6 3 5 1+ 5 6 5 4 5 5 4 3 2 2 5 3 3 5 4 4 3 2 1 1 2 3 5 3 2 1+ 5 6 3 3 5 5 4 3 2 2 5 3 3 5 4 4 3 2 1 1 2 3 5 3 2`.split(' ');
+const majorOffsets = [0, 0, 2, 4, 5, 7, 9, 11];
+const chorusNotes = chorusDegrees.map((degree) => {
+  const scaleDegree = Number.parseInt(degree, 10);
+  return 52 + majorOffsets[scaleDegree] + (degree.endsWith('+') ? 12 : 0); // E3 tonic
+});
+const chorusSignature = chorusNotes.slice(0, 10);
+const sourceNotes = leadNotes.map(({ note }) => note);
+const chorusStart = sourceNotes.findIndex((_, index) =>
+  chorusSignature.every((note, offset) => sourceNotes[index + offset] === note));
+if (chorusStart < 0) throw new Error('source MIDI no longer contains the expected chorus opening');
+const combinedNotes = [...sourceNotes.slice(0, chorusStart), ...chorusNotes];
+const playableNotes = combinedNotes.map((note) => note + 12);
 const frequencies = playableNotes.map((note) => Math.round(440 * 2 ** ((note - 69) / 12)));
 const lines = [];
 for (let index = 0; index < frequencies.length; index += 16) lines.push(`    ${frequencies.slice(index, index + 16).join(', ')}`);
-writeFileSync(output, `#pragma once\n#include <stdint.h>\n\n// Generated from ${basename(input)}; MIDI format ${format}, ${trackCount} tracks, ${ticksPerBeat} ticks/beat.\nconstexpr uint16_t kKeypressSongFrequencies[] = {\n${lines.join(',\n')}\n};\nconstexpr size_t kKeypressSongLength = sizeof(kKeypressSongFrequencies) / sizeof(kKeypressSongFrequencies[0]);\n`);
-console.log(`Generated ${output} with ${playableNotes.length} lead-melody note events.`);
+writeFileSync(output, `#pragma once\n#include <stdint.h>\n\n// Generated from the ${chorusStart}-note MIDI verse plus the complete ${chorusNotes.length}-note Hooktheory chorus.\n// Source MIDI format ${format}, ${trackCount} tracks, ${ticksPerBeat} ticks/beat.\nconstexpr uint16_t kKeypressSongFrequencies[] = {\n${lines.join(',\n')}\n};\nconstexpr size_t kKeypressSongLength = sizeof(kKeypressSongFrequencies) / sizeof(kKeypressSongFrequencies[0]);\n`);
+console.log(`Generated ${output}: ${chorusStart} verse notes + ${chorusNotes.length} complete chorus notes = ${playableNotes.length} events.`);
