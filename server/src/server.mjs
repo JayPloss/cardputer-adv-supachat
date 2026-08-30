@@ -20,7 +20,6 @@ const config = {
   authentikApiUrl: (process.env.SUPACHAT_AUTHENTIK_API_URL || 'https://auth.supachat.net/api/v3').replace(/\/$/, ''),
   authentikApiToken: process.env.SUPACHAT_AUTHENTIK_API_TOKEN || '',
   authentikInviteFlowId: process.env.SUPACHAT_AUTHENTIK_INVITE_FLOW_ID || '',
-  authentikKbudsInviteFlowId: process.env.SUPACHAT_AUTHENTIK_KBUDS_INVITE_FLOW_ID || '',
   expoPushEnabled: process.env.SUPACHAT_EXPO_PUSH_ENABLED === 'true',
   sessionSecret: process.env.SUPACHAT_SESSION_SECRET || '',
   papaPasswordHash: process.env.SUPACHAT_PAPA_PASSWORD_HASH || '',
@@ -275,7 +274,7 @@ function claimPendingRoomMemberships(userId, username) {
 function roomsFor(userId) {
   return db.prepare(`SELECT c.id, c.name, COALESCE(MAX(m.id), 0) AS latest_message_id FROM conversations c JOIN conversation_members cm ON cm.conversation_id = c.id
     LEFT JOIN messages m ON m.conversation_id = c.id
-    WHERE cm.user_id = ? GROUP BY c.id, c.name ORDER BY CASE c.id WHEN 'family' THEN 0 ELSE 1 END, c.name`).all(userId);
+    WHERE cm.user_id = ? GROUP BY c.id, c.name ORDER BY c.name`).all(userId);
 }
 
 function authorizedRoom(userId, requested) {
@@ -796,7 +795,7 @@ const server = createServer(async (req, res) => {
       const enrollmentSlug = 'supachat-invitation-enrollment';
       const enrollmentUrl = new URL(`https://auth.${config.portalHost}/if/flow/${enrollmentSlug}/`);
       enrollmentUrl.searchParams.set('itoken', invitation.pk);
-      enrollmentUrl.searchParams.set('next', `https://${config.portalHost}/?welcome=1`);
+      enrollmentUrl.searchParams.set('next', `https://${config.portalHost}/?welcome=1&room=${encodeURIComponent(roomId)}`);
       enrollmentUrl.searchParams.set('room', roomId);
       return json(res, 201, { url: enrollmentUrl.toString(), username, room_id: roomId, expires_at: expiresAt });
     }

@@ -116,7 +116,7 @@ test('only Papa can create a one-time password setup link', async () => {
   assert.equal(invitationUrl.origin, 'https://auth.supachat.net');
   assert.equal(invitationUrl.pathname, '/if/flow/supachat-invitation-enrollment/');
   assert.match(invitationUrl.searchParams.get('itoken'), /^[0-9a-f-]+$/);
-  assert.equal(invitationUrl.searchParams.get('next'), 'https://supachat.net/?welcome=1');
+  assert.equal(invitationUrl.searchParams.get('next'), 'https://supachat.net/?welcome=1&room=family');
   assert.equal(invitationUrl.searchParams.get('room'), 'family');
   assert.equal(invitation.room_id, 'family');
 
@@ -127,6 +127,7 @@ test('only Papa can create a one-time password setup link', async () => {
   assert.equal(kbudsResponse.status, 201);
   const kbudsInvitation = await kbudsResponse.json();
   assert.equal(new URL(kbudsInvitation.url).pathname, '/if/flow/supachat-invitation-enrollment/');
+  assert.equal(new URL(kbudsInvitation.url).searchParams.get('next'), 'https://supachat.net/?welcome=1&room=k-buds');
   assert.equal(kbudsInvitation.room_id, 'k-buds');
 
   const memberHeaders = { 'x-forwarded-host': 'supachat.net', 'x-authentik-uid': 'uid-member', 'x-authentik-username': 'member@example.test', 'x-authentik-name': 'Member' };

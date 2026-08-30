@@ -27,24 +27,16 @@ with transaction.atomic():
     prompts, _ = PromptStage.objects.get_or_create(name="supachat-enrollment-prompts")
     prompts.fields.set(fields)
     login, _ = UserLoginStage.objects.get_or_create(name="supachat-enrollment-user-login")
-    flows = {}
-    room_specs = (
-        ("family", "SupaChat Family", "supachat-invitation-enrollment", "Join SupaChat Family"),
-        ("k-buds", "SupaChat K-BUDS", "supachat-k-buds-invitation-enrollment", "Join K-BUDS"),
+    flow, _ = Flow.objects.update_or_create(
+        slug="supachat-invitation-enrollment",
+        defaults={"name": "SupaChat invitation enrollment", "title": "Join SupaChat", "designation": "enrollment", "authentication": "require_unauthenticated"},
     )
-    for room_id, group_name, slug, title in room_specs:
-        flow, _ = Flow.objects.update_or_create(
-            slug=slug,
-            defaults={"name": f"SupaChat {room_id} invitation enrollment", "title": title, "designation": "enrollment", "authentication": "require_unauthenticated"},
-        )
-        group = Group.objects.get(name=group_name)
-        writer_name = "supachat-enrollment-user-write" if room_id == "family" else f"supachat-{room_id}-enrollment-user-write"
-        redirect_name = "supachat-enrollment-redirect" if room_id == "family" else f"supachat-{room_id}-enrollment-redirect"
-        writer, _ = UserWriteStage.objects.update_or_create(name=writer_name, defaults={"user_creation_mode": "always_create", "create_users_group": group, "user_type": "internal", "user_path_template": "users/supachat"})
-        redirect, _ = RedirectStage.objects.update_or_create(name=redirect_name, defaults={"mode": "static", "target_static": f"https://supachat.net/?welcome=1&room={room_id}", "keep_context": False})
-        for stage, order in ((invitation, 0), (prompts, 10), (writer, 20), (login, 100), (redirect, 110)):
-            FlowStageBinding.objects.update_or_create(target=flow, stage=stage, defaults={"order": order})
-        flows[room_id] = flow
+    group = Group.objects.get(name="SupaChat Users")
+    writer, _ = UserWriteStage.objects.update_or_create(name="supachat-enrollment-user-write", defaults={"user_creation_mode": "always_create", "create_users_group": group, "user_type": "internal", "user_path_template": "users/supachat"})
+    redirect, _ = RedirectStage.objects.update_or_create(name="supachat-enrollment-redirect", defaults={"mode": "static", "target_static": "https://supachat.net/?welcome=1", "keep_context": False})
+    FlowStageBinding.objects.filter(target=flow).delete()
+    for stage, order in ((invitation, 0), (prompts, 10), (writer, 20), (login, 100), (redirect, 110)):
+        FlowStageBinding.objects.create(target=flow, stage=stage, order=order)
 
     service, _ = User.objects.get_or_create(username="supachat-invite-service", defaults={"name": "SupaChat invitation service", "type": "internal_service_account", "path": "goauthentik.io/service-accounts"})
     service.name = "SupaChat invitation service"
@@ -63,6 +55,5 @@ with transaction.atomic():
     token.save()
 
 print(f"SUPACHAT_AUTHENTIK_API_TOKEN={token.key}")
-print(f"SUPACHAT_AUTHENTIK_INVITE_FLOW_ID={flows['family'].pk}")
-print(f"SUPACHAT_AUTHENTIK_KBUDS_INVITE_FLOW_ID={flows['k-buds'].pk}")
+print(f"SUPACHAT_AUTHENTIK_INVITE_FLOW_ID={flow.pk}")
 print("SUPACHAT_AUTHENTIK_API_URL=https://auth.supachat.net/api/v3")

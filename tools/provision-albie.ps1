@@ -46,8 +46,9 @@ $deviceCredentials = $credentials.$credentialProperty
 if ($null -eq $deviceCredentials -or $deviceCredentials.device_id -ne $DeviceKey -or [string]::IsNullOrWhiteSpace($deviceCredentials.device_token)) {
     throw "The private credential file does not contain $DeviceKey device credentials."
 }
-if ($null -eq $credentials.mesh -or $credentials.mesh.family_key -notmatch '^[0-9a-fA-F]{64}$') {
-    throw 'The private credential file does not contain a valid family mesh key.'
+$meshKey = if ($credentials.mesh.room_key) { $credentials.mesh.room_key } else { $credentials.mesh.family_key }
+if ($null -eq $credentials.mesh -or $meshKey -notmatch '^[0-9a-fA-F]{64}$') {
+    throw 'The private credential file does not contain a valid SupaChat mesh key.'
 }
 
 $temporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
@@ -67,7 +68,7 @@ try {
     }
     $rows.Add([pscustomobject]@{ key = 'wifi_count'; type = 'data'; encoding = 'u8'; value = $slot })
     $rows.Add([pscustomobject]@{ key = 'device_token'; type = 'data'; encoding = 'string'; value = $deviceCredentials.device_token })
-    $rows.Add([pscustomobject]@{ key = 'mesh_key'; type = 'data'; encoding = 'string'; value = $credentials.mesh.family_key.ToLowerInvariant() })
+    $rows.Add([pscustomobject]@{ key = 'mesh_key'; type = 'data'; encoding = 'string'; value = $meshKey.ToLowerInvariant() })
     $rows | ConvertTo-Csv -NoTypeInformation | Set-Content -LiteralPath $csvPath -Encoding utf8NoBOM
 
     Invoke-CheckedProcess -FilePath $Python -Arguments @(

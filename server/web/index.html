@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>SupaChat — Family</title>
+  <title>SupaChat</title>
   <link rel="stylesheet" href="app.css">
   <link rel="stylesheet" href="controls.css">
   <link rel="stylesheet" href="admin.css">
@@ -11,58 +11,58 @@
 <body>
   <div class="app-shell" data-vi-container="true">
     <header class="topbar">
-      <div class="brand-lockup"><img class="brand-logo" src="supachat-logo.png" alt="SupaChat"><div><p class="eyebrow">PRIVATE ROOMS / ALWAYS WAITING</p><label class="room-picker" for="room-select">Room<select id="room-select" aria-label="Current room"></select></label></div></div>
-      <div class="header-tools"><div class="presence" id="presence" aria-live="polite"></div><div class="session-tools"><button id="admin-open" class="quiet-button" type="button" hidden>Admin</button><button id="safety-open" class="quiet-button" type="button">Safety</button><button id="sound-toggle" class="quiet-button" type="button" aria-pressed="true">Sound: on</button><button id="logout" class="quiet-button" type="button">Log out</button></div></div>
+      <div class="brand-lockup"><img class="brand-logo" src="supachat-logo.png" alt="SupaChat"><div><p class="eyebrow" data-i18n="tagline">PRIVATE ROOMS / ALWAYS WAITING</p><label class="room-picker" for="room-select"><span data-i18n="room">Room</span><select id="room-select" aria-label="Current room"></select></label></div></div>
+      <div class="header-tools"><div class="presence" id="presence" aria-live="polite"></div><div class="session-tools"><label class="language-picker"><span class="hidden-field" data-i18n="language">Language</span><select id="language-select" aria-label="Language"><option value="en">English</option><option value="fr">Français</option></select></label><button id="admin-open" class="quiet-button" type="button" hidden data-i18n="admin">Admin</button><button id="safety-open" class="quiet-button" type="button" data-i18n="safety">Safety</button><button id="sound-toggle" class="quiet-button" type="button" aria-pressed="true">Sound: on</button><button id="logout" class="quiet-button" type="button" data-i18n="logout">Log out</button></div></div>
     </header>
     <div class="workspace">
-      <section class="chat-panel" aria-label="Family text chat">
-        <main id="messages" class="messages" aria-live="polite" aria-label="Family conversation"></main>
+      <section class="chat-panel" aria-label="Text chat">
+        <main id="messages" class="messages" aria-live="polite" aria-label="Conversation"></main>
         <form id="composer" class="composer">
           <label id="composer-label" for="message">Message this room</label>
           <div class="compose-row">
-            <input id="message" name="message" maxlength="140" autocomplete="off" placeholder="Write something…" required>
-            <button type="submit">Send</button>
+            <input id="message" name="message" maxlength="140" autocomplete="off" placeholder="Write something…" data-i18n-placeholder="write" required>
+            <button type="submit" data-i18n="send">Send</button>
           </div>
           <div class="compose-meta"><span id="send-state">Ready</span><span><b id="count">0</b>/140</span></div>
         </form>
       </section>
       <aside class="voice-controls" aria-label="Walkie controls">
-        <div class="walkie-heading"><span class="eyebrow">LIVE VOICE</span><strong>Walkie</strong><span id="walkie-state">Connecting…</span></div>
-        <button id="ptt" class="ptt-button" type="button">Hold to talk</button>
-        <div class="walkie-divider"><span>or leave a message</span></div>
-        <button id="voice-clip" class="voice-button" type="button">Record voice clip</button>
+        <div class="walkie-heading"><span class="eyebrow" data-i18n="liveVoice">LIVE VOICE</span><strong>Walkie</strong><span id="walkie-state" data-i18n="connecting">Connecting…</span></div>
+        <button id="ptt" class="ptt-button" type="button" data-i18n="holdTalk">Hold to talk</button>
+        <div class="walkie-divider"><span data-i18n="orVoice">or leave a message</span></div>
+        <button id="voice-clip" class="voice-button" type="button" data-i18n="recordClip">Record voice clip</button>
         <p id="voice-room-note" class="walkie-note">One person talks at a time. Voice clips stay in this room’s history.</p>
       </aside>
     </div>
     <dialog id="admin-zone" class="admin-zone" aria-labelledby="admin-title">
       <section class="admin-card" data-vi-container="true">
         <div class="admin-heading">
-          <div><p class="eyebrow">ADMIN ZONE</p><h2 id="admin-title">Groups</h2><p>Create rooms, manage their members, and invite someone directly into one.</p></div>
+          <div><p class="eyebrow" data-i18n="adminZone">ADMIN ZONE</p><h2 id="admin-title" data-i18n="groups">Groups</h2><p data-i18n="adminIntro">Create rooms, manage their members, and invite someone directly into one.</p></div>
           <button id="admin-close" class="admin-close" type="button" aria-label="Close admin zone">×</button>
         </div>
-        <form id="new-group-form" class="admin-section"><h3>New group</h3><div class="admin-inline"><input id="new-group-name" name="name" placeholder="Sunday Crew" required maxlength="60"><button type="submit">Create</button></div><p id="group-state" class="invite-state" role="status"></p></form>
+        <form id="new-group-form" class="admin-section"><h3 data-i18n="newGroup">New group</h3><div class="admin-inline"><input id="new-group-name" name="name" placeholder="Sunday Crew" required maxlength="60"><button type="submit" data-i18n="create">Create</button></div><p id="group-state" class="invite-state" role="status"></p></form>
         <div class="admin-section"><h3>Manage group</h3><label for="manage-room">Group</label><select id="manage-room"></select><div id="group-members" class="group-members"></div><label for="existing-user">Add existing user</label><div class="admin-inline"><select id="existing-user"></select><button id="add-member" type="button">Add</button></div></div>
-        <form id="invite-form" class="admin-section"><h3>Invite new user</h3><p>One-use link · expires in seven days.</p><label for="invite-name">Name</label>
+        <form id="invite-form" class="admin-section"><h3 data-i18n="inviteUser">Invite new user</h3><p data-i18n="inviteExpiry">One-use link · expires in seven days.</p><label for="invite-name" data-i18n="name">Name</label>
         <input id="invite-name" name="display_name" autocomplete="name" placeholder="Aunt Sarah" required maxlength="80">
-        <label for="invite-username">Username</label>
+        <label for="invite-username" data-i18n="username">Username</label>
         <input id="invite-username" name="username" autocomplete="username" placeholder="sarah" required maxlength="80">
-        <label for="invite-email">Email <span>(optional)</span></label>
+        <label for="invite-email"><span data-i18n="email">Email</span> <span data-i18n="optional">(optional)</span></label>
         <input id="invite-email" name="email" type="email" autocomplete="email" placeholder="sarah@example.com" maxlength="160">
-        <label for="invite-room">Room</label>
-        <select id="invite-room" name="room_id" required><option value="family">Family</option><option value="k-buds">K-BUDS</option></select>
+        <label for="invite-room" data-i18n="room">Room</label>
+        <select id="invite-room" name="room_id" required></select>
         <p id="invite-state" class="invite-state" role="status" aria-live="polite"></p>
         <div id="invite-result" class="invite-result" hidden>
-          <strong>Invite ready</strong>
+          <strong data-i18n="inviteReady">Invite ready</strong>
           <a id="invite-link" href="#" target="_blank" rel="noreferrer"></a>
-          <button id="invite-share" type="button">Share invite</button>
+          <button id="invite-share" type="button" data-i18n="shareInvite">Share invite</button>
         </div>
-        <button id="invite-generate" class="invite-generate" type="submit">Generate one-time link</button></form>
+        <button id="invite-generate" class="invite-generate" type="submit" data-i18n="generateInvite">Generate one-time link</button></form>
         <div class="admin-section"><div class="admin-heading"><div><h3>Safety queue</h3><p>Review member reports and account-deletion requests.</p></div><button id="compliance-refresh" class="quiet-button" type="button">Refresh</button></div><p id="compliance-state" class="invite-state" role="status"></p><div id="compliance-queue" class="group-members"></div></div>
       </section>
     </dialog>
     <dialog id="welcome-zone" class="welcome-zone" aria-labelledby="welcome-title">
       <section class="welcome-card" data-vi-container="true">
-        <p class="eyebrow">WELCOME TO SUPACHAT</p>
+        <p class="eyebrow" data-i18n="welcomeEyebrow">WELCOME TO SUPACHAT</p>
         <h2 id="welcome-title">You’re in SupaChat.</h2>
         <p id="welcome-room-copy" class="welcome-intro">Private group conversations, kept simple.</p>
         <ul class="welcome-concepts">
@@ -71,7 +71,7 @@
           <li><strong>Voice</strong><span>Hold to talk live, or record a short voice clip.</span></li>
           <li><strong>Presence</strong><span>The names at the top show who is around.</span></li>
         </ul>
-        <button id="welcome-close" class="welcome-close" type="button">Start chatting</button>
+        <button id="welcome-close" class="welcome-close" type="button" data-i18n="startChatting">Start chatting</button>
       </section>
     </dialog>
     <dialog id="policy-zone" class="welcome-zone" aria-labelledby="policy-title">

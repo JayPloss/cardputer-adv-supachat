@@ -35,7 +35,13 @@ constexpr char kApiHost[] = "supachat.net";
 constexpr char kTlsFingerprint[] = "E7 09 64 D3 D6 B2 1D 03 F9 0E 81 59 6C FA 37 28 6C 69 37 5A AB C6 8A 0F DB C1 6D A0 87 9E 8F 15";
 constexpr char kDeviceName[] = SUPACHAT_DEVICE_NAME;
 constexpr char kDeviceId[] = SUPACHAT_DEVICE_ID;
-constexpr char kFirmwareVersion[] = "v0.42";
+#if defined(SUPACHAT_LANGUAGE_FR)
+constexpr bool kFrenchUi = true;
+#else
+constexpr bool kFrenchUi = false;
+#endif
+const char *uiText(const char *english, const char *french) { return kFrenchUi ? french : english; }
+constexpr char kFirmwareVersion[] = "v0.43";
 constexpr size_t kMessageLimit = 140;
 constexpr size_t kHistoryLimit = 100;
 constexpr uint32_t kToneIntervalMs = 40;
@@ -1252,7 +1258,8 @@ void drawChat() {
   display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(198, 126); display.printf("%d/140", draft.length());
 }
 
-const char *kMenuItems[] = {"BACK TO CHAT", "ROOMS", "SYNC NOW", "VOICE MESSAGES", "VOLUME", "NETWORKS", "STATUS"};
+const char *kMenuItemsEn[] = {"BACK TO CHAT", "ROOMS", "SYNC NOW", "VOICE MESSAGES", "VOLUME", "NETWORKS", "STATUS"};
+const char *kMenuItemsFr[] = {"RETOUR CHAT", "SALONS", "SYNCHRO", "MESSAGES VOCAUX", "VOLUME", "RESEAUX", "ETAT"};
 void drawMenu() {
   auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader("MENU");
   display.setTextSize(1);
@@ -1260,14 +1267,14 @@ void drawMenu() {
     const int y = 21 + index * 13; const bool selected = index == menuSelection;
     display.fillRoundRect(6, y, 228, 12, 4, selected ? TFT_GREEN : TFT_DARKGREY);
     display.setTextColor(selected ? TFT_BLACK : TFT_WHITE, selected ? TFT_GREEN : TFT_DARKGREY);
-    display.setCursor(13, y + 4); display.print(kMenuItems[index]);
+    display.setCursor(13, y + 4); display.print(kFrenchUi ? kMenuItemsFr[index] : kMenuItemsEn[index]);
   }
   display.setTextSize(1); display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 117);
-  display.print("ARROWS MOVE       OK SELECT");
+  display.print(uiText("ARROWS MOVE       OK SELECT", "FLECHES BOUGER    OK CHOISIR"));
 }
 
 void drawRooms() {
-  auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader("ROOMS"); display.setTextSize(1);
+  auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader(uiText("ROOMS", "SALONS")); display.setTextSize(1);
   const int start = std::max(0, roomSelection - 5);
   for (int index = start; index < static_cast<int>(rooms.size()) && index < start + 6; index++) {
     const int y = 22 + (index - start) * 15; const bool selected = index == roomSelection;
@@ -1275,19 +1282,19 @@ void drawRooms() {
     display.setTextColor(selected ? TFT_BLACK : TFT_WHITE, selected ? TFT_GREEN : TFT_DARKGREY); display.setCursor(12, y + 3);
     display.print(rooms[index].name.substring(0, 34));
   }
-  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 123); display.print("UP/DOWN CHOOSE    ENTER OPEN");
+  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 123); display.print(uiText("UP/DOWN CHOOSE    ENTER OPEN", "HAUT/BAS CHOISIR  ENTER OUVRIR"));
 }
 
 void drawWalkie() {
-  auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader("VOICE");
+  auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader(uiText("VOICE", "VOCAL"));
   if (voiceRecording) {
-    display.setTextSize(2); display.setTextColor(TFT_RED, TFT_BLACK); display.setCursor(12, 32); display.print("RECORDING");
+    display.setTextSize(2); display.setTextColor(TFT_RED, TFT_BLACK); display.setCursor(12, 32); display.print(uiText("RECORDING", "ENREGISTRE"));
     display.setTextSize(1); display.setTextColor(TFT_WHITE, TFT_BLACK); display.setCursor(12, 62);
     display.printf("%u.%us / 30s", voiceCapturedTotal / kVoiceSampleRate,
                    (voiceCapturedTotal % kVoiceSampleRate) * 10 / kVoiceSampleRate);
   } else {
     const auto inbox = voiceInbox();
-    if (inbox.empty()) { display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(12, 42); display.print("No voice messages yet"); }
+    if (inbox.empty()) { display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(12, 42); display.print(uiText("No voice messages yet", "Aucun message vocal")); }
     else {
       voiceInboxSelection = std::min(voiceInboxSelection, static_cast<int>(inbox.size()) - 1);
       const int first = std::max(0, voiceInboxSelection - 3);
@@ -1295,14 +1302,14 @@ void drawWalkie() {
         const int index = first + row; const bool selected = index == voiceInboxSelection; const int y = 23 + row * 17;
         display.fillRoundRect(5, y, 230, 15, 3, selected ? TFT_GREEN : TFT_DARKGREY);
         display.setTextColor(selected ? TFT_BLACK : participantColour(inbox[index].authorId, inbox[index].authorName), selected ? TFT_GREEN : TFT_DARKGREY);
-        display.setCursor(9, y + 4); display.printf("%-5s  voice #%lld", inbox[index].authorName.substring(0, 5).c_str(), inbox[index].id);
+        display.setCursor(9, y + 4); display.printf(kFrenchUi ? "%-5s  vocal #%lld" : "%-5s  voice #%lld", inbox[index].authorName.substring(0, 5).c_str(), inbox[index].id);
       }
     }
     display.setTextColor(TFT_YELLOW, TFT_BLACK); display.setCursor(7, 94); display.print(walkieStatus.substring(0, 35));
   }
   display.setTextSize(1); display.setTextColor(TFT_DARKGREY, TFT_BLACK);
-  display.setCursor(6, 111); display.print("UP/DOWN CHOOSE  ENTER PLAY/STOP");
-  display.setCursor(6, 123); display.print("HOLD SPACE RECORD   LEFT MENU");
+  display.setCursor(6, 111); display.print(uiText("UP/DOWN CHOOSE  ENTER PLAY/STOP", "HAUT/BAS CHOISIR ENTER ECOUTER"));
+  display.setCursor(6, 123); display.print(uiText("HOLD SPACE RECORD   LEFT MENU", "TENIR ESPACE ENREG. GAUCHE MENU"));
 }
 
 void drawVolume() {
@@ -1314,25 +1321,25 @@ void drawVolume() {
     display.fillRoundRect(x, 72, 30, 20, 4, index <= volumeLevel && volumeLevel > 0 ? TFT_GREEN : TFT_DARKGREY);
   }
   display.setTextSize(1); display.setTextColor(TFT_DARKGREY, TFT_BLACK);
-  display.setCursor(6, 116); display.print("LEFT/RIGHT CHANGE   OK BACK");
+  display.setCursor(6, 116); display.print(uiText("LEFT/RIGHT CHANGE   OK BACK", "GAUCHE/DROITE CHANGER OK RETOUR"));
 }
 
 void drawStatus() {
-  auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader("STATUS"); display.setTextSize(1);
-  display.setTextColor(TFT_WHITE, TFT_BLACK); display.setCursor(6, 29); display.printf("NODE      %s\n", kDeviceName);
+  auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader(uiText("STATUS", "ETAT")); display.setTextSize(1);
+  display.setTextColor(TFT_WHITE, TFT_BLACK); display.setCursor(6, 29); display.printf(kFrenchUi ? "APPAREIL  %s\n" : "NODE      %s\n", kDeviceName);
   display.printf("WIFI      %s\n", currentSsid.isEmpty() ? "offline" : currentSsid.c_str());
-  display.printf("STATE     %s\n", networkStatus.c_str()); display.printf("TIME      %s\n", timeKnown ? "known" : "unknown");
-  display.printf("BATTERY   %d%%  %d mV\n", batteryLevel, batteryVoltageMv);
-  display.printf("POWER     %s\n", externalPowerDetected ? "cable detected" : "not detected");
+  display.printf(kFrenchUi ? "ETAT      %s\n" : "STATE     %s\n", networkStatus.c_str()); display.printf(kFrenchUi ? "HEURE     %s\n" : "TIME      %s\n", timeKnown ? uiText("known", "connue") : uiText("unknown", "inconnue"));
+  display.printf(kFrenchUi ? "BATTERIE  %d%%  %d mV\n" : "BATTERY   %d%%  %d mV\n", batteryLevel, batteryVoltageMv);
+  display.printf(kFrenchUi ? "ALIM.     %s\n" : "POWER     %s\n", externalPowerDetected ? uiText("cable detected", "cable detecte") : uiText("not detected", "non detecte"));
   display.printf("SD/KEY    %s / %s\n", sdReady ? "ready" : "missing", keyboardReady ? "ready" : "fault");
   display.printf("HTTP/HEAP %d / %u\n", lastHttpStatus, ESP.getFreeHeap());
-  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 123); display.print("LEFT / OK  BACK");
+  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 123); display.print(uiText("LEFT / OK  BACK", "GAUCHE / OK RETOUR"));
 }
 
 void drawNetworks() {
-  auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader("NETWORKS"); display.setTextSize(1);
+  auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader(uiText("NETWORKS", "RESEAUX")); display.setTextSize(1);
   if (scannedNetworks.empty()) {
-    display.setTextColor(TFT_WHITE, TFT_BLACK); display.setCursor(6, 38); display.print("No networks found");
+    display.setTextColor(TFT_WHITE, TFT_BLACK); display.setCursor(6, 38); display.print(uiText("No networks found", "Aucun reseau trouve"));
   } else {
     const int first = std::max(0, networkSelection - 3);
     for (int row = 0; row < 6 && first + row < static_cast<int>(scannedNetworks.size()); row++) {
@@ -1343,18 +1350,18 @@ void drawNetworks() {
       display.setCursor(6, y + 3); display.printf("%c %-22s %3d", network.open ? ' ' : '*', network.ssid.substring(0, 22).c_str(), network.rssi);
     }
   }
-  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 121); display.print("ARROWS  OK JOIN  LEFT BACK");
+  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 121); display.print(uiText("ARROWS  OK JOIN  LEFT BACK", "FLECHES OK JOINDRE GAUCHE RETOUR"));
 }
 
 void drawNetworkPassword() {
-  auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader("JOIN WIFI"); display.setTextSize(1);
+  auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader(uiText("JOIN WIFI", "JOINDRE WIFI")); display.setTextSize(1);
   display.setTextColor(TFT_YELLOW, TFT_BLACK); display.setCursor(6, 28); display.print(selectedSsid.substring(0, 28));
-  display.setTextColor(TFT_WHITE, TFT_BLACK); display.setCursor(6, 52); display.print("PASSWORD");
+  display.setTextColor(TFT_WHITE, TFT_BLACK); display.setCursor(6, 52); display.print(uiText("PASSWORD", "MOT DE PASSE"));
   display.fillRoundRect(5, 65, 230, 24, 4, TFT_DARKGREY);
   display.setTextColor(TFT_WHITE, TFT_DARKGREY); display.setCursor(10, 73);
   display.print(networkPassword.substring(networkPassword.length() > 28 ? networkPassword.length() - 28 : 0));
   display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 104); display.print(networkStatus.substring(0, 34));
-  display.setCursor(6, 121); display.print("TYPE  ENTER JOIN  LEFT CANCEL");
+  display.setCursor(6, 121); display.print(uiText("TYPE  ENTER JOIN  LEFT CANCEL", "TAPER ENTER JOINDRE GAUCHE ANNULER"));
 }
 
 void render() {

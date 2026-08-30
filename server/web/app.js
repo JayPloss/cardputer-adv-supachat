@@ -23,6 +23,7 @@ const inviteLink = document.querySelector('#invite-link');
 const inviteShare = document.querySelector('#invite-share');
 const inviteGenerate = document.querySelector('#invite-generate');
 const roomSelect = document.querySelector('#room-select');
+const languageSelect = document.querySelector('#language-select');
 const welcomeZone = document.querySelector('#welcome-zone');
 const welcomeClose = document.querySelector('#welcome-close');
 const composerLabel = document.querySelector('#composer-label');
@@ -39,11 +40,46 @@ const complianceRefresh = document.querySelector('#compliance-refresh');
 const complianceState = document.querySelector('#compliance-state');
 const complianceQueue = document.querySelector('#compliance-queue');
 let adminGroups = []; let adminUsers = [];
+const translations = {
+  en: {
+    tagline:'PRIVATE ROOMS / ALWAYS WAITING', room:'Room', language:'Language', admin:'Admin', safety:'Safety', logout:'Log out',
+    soundOn:'Sound: on', soundOff:'Sound: off', write:'Write something…', send:'Send', ready:'Ready', connecting:'Connecting…',
+    liveVoice:'LIVE VOICE', holdTalk:'Hold to talk', orVoice:'or leave a message', recordClip:'Record voice clip',
+    adminZone:'ADMIN ZONE', groups:'Groups', adminIntro:'Create rooms, manage their members, and invite someone directly into one.',
+    newGroup:'New group', create:'Create', inviteUser:'Invite new user', inviteExpiry:'One-use link · expires in seven days.',
+    name:'Name', username:'Username', email:'Email', optional:'(optional)', inviteReady:'Invite ready', shareInvite:'Share invite',
+    generateInvite:'Generate one-time link', welcomeEyebrow:'WELCOME TO SUPACHAT', startChatting:'Start chatting',
+    empty:'No messages yet.\nSay the first thing.', messageRoom:'Message {room}', voiceRoom:'One person talks at a time. Voice clips stay in {room} history.',
+    welcomeRoom:'You’re in {room}.', welcomeCopy:'This invitation added you to the {room} conversation.', online:'online', offline:'offline', seen:'seen {time}',
+    playing:'Playing…', playVoice:'▶ Play voice', uploading:'Uploading…', uploadFailed:'Upload failed — retry', stopSend:'Stop + send (5s max)', micUnavailable:'Microphone unavailable', walkieReady:'Ready — hold to talk', transmitting:'Transmitting as {name}', talking:'{name} is talking', hasChannel:'{name} has the channel', reconnecting:'Reconnecting…', sending:'Sending…', sent:'Sent', sendFailed:'Not sent — try again'
+  },
+  fr: {
+    tagline:'SALONS PRIVÉS / TOUJOURS PRÊT', room:'Salon', language:'Langue', admin:'Admin', safety:'Sécurité', logout:'Déconnexion',
+    soundOn:'Son : activé', soundOff:'Son : désactivé', write:'Écrivez un message…', send:'Envoyer', ready:'Prêt', connecting:'Connexion…',
+    liveVoice:'VOIX EN DIRECT', holdTalk:'Maintenir pour parler', orVoice:'ou laisser un message', recordClip:'Enregistrer un message vocal',
+    adminZone:'ZONE ADMIN', groups:'Groupes', adminIntro:'Créez des salons, gérez les membres et invitez directement une personne.',
+    newGroup:'Nouveau groupe', create:'Créer', inviteUser:'Inviter une personne', inviteExpiry:'Lien à usage unique · expire dans sept jours.',
+    name:'Nom', username:'Nom d’utilisateur', email:'Courriel', optional:'(facultatif)', inviteReady:'Invitation prête', shareInvite:'Partager l’invitation',
+    generateInvite:'Créer un lien unique', welcomeEyebrow:'BIENVENUE SUR SUPACHAT', startChatting:'Commencer à clavarder',
+    empty:'Aucun message.\nLancez la conversation.', messageRoom:'Message à {room}', voiceRoom:'Une personne parle à la fois. Les messages vocaux restent dans l’historique de {room}.',
+    welcomeRoom:'Vous êtes dans {room}.', welcomeCopy:'Cette invitation vous a ajouté à la conversation {room}.', online:'en ligne', offline:'hors ligne', seen:'vu à {time}',
+    playing:'Lecture…', playVoice:'▶ Écouter', uploading:'Téléversement…', uploadFailed:'Échec du téléversement — réessayer', stopSend:'Arrêter et envoyer (5 s max)', micUnavailable:'Microphone indisponible', walkieReady:'Prêt — maintenir pour parler', transmitting:'Transmission comme {name}', talking:'{name} parle', hasChannel:'{name} a le canal', reconnecting:'Reconnexion…', sending:'Envoi…', sent:'Envoyé', sendFailed:'Non envoyé — réessayer'
+  }
+};
+let locale = localStorage.getItem('supachat-language') || (navigator.language?.toLowerCase().startsWith('fr') ? 'fr' : 'en');
+if (!translations[locale]) locale = 'en';
+const t = (key, values = {}) => Object.entries(values).reduce((text, [name, value]) => text.replaceAll(`{${name}}`, value), translations[locale][key] || translations.en[key] || key);
+function applyLocale() {
+  document.documentElement.lang = locale; languageSelect.value = locale;
+  document.querySelectorAll('[data-i18n]').forEach((node) => { node.textContent = t(node.dataset.i18n); });
+  document.querySelectorAll('[data-i18n-placeholder]').forEach((node) => { node.placeholder = t(node.dataset.i18nPlaceholder); });
+  updateSoundToggle();
+}
 const welcomeRequested = new URLSearchParams(location.search).get('welcome') === '1';
 let messages = [];
 let currentUser = null;
 let rooms = [];
-let currentRoom = new URLSearchParams(location.search).get('room') || localStorage.getItem('supachat-room') || 'family';
+let currentRoom = new URLSearchParams(location.search).get('room') || localStorage.getItem('supachat-room') || '';
 let clipRoom = '';
 let policyVersion = '';
 let policyRequired = false;
@@ -68,9 +104,9 @@ const receiptLabel = (message) => {
 function renderMessages(scroll = false) {
   messagesEl.innerHTML = messages.length ? messages.map((message) => `
     <article class="message ${message.author_id === currentUser?.id ? 'mine' : ''} ${identityClass(message.author_id)}" data-id="${message.id}">
-      <div class="bubble"><strong class="message-sender">${escapeHtml(message.author_name)}</strong><span class="message-separator">: </span><span class="message-body">${message.type === 'voice' ? `<button class="voice-play" data-voice-id="${message.id}">▶ Play voice</button><span class="voice-wave">${Math.round((message.voice?.duration_ms || 0) / 100) / 10}s</span>` : escapeHtml(message.body)}</span></div>
+      <div class="bubble"><strong class="message-sender">${escapeHtml(message.author_name)}</strong><span class="message-separator">: </span><span class="message-body">${message.type === 'voice' ? `<button class="voice-play" data-voice-id="${message.id}">${escapeHtml(t('playVoice'))}</button><span class="voice-wave">${Math.round((message.voice?.duration_ms || 0) / 100) / 10}s</span>` : escapeHtml(message.body)}</span></div>
       <div class="message-meta"><span>${time(message.created_at)}</span>${message.author_id === currentUser?.id ? `<span class="receipt">${receiptLabel(message)}</span>` : ''}</div>
-    </article>`).join('') : '<p class="empty">No messages yet.<br>Say the first thing.</p>';
+    </article>`).join('') : `<p class="empty">${escapeHtml(t('empty')).replace('\n','<br>')}</p>`;
   if (scroll) messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
@@ -86,7 +122,7 @@ const ensureAudio = async () => {
   return audioContext;
 };
 const updateSoundToggle = () => {
-  soundToggle.textContent = `Sound: ${notificationSoundEnabled ? 'on' : 'off'}`;
+  soundToggle.textContent = t(notificationSoundEnabled ? 'soundOn' : 'soundOff');
   soundToggle.setAttribute('aria-pressed', String(notificationSoundEnabled));
 };
 async function playNotificationSound() {
@@ -106,6 +142,11 @@ async function playNotificationSound() {
   } catch {}
 }
 updateSoundToggle();
+applyLocale();
+languageSelect.addEventListener('change', async () => {
+  locale = translations[languageSelect.value] ? languageSelect.value : 'en';
+  localStorage.setItem('supachat-language', locale); applyLocale(); await refresh();
+});
 soundToggle.addEventListener('click', async () => {
   notificationSoundEnabled = !notificationSoundEnabled;
   localStorage.setItem('supachat-sound', notificationSoundEnabled ? 'on' : 'off');
@@ -154,12 +195,12 @@ async function playPcm(bytes) {
 }
 messagesEl.addEventListener('click', async (event) => {
   const button = event.target.closest('[data-voice-id]'); if (!button) return;
-  button.disabled = true; button.textContent = 'Playing…';
+  button.disabled = true; button.textContent = t('playing');
   try {
     const response = await fetch(`api/voice/${button.dataset.voiceId}/audio`);
     if (!response.ok) throw new Error('play_failed');
     await playPcm(new Uint8Array(await response.arrayBuffer()));
-  } finally { button.disabled = false; button.textContent = '▶ Play voice'; }
+  } finally { button.disabled = false; button.textContent = t('playVoice'); }
 });
 
 let clipChunks = [];
@@ -170,12 +211,12 @@ voiceClipButton.addEventListener('click', async () => {
     const size = clipChunks.reduce((total, chunk) => total + chunk.length, 0);
     const pcm = new Uint8Array(size); let offset = 0;
     for (const chunk of clipChunks) { pcm.set(chunk, offset); offset += chunk.length; }
-    voiceClipButton.textContent = 'Uploading…'; voiceClipButton.disabled = true;
+    voiceClipButton.textContent = t('uploading'); voiceClipButton.disabled = true;
     try {
       const response = await fetch('api/voice', { method:'POST', headers:{'content-type':'application/octet-stream','x-client-id':crypto.randomUUID(),'x-sample-rate':'8000','x-room-id':clipRoom}, body:pcm });
       if (!response.ok) throw new Error('upload_failed');
-      voiceClipButton.textContent = 'Record voice clip';
-    } catch { voiceClipButton.textContent = 'Upload failed — retry'; }
+      voiceClipButton.textContent = t('recordClip');
+    } catch { voiceClipButton.textContent = t('uploadFailed'); }
     finally { voiceClipButton.disabled = false; clipChunks = []; }
     return;
   }
@@ -183,9 +224,9 @@ voiceClipButton.addEventListener('click', async () => {
   try {
     clipRoom = currentRoom;
     await startCapture((chunk) => clipChunks.push(chunk));
-    voiceClipButton.textContent = 'Stop + send (5s max)';
+    voiceClipButton.textContent = t('stopSend');
     clipTimer = setTimeout(() => voiceClipButton.click(), 5000);
-  } catch { voiceClipButton.textContent = 'Microphone unavailable'; }
+  } catch { voiceClipButton.textContent = t('micUnavailable'); }
 });
 
 let walkieSocket;
@@ -194,22 +235,22 @@ let pttHeld = false;
 function connectWalkie() {
   const url = new URL('walkie', location.href); url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'; url.searchParams.set('room', currentRoom);
   walkieSocket = new WebSocket(url); walkieSocket.binaryType = 'arraybuffer';
-  walkieSocket.onopen = () => walkieState.textContent = 'Ready — hold to talk';
+  walkieSocket.onopen = () => walkieState.textContent = t('walkieReady');
   walkieSocket.onmessage = async (event) => {
     if (event.data instanceof ArrayBuffer) { await playPcm(new Uint8Array(event.data)); return; }
     const message = JSON.parse(event.data);
     if (message.type === 'ptt_start') {
       pttGranted = message.user === currentUser?.id;
-      walkieState.textContent = pttGranted ? `Transmitting as ${currentUser?.display_name || 'you'}` : `${message.user} is talking`;
+      walkieState.textContent = pttGranted ? t('transmitting',{name:currentUser?.display_name || 'you'}) : t('talking',{name:message.user});
       pttButton.classList.toggle('transmitting', pttGranted);
     } else if (message.type === 'ptt_stop') {
-      pttGranted = false; walkieState.textContent = 'Ready — hold to talk'; pttButton.classList.remove('transmitting');
+      pttGranted = false; walkieState.textContent = t('walkieReady'); pttButton.classList.remove('transmitting');
     } else if (message.type === 'busy') {
       pttGranted = false; pttHeld = false; stopCapture(); pttButton.classList.remove('transmitting');
-      walkieState.textContent = `${message.speaker} has the channel`;
+      walkieState.textContent = t('hasChannel',{name:message.speaker});
     }
   };
-  walkieSocket.onclose = () => { walkieState.textContent = 'Reconnecting…'; setTimeout(connectWalkie, 1500); };
+  walkieSocket.onclose = () => { walkieState.textContent = t('reconnecting'); setTimeout(connectWalkie, 1500); };
 }
 async function pttStart(event) {
   event.preventDefault(); if (walkieSocket?.readyState !== WebSocket.OPEN || captureProcessor) return;
@@ -219,7 +260,7 @@ async function pttStart(event) {
     await startCapture((chunk) => { if (pttHeld && pttGranted && walkieSocket.readyState === WebSocket.OPEN) walkieSocket.send(chunk); });
     if (!pttHeld) stopCapture();
   } catch {
-    pttHeld = false; walkieState.textContent = 'Microphone unavailable';
+    pttHeld = false; walkieState.textContent = t('micUnavailable');
     if (walkieSocket?.readyState === WebSocket.OPEN) walkieSocket.send(JSON.stringify({type:'ptt_stop'}));
   }
 }
@@ -239,14 +280,15 @@ async function refresh() {
   policyRequired = !session.policy?.accepted_at;
   policyClose.hidden = policyRequired;
   if (policyRequired && !policyZone.open) policyZone.showModal();
-  if (!rooms.some((room) => room.id === currentRoom)) currentRoom = rooms[0]?.id || 'family';
+  if (!rooms.some((room) => room.id === currentRoom)) currentRoom = rooms[0]?.id || '';
   roomSelect.innerHTML = rooms.map((room) => `<option value="${escapeHtml(room.id)}">${escapeHtml(room.name)}</option>`).join('');
   roomSelect.value = currentRoom;
   const activeRoomName = rooms.find((room) => room.id === currentRoom)?.name || 'this room';
-  composerLabel.textContent = `Message ${activeRoomName}`;
-  voiceRoomNote.textContent = `One person talks at a time. Voice clips stay in ${activeRoomName} history.`;
-  welcomeTitle.textContent = `You’re in ${activeRoomName}.`;
-  welcomeRoomCopy.textContent = `This invitation added you to the ${activeRoomName} conversation.`;
+  document.title = `SupaChat — ${activeRoomName}`;
+  composerLabel.textContent = t('messageRoom', {room:activeRoomName});
+  voiceRoomNote.textContent = t('voiceRoom', {room:activeRoomName});
+  welcomeTitle.textContent = t('welcomeRoom', {room:activeRoomName});
+  welcomeRoomCopy.textContent = t('welcomeCopy', {room:activeRoomName});
   const requestedRoom = currentRoom;
   const [{ messages: next }, { presence }] = await Promise.all([api(`api/messages?room=${encodeURIComponent(requestedRoom)}&limit=100`), api(`api/presence?room=${encodeURIComponent(requestedRoom)}`)]);
   if (currentRoom !== requestedRoom) return;
@@ -354,7 +396,7 @@ inviteShare.addEventListener('click', async () => {
   else { await navigator.clipboard.writeText(url); inviteState.textContent = 'Invite link copied.'; }
 });
 function renderPresence(presence) {
-  presenceEl.innerHTML = presence.map((person) => `<div class="person ${identityClass(person.user_id)}"><strong><span class="dot ${person.status}"></span>${escapeHtml(person.display_name)}</strong><small>${person.status === 'online' ? 'online' : person.last_seen_at ? `seen ${time(person.last_seen_at)}` : 'offline'}</small></div>`).join('');
+  presenceEl.innerHTML = presence.map((person) => `<div class="person ${identityClass(person.user_id)}"><strong><span class="dot ${person.status}"></span>${escapeHtml(person.display_name)}</strong><small>${person.status === 'online' ? t('online') : person.last_seen_at ? t('seen',{time:time(person.last_seen_at)}) : t('offline')}</small></div>`).join('');
 }
 input.addEventListener('input', () => count.textContent = [...input.value].length);
 logout?.addEventListener('click', async () => {
@@ -366,12 +408,12 @@ composer.addEventListener('submit', async (event) => {
   event.preventDefault();
   const value = input.value.trim();
   if (!value) return;
-  sendState.textContent = 'Sending…';
+  sendState.textContent = t('sending');
   input.disabled = true;
   try {
     await api('api/messages', { method:'POST', body:JSON.stringify({body:value,client_id:crypto.randomUUID(),room_id:currentRoom}) });
-    input.value = ''; count.textContent = '0'; sendState.textContent = 'Sent';
-  } catch { sendState.textContent = 'Not sent — try again'; }
+    input.value = ''; count.textContent = '0'; sendState.textContent = t('sent');
+  } catch { sendState.textContent = t('sendFailed'); }
   finally { input.disabled = false; input.focus(); }
 });
 const events = new EventSource('api/events');
@@ -389,6 +431,6 @@ events.addEventListener('receipt', async () => {
   if (currentRoom !== requestedRoom) return;
   messages = result.messages; renderMessages();
 });
-events.onerror = () => { sendState.textContent = 'Reconnecting…'; };
-setInterval(async () => { try { const requestedRoom=currentRoom; const result=await api(`api/presence?room=${encodeURIComponent(requestedRoom)}`); if(currentRoom===requestedRoom)renderPresence(result.presence); sendState.textContent = 'Ready'; } catch {} }, 20_000);
+events.onerror = () => { sendState.textContent = t('reconnecting'); };
+setInterval(async () => { try { const requestedRoom=currentRoom; const result=await api(`api/presence?room=${encodeURIComponent(requestedRoom)}`); if(currentRoom===requestedRoom)renderPresence(result.presence); sendState.textContent = t('ready'); } catch {} }, 20_000);
 refresh();

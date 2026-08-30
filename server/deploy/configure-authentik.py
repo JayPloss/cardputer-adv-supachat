@@ -10,11 +10,13 @@ from django.db import transaction
 
 from authentik.brands.models import Brand
 from authentik.core.models import Application, Group, User
+from authentik.flows.models import Flow, FlowStageBinding
 from authentik.outposts.models import DockerServiceConnection, Outpost
 from authentik.outposts.tasks import outpost_controller
 from authentik.policies.models import PolicyBinding
 from authentik.providers.proxy.models import ProxyProvider
 from authentik.providers.oauth2.models import OAuth2Provider, RedirectURI
+from authentik.stages.identification.models import IdentificationStage
 
 
 SUPACHAT_CSS = r"""
@@ -60,10 +62,29 @@ body, .pf-c-background-image, .pf-v5-c-background-image {
 
 with transaction.atomic():
     template = ProxyProvider.objects.get(pk=3)
+    authentication_flow, _ = Flow.objects.update_or_create(
+        slug="supachat-authentication",
+        defaults={
+            "name": "SupaChat authentication",
+            "title": "Welcome to SupaChat",
+            "designation": "authentication",
+            "authentication": "none",
+        },
+    )
+    identification, _ = IdentificationStage.objects.update_or_create(
+        name="supachat-authentication-identification",
+        defaults={"user_fields": ["username"], "show_matched_user": False},
+    )
+    FlowStageBinding.objects.filter(target=authentication_flow).delete()
+    FlowStageBinding.objects.create(target=authentication_flow, stage=identification, order=10)
+    for binding in FlowStageBinding.objects.filter(target=template.authentication_flow).order_by("order"):
+        if binding.stage.__class__.__name__ == "IdentificationStage":
+            continue
+        FlowStageBinding.objects.create(target=authentication_flow, stage=binding.stage, order=binding.order)
     provider, _ = ProxyProvider.objects.get_or_create(
         name="Provider for SupaChat",
         defaults={
-            "authentication_flow": template.authentication_flow,
+            "authentication_flow": authentication_flow,
             "authorization_flow": template.authorization_flow,
             "invalidation_flow": template.invalidation_flow,
             "mode": "forward_single",
@@ -72,7 +93,7 @@ with transaction.atomic():
             "internal_host_ssl_validation": True,
         },
     )
-    provider.authentication_flow = template.authentication_flow
+    provider.authentication_flow = authentication_flow
     provider.authorization_flow = template.authorization_flow
     provider.invalidation_flow = template.invalidation_flow
     provider.mode = "forward_single"
@@ -87,7 +108,7 @@ with transaction.atomic():
             "name": "SupaChat",
             "provider": provider,
             "meta_launch_url": "https://supachat.net",
-            "meta_description": "Private SupaChat family room",
+            "meta_description": "Private SupaChat rooms",
             "meta_publisher": "SupaChat",
         },
     )
@@ -95,24 +116,25 @@ with transaction.atomic():
     group, _ = Group.objects.get_or_create(name="SupaChat Users")
     family_group, _ = Group.objects.get_or_create(name="SupaChat Family")
     kbuds_group, _ = Group.objects.get_or_create(name="SupaChat K-BUDS")
+    wolfpack_group, _ = Group.objects.get_or_create(name="SupaChat Wolfpack")
     family_group.parents.set([group])
     kbuds_group.parents.set([group])
-    for legacy_user in group.users.all():
-        legacy_user.groups.add(family_group)
+    wolfpack_group.parents.set([group])
     for username, name in (("papa", "Papa"), ("albie", "Albie"), ("julien", "Julien")):
         user, _ = User.objects.get_or_create(
             username=username,
             defaults={"name": name, "type": "internal"},
         )
         user.name = name
-        user.save(update_fields=["name"])
+        user.path = "users/supachat"
+        user.save(update_fields=["name", "path"])
         user.groups.add(group, family_group, kbuds_group)
     PolicyBinding.objects.get_or_create(target=application, group=group, defaults={"order": 0})
 
     mobile_provider, _ = OAuth2Provider.objects.get_or_create(
         name="Provider for SupaChat Mobile",
         defaults={
-            "authentication_flow": template.authentication_flow,
+            "authentication_flow": authentication_flow,
             "authorization_flow": template.authorization_flow,
             "invalidation_flow": template.invalidation_flow,
             "client_type": "public",
@@ -121,7 +143,7 @@ with transaction.atomic():
             "signing_key": template.signing_key,
         },
     )
-    mobile_provider.authentication_flow = template.authentication_flow
+    mobile_provider.authentication_flow = authentication_flow
     mobile_provider.authorization_flow = template.authorization_flow
     mobile_provider.invalidation_flow = template.invalidation_flow
     mobile_provider.client_type = "public"
