@@ -46,7 +46,15 @@ $deviceCredentials = $credentials.$credentialProperty
 if ($null -eq $deviceCredentials -or $deviceCredentials.device_id -ne $DeviceKey -or [string]::IsNullOrWhiteSpace($deviceCredentials.device_token)) {
     throw "The private credential file does not contain $DeviceKey device credentials."
 }
-$meshKey = if ($credentials.mesh.room_key) { $credentials.mesh.room_key } else { $credentials.mesh.family_key }
+$roomKeyProperty = $credentials.mesh.PSObject.Properties['room_key']
+$familyKeyProperty = $credentials.mesh.PSObject.Properties['family_key']
+$meshKey = if ($null -ne $roomKeyProperty -and $roomKeyProperty.Value) {
+    $roomKeyProperty.Value
+} elseif ($null -ne $familyKeyProperty) {
+    $familyKeyProperty.Value
+} else {
+    $null
+}
 if ($null -eq $credentials.mesh -or $meshKey -notmatch '^[0-9a-fA-F]{64}$') {
     throw 'The private credential file does not contain a valid SupaChat mesh key.'
 }
