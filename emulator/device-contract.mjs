@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import tls from 'node:tls';
+import {interpretRawKeys,navPositions} from './state.mjs';
 
 const firmware = fs.readFileSync(new URL('../firmware/src/main.cpp', import.meta.url), 'utf8');
 const songHeader = fs.readFileSync(new URL('../firmware/include/keypress_song.h', import.meta.url), 'utf8');
@@ -64,19 +65,24 @@ for (const sample of [101, 202, 303, 404]) {
 }
 assert.deepEqual(consumed, [101, 202], 'M5 two-slot DMA delay contract');
 
-// Shift+/ must be printable '?' and must not activate the same physical key's
-// right-arrow navigation role.
-const shiftedSlash = { shift: true, word: ['?'], physicalRight: true };
-const navigationChord = Boolean(shiftedSlash.fn) && !(shiftedSlash.shift || false);
-assert.equal(navigationChord && shiftedSlash.physicalRight, false);
-assert.equal(shiftedSlash.word[0], '?');
+// Port the observable M5 Keyboard_Class contract: keysState reports modifiers
+// and printable word while keyList retains the physical matrix coordinates.
+const rightKey=[{x:navPositions.right[0],y:navPositions.right[1]}];
+assert.deepEqual(interpretRawKeys('chat',{shift:true,word:['?'],keyList:rightKey}),{kind:'text',text:'?'},
+  'Shift+/ must remain printable on a text screen');
+assert.deepEqual(interpretRawKeys('chat',{fn:true,word:['/'],keyList:rightKey}),{kind:'navigation',direction:'right'},
+  'Fn plus the same physical key must navigate on a text screen');
+assert.deepEqual(interpretRawKeys('menu',{word:['/'],keyList:rightKey}),{kind:'navigation',direction:'right'},
+  'physical arrows must be primary on navigation screens');
+assert.deepEqual(interpretRawKeys('menu',{fn:true,word:['/'],keyList:rightKey}),{kind:'navigation',direction:'right'},
+  'holding Fn must not disable navigation-screen arrows');
 assert.match(firmware, /if \(character == '\?'\) \{ appendKeyboardText\(target, u8"é"/,
   'French Shift+/ must emit é directly');
 assert.match(firmware, /if \(character == '\\'\'\) \{ frenchGravePending = true; return; \}/,
   'French apostrophe must wait for its composition key');
 assert.match(firmware, /character == 'a'[\s\S]*u8"à"[\s\S]*character == 'e'[\s\S]*u8"è"/,
   'French dead-key composition must emit à and è');
-assert.match(firmware, /textEntryScreen[\s\S]*textEntryScreen \? keys\.fn : !keys\.fn/,
+assert.match(firmware, /textEntryScreen[\s\S]*!textEntryScreen \|\| keys\.fn/,
   'arrows must require Fn during text entry and remain primary elsewhere');
 const cp437 = new Map([[0xA9,0x82],[0xA8,0x8A],[0xA0,0x85]]);
 assert.deepEqual([...Buffer.from('éèà')].reduce((out,byte,index,input)=>{if(byte===0xC3)out.push(cp437.get(input[index+1]));return out},[]),[0x82,0x8A,0x85]);

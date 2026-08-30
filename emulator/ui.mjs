@@ -1,4 +1,4 @@
-import{SupaChatState,menuPages,changelog,networks}from'./state.mjs';
+import{SupaChatState,menuPages,changelog,networks,navPositions}from'./state.mjs';
 const language=new URLSearchParams(location.search).get('language')==='fr'?'fr':'en',s=new SupaChatState(language==='fr'?'Emmanuelle':'Albie',language),c=document.querySelector('#screen'),x=c.getContext('2d');x.imageSmoothingEnabled=false;
 const C={black:'#000',white:'#fff',green:'#62e86f',albie:'#7dd3fc',juju:'#ffad5c',papa:'#a7f070',theo:'#c4a7ff',josee:'#ff8fb8',emmanuelle:'#60e1e0',andrew:'#f4d35e',naomie:'#ff6b6b',yellow:'#ffd83d',red:'#ff4747',grey:'#59615d',dark:'#26302b',header:'#123b27'};
 function rect(a,b,w,h,color,r=0){x.fillStyle=color;r?round(a,b,w,h,r):x.fillRect(a,b,w,h)}function round(a,b,w,h,r){x.beginPath();x.roundRect(a,b,w,h,r);x.fill()}
@@ -30,7 +30,8 @@ function draw(){rect(0,0,240,135,C.black);({chat,menu,rooms,'voice-messages':voi
 let audio;function beep(){if(!s.volume)return;audio??=new AudioContext();const o=audio.createOscillator(),g=audio.createGain();o.frequency.value=440+(s.tones%8)*35;g.gain.value=.05;o.connect(g).connect(audio.destination);o.start();o.stop(audio.currentTime+.12)}
 function act(fn){const before=s.tones;fn();if(s.tones>before)beep();draw()}
 const keyboard=document.querySelector('.keyboard'),leftButton=document.querySelector('[data-key="LEFT"]'),rightButton=document.querySelector('[data-key="RIGHT"]');leftButton.textContent='FN + ← ROOM';rightButton.textContent='FN + ROOM →';const menuButton=document.createElement('button');menuButton.dataset.key='MENU';menuButton.textContent='REAR · MENU';keyboard.prepend(menuButton);
-document.querySelectorAll('[data-key]').forEach(b=>b.onclick=()=>act(()=>({MENU:()=>s.menu(),LEFT:()=>s.left(),RIGHT:()=>s.right(),UP:()=>s.up(),DOWN:()=>s.down(),ENTER:()=>s.enter(),QUESTION:()=>s.type('?',{shift:true}),BACKSPACE:()=>s.backspace()}[b.dataset.key]?.())));
+function rawDirection(direction){const[x,y]=navPositions[direction.toLowerCase()],textEntry=s.screen==='chat'||s.screen==='password';s.applyRawKeys({fn:textEntry,keyList:[{x,y}]})}
+document.querySelectorAll('[data-key]').forEach(b=>b.onclick=()=>act(()=>({MENU:()=>s.menu(),LEFT:()=>rawDirection('LEFT'),RIGHT:()=>rawDirection('RIGHT'),UP:()=>rawDirection('UP'),DOWN:()=>rawDirection('DOWN'),ENTER:()=>s.applyRawKeys({enter:true}),QUESTION:()=>s.applyRawKeys({shift:true,word:['?'],keyList:[{x:12,y:3}]}),BACKSPACE:()=>s.backspace()}[b.dataset.key]?.())));
 document.querySelector('#text-entry').oninput=e=>{act(()=>s.type(e.target.value));e.target.value=''};
 const space=document.querySelector('#space');space.onpointerdown=e=>{space.setPointerCapture(e.pointerId);s.holdSpace();draw()};space.onpointerup=space.onpointercancel=()=>{s.releaseSpace();draw()};
 document.querySelector('#sync-result').onchange=e=>{s.sync(e.target.value);draw()};

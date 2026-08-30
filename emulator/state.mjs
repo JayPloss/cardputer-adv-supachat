@@ -16,6 +16,15 @@ export const networks = [
   {ssid:'Plossco Family',rssi:-41,open:false},{ssid:'Papa Hotspot',rssi:-57,open:false},
   {ssid:'Library Guest',rssi:-68,open:true},{ssid:'NETGEAR-2G',rssi:-76,open:false}
 ];
+export const navPositions = {up:[11,2],left:[10,3],down:[11,3],right:[12,3]};
+export function interpretRawKeys(screen,{fn=false,shift=false,ctrl=false,alt=false,opt=false,enter=false,word=[],keyList=[]}={}){
+  if(enter)return{kind:'enter'};
+  const textEntry=screen==='chat'||screen==='password',otherModifier=shift||ctrl||alt||opt;
+  const navigationChord=!otherModifier&&(!textEntry||fn);
+  if(navigationChord)for(const[direction,[x,y]]of Object.entries(navPositions))if(keyList.some(key=>key.x===x&&key.y===y))return{kind:'navigation',direction};
+  if(textEntry&&word.length)return{kind:'text',text:word.join('')};
+  return{kind:'ignored'};
+}
 export class SupaChatState {
   constructor(name='Albie',language='en') {
     Object.assign(this,{name,screen:'chat',menuPage:0,menuSelections:[0,0],changelogSelection:0,changelogLineOffset:0,localOnly:false,networkSelection:0,network:'SYNCED',ssid:'Plossco Family',
@@ -36,7 +45,8 @@ export class SupaChatState {
   up(){if(this.screen==='menu'){const count=menuPages[this.menuPage].length;this.menuSelections[this.menuPage]=(this.menuSelections[this.menuPage]+count-1)%count}else if(this.screen==='changelog')this.changelogLineOffset=Math.max(0,this.changelogLineOffset-1);else if(this.screen==='rooms')this.roomSelection=Math.max(0,this.roomSelection-1);else if(this.screen==='networks')this.networkSelection=Math.max(0,this.networkSelection-1);else if(this.screen==='voice-messages')this.voiceSelection=Math.max(0,this.voiceSelection-1);this.tone()}
   down(){if(this.screen==='menu'){const count=menuPages[this.menuPage].length;this.menuSelections[this.menuPage]=(this.menuSelections[this.menuPage]+1)%count}else if(this.screen==='changelog')this.changelogLineOffset=Math.min(Math.max(0,changelog[this.changelogSelection].lines.length-4),this.changelogLineOffset+1);else if(this.screen==='rooms')this.roomSelection=Math.min(this.rooms.length-1,this.roomSelection+1);else if(this.screen==='networks')this.networkSelection=Math.min(networks.length-1,this.networkSelection+1);else if(this.screen==='voice-messages')this.voiceSelection=Math.min(this.messages.filter(m=>m.voice).length-1,this.voiceSelection+1);this.tone()}
   right(){if(this.screen==='chat')this.switchRoom(1);else if(this.screen==='menu')this.menuPage=(this.menuPage+1)%2;else if(this.screen==='changelog'){this.changelogSelection=Math.min(changelog.length-1,this.changelogSelection+1);this.changelogLineOffset=0}else if(this.screen==='networks')this.selectNetwork();else if(this.screen==='volume')this.volume=Math.min(4,this.volume+1);else if(this.screen==='language')this.cycleLanguage(1);this.tone()}
-  physicalKey(direction,printable,{fn=false}={}){const textEntry=this.screen==='chat'||this.screen==='password';if((textEntry&&fn)||(!textEntry&&!fn)){this[direction]?.();return'navigation'}if(textEntry){this.type(printable);return'text'}return'ignored'}
+  applyRawKeys(keys){const action=interpretRawKeys(this.screen,keys);if(action.kind==='navigation')this[action.direction]();else if(action.kind==='text')this.type(action.text,{shift:keys.shift});else if(action.kind==='enter')this.enter();return action.kind}
+  physicalKey(direction,printable,{fn=false,shift=false}={}){const[x,y]=navPositions[direction];return this.applyRawKeys({fn,shift,word:printable?[printable]:[],keyList:[{x,y}]})}
   enter(){
     if(this.gravePending&&(this.screen==='chat'||this.screen==='password')){this[this.screen==='chat'?'draft':'password']+="'";this.gravePending=false}
     if(this.screen==='menu')this.open(menuPages[this.menuPage][this.menuSelections[this.menuPage]]);

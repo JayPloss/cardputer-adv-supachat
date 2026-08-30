@@ -1690,7 +1690,9 @@ void handleKeyboard() {
   // navigation screens, the coloured arrows are primary and need no Fn.
   const bool textEntryScreen = screenMode == ScreenMode::Chat || screenMode == ScreenMode::NetworkPassword;
   const bool otherModifier = keys.shift || keys.ctrl || keys.alt || keys.opt;
-  const bool navigationChord = !otherModifier && (textEntryScreen ? keys.fn : !keys.fn);
+  // Text entry requires Fn to select the physical arrow layer. Navigation
+  // screens treat those physical positions as arrows with or without Fn.
+  const bool navigationChord = !otherModifier && (!textEntryScreen || keys.fn);
   const bool goUp = navigationChord && navUp();
   const bool goDown = navigationChord && navDown();
   const bool goLeft = navigationChord && navLeft();
