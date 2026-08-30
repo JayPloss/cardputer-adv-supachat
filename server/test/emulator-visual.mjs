@@ -60,5 +60,11 @@ await openMenu(5); await shot('networks'); await page.getByRole('button', { name
 await openMenu(6); await shot('status');
 await page.reload(); await page.getByLabel('Sync fault injection').selectOption('io');
 assert.equal((await state()).network, 'SYNC IO -1'); await shot('chat-sync-io');
+await page.goto(`${base}?language=fr`);
+await page.getByRole('button', { name: 'SHIFT + / = ?' }).click();
+const entry = page.getByLabel('Printable text');
+await entry.fill("'a'e"); await entry.dispatchEvent('input');
+assert.equal((await state()).draft, 'éàè');
+await shot('chat-french-accents');
 await browser.close();
 console.log('supachat_emulator_visual=PASS');

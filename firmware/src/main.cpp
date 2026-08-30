@@ -41,7 +41,7 @@ constexpr bool kFrenchUi = true;
 constexpr bool kFrenchUi = false;
 #endif
 const char *uiText(const char *english, const char *french) { return kFrenchUi ? french : english; }
-constexpr char kFirmwareVersion[] = "v0.43";
+constexpr char kFirmwareVersion[] = "v0.44";
 constexpr size_t kMessageLimit = 140;
 constexpr size_t kHistoryLimit = 100;
 constexpr uint32_t kToneIntervalMs = 40;
@@ -224,6 +224,7 @@ String walkieSpeaker;
 String currentSsid;
 String selectedSsid;
 String networkPassword;
+bool frenchGravePending = false;
 String voiceClientId;
 ScreenMode screenMode = ScreenMode::Chat;
 bool sdReady = false;
@@ -1196,6 +1197,9 @@ void drawHeader(const char *title) {
   }
 }
 
+size_t utf8CharacterCount(const String &text);
+String utf8Tail(const String &text, size_t maximumCharacters);
+
 void drawChat() {
   auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader("");
   int activeIndex = -1; for (int index = 0; index < static_cast<int>(rooms.size()); index++) if (rooms[index].id == currentRoomId) activeIndex = index;
@@ -1239,7 +1243,8 @@ void drawChat() {
   if (firstLine < static_cast<int>(lines.size())) lines[firstLine].showSender = true;
   int y = 24;
   for (int index = firstLine; index < static_cast<int>(lines.size()); index++) {
-    display.setFont(&fonts::Font2); display.setTextSize(1);
+    // Font2 only contains ASCII (32..127). Font0 covers Latin-1, including é/è/à.
+    display.setFont(&fonts::Font0); display.setTextSize(1.5f);
     const String prefix = lines[index].showSender ? lines[index].sender + ": " : "";
     const int x = lines[index].mine ? std::max(3, 237 - display.textWidth(prefix + lines[index].text)) : 3;
     display.setCursor(x, y);
@@ -1254,8 +1259,8 @@ void drawChat() {
   display.drawFastHLine(0, 106, 240, TFT_DARKGREY);
   display.setTextSize(1);
   display.setTextColor(TFT_YELLOW, TFT_BLACK); display.setCursor(3, 112); display.print("> ");
-  display.setTextColor(TFT_WHITE, TFT_BLACK); display.print(draft.substring(draft.length() > 34 ? draft.length() - 34 : 0));
-  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(198, 126); display.printf("%d/140", draft.length());
+  display.setTextColor(TFT_WHITE, TFT_BLACK); display.print(utf8Tail(draft, 34));
+  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(198, 126); display.printf("%d/140", utf8CharacterCount(draft));
 }
 
 const char *kMenuItemsEn[] = {"BACK TO CHAT", "ROOMS", "SYNC NOW", "VOICE MESSAGES", "VOLUME", "NETWORKS", "STATUS"};
@@ -1390,7 +1395,65 @@ bool navLeft() { return physicalKeyAt(10, 3); }
 bool navDown() { return physicalKeyAt(11, 3); }
 bool navRight() { return physicalKeyAt(12, 3); }
 
+size_t utf8CharacterCount(const String &text) {
+  size_t count = 0;
+  for (size_t index = 0; index < text.length(); index++)
+    if ((static_cast<uint8_t>(text[index]) & 0xC0) != 0x80) count++;
+  return count;
+}
+
+void removeLastUtf8Character(String &text) {
+  if (text.isEmpty()) return;
+  size_t index = text.length() - 1;
+  while (index > 0 && (static_cast<uint8_t>(text[index]) & 0xC0) == 0x80) index--;
+  text.remove(index);
+}
+
+String utf8Tail(const String &text, size_t maximumCharacters) {
+  size_t start = text.length();
+  size_t count = 0;
+  while (start > 0 && count < maximumCharacters) {
+    start--;
+    if ((static_cast<uint8_t>(text[start]) & 0xC0) != 0x80) count++;
+  }
+  return text.substring(start);
+}
+
+bool appendKeyboardText(String &target, const char *text, size_t limit, bool byteLimit) {
+  const size_t added = strlen(text);
+  if (byteLimit ? target.length() + added > limit : utf8CharacterCount(target) + 1 > limit) return false;
+  target += text;
+  return true;
+}
+
+void typeFrenchCharacter(String &target, char character, size_t limit, bool byteLimit) {
+  if (!kFrenchUi) {
+    const char text[] = {character, '\0'};
+    appendKeyboardText(target, text, limit, byteLimit);
+    return;
+  }
+  if (frenchGravePending) {
+    frenchGravePending = false;
+    if (character == 'a') { appendKeyboardText(target, u8"à", limit, byteLimit); return; }
+    if (character == 'e') { appendKeyboardText(target, u8"è", limit, byteLimit); return; }
+    appendKeyboardText(target, "'", limit, byteLimit);
+    typeFrenchCharacter(target, character, limit, byteLimit);
+    return;
+  }
+  if (character == '\'') { frenchGravePending = true; return; }
+  if (character == '?') { appendKeyboardText(target, u8"é", limit, byteLimit); return; }
+  const char text[] = {character, '\0'};
+  appendKeyboardText(target, text, limit, byteLimit);
+}
+
+void flushFrenchDeadKey(String &target, size_t limit, bool byteLimit) {
+  if (!frenchGravePending) return;
+  frenchGravePending = false;
+  appendKeyboardText(target, "'", limit, byteLimit);
+}
+
 void sendDraft() {
+  flushFrenchDeadKey(draft, kMessageLimit, false);
   draft.trim(); if (draft.isEmpty()) return;
   ChatMessage message; message.roomId = currentRoomId; message.clientId = nextClientId(); message.authorId = kDeviceId; message.authorName = kDeviceName;
   message.body = draft; message.createdAt = time(nullptr) * 1000LL; message.queued = true; message.state = "queued";
@@ -1519,12 +1582,16 @@ void handleKeyboard() {
     renderDirty = true; return;
   }
   if (screenMode == ScreenMode::NetworkPassword) {
-    if (goLeft) { screenMode = ScreenMode::Networks; networkPassword = ""; playNextTone(); renderDirty = true; return; }
+    if (goLeft) { frenchGravePending = false; screenMode = ScreenMode::Networks; networkPassword = ""; playNextTone(); renderDirty = true; return; }
     playNextTone();
-    if (keys.enter) { joinSelectedNetwork(); return; }
-    if (keys.del) { if (!networkPassword.isEmpty()) networkPassword.remove(networkPassword.length() - 1); }
-    if (keys.space && networkPassword.length() < 63) networkPassword += ' ';
-    for (const auto character : keys.word) if (networkPassword.length() < 63 && character >= 0x20 && character <= 0x7e) networkPassword += character;
+    if (keys.enter) { flushFrenchDeadKey(networkPassword, 63, true); joinSelectedNetwork(); return; }
+    if (keys.del) {
+      if (frenchGravePending) frenchGravePending = false;
+      else removeLastUtf8Character(networkPassword);
+    }
+    if (keys.space) typeFrenchCharacter(networkPassword, ' ', 63, true);
+    for (const auto character : keys.word)
+      if (character >= 0x20 && character <= 0x7e) typeFrenchCharacter(networkPassword, character, 63, true);
     renderDirty = true; return;
   }
   if (screenMode != ScreenMode::Chat) {
@@ -1542,9 +1609,14 @@ void handleKeyboard() {
   if (goRight) { switchRoom(1); playNextTone(); return; }
   playNextTone();
   if (keys.enter) { sendDraft(); return; }
-  if (keys.del) { if (!draft.isEmpty()) draft.remove(draft.length() - 1); renderDirty = true; return; }
-  if (keys.space && draft.length() < kMessageLimit) draft += ' ';
-  for (const auto character : keys.word) if (draft.length() < kMessageLimit && character >= 0x20 && character <= 0x7e) draft += character;
+  if (keys.del) {
+    if (frenchGravePending) frenchGravePending = false;
+    else removeLastUtf8Character(draft);
+    renderDirty = true; return;
+  }
+  if (keys.space) typeFrenchCharacter(draft, ' ', kMessageLimit, false);
+  for (const auto character : keys.word)
+    if (character >= 0x20 && character <= 0x7e) typeFrenchCharacter(draft, character, kMessageLimit, false);
   renderDirty = true;
 }
 }  // namespace

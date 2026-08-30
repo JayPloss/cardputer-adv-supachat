@@ -1,5 +1,5 @@
 import{SupaChatState,menuItems,networks}from'./state.mjs';
-const s=new SupaChatState(),c=document.querySelector('#screen'),x=c.getContext('2d');x.imageSmoothingEnabled=false;
+const language=new URLSearchParams(location.search).get('language')==='fr'?'fr':'en',s=new SupaChatState(language==='fr'?'Emmanuelle':'Albie',language),c=document.querySelector('#screen'),x=c.getContext('2d');x.imageSmoothingEnabled=false;
 const C={black:'#000',white:'#fff',green:'#62e86f',albie:'#7dd3fc',juju:'#ffad5c',papa:'#a7f070',theo:'#c4a7ff',josee:'#ff8fb8',emmanuelle:'#60e1e0',andrew:'#f4d35e',naomie:'#ff6b6b',yellow:'#ffd83d',red:'#ff4747',grey:'#59615d',dark:'#26302b',header:'#123b27'};
 function rect(a,b,w,h,color,r=0){x.fillStyle=color;r?round(a,b,w,h,r):x.fillRect(a,b,w,h)}function round(a,b,w,h,r){x.beginPath();x.roundRect(a,b,w,h,r);x.fill()}
 function text(v,a,b,color=C.white,size=8){x.fillStyle=color;x.font=`${size}px "Courier New",monospace`;x.textBaseline='top';x.fillText(String(v),a,b)}
@@ -14,7 +14,7 @@ function chat(){
   }
   let first=Math.max(0,lines.length-4);if(lines[first])lines[first].showSender=true;let y=24;
   for(const l of lines.slice(first)){x.font='13px "Courier New",monospace';const prefix=l.showSender?`${l.sender}: `:'';const px=l.mine?Math.max(3,237-x.measureText(prefix+l.v).width):3;if(l.showSender){text(l.sender,px,y,C[l.id]||C.white,13);const senderWidth=x.measureText(l.sender).width;text(`: ${l.v}`,px+senderWidth,y,C.white,13)}else text(l.v,px,y,C.white,13);y+=17}
-  rect(0,106,240,1,C.grey);text('> ',3,112,C.yellow);text(s.draft.slice(-34),15,112);text(`${s.draft.length}/140`,198,126,C.grey)
+  const draftCharacters=[...s.draft];rect(0,106,240,1,C.grey);text('> ',3,112,C.yellow);text(draftCharacters.slice(-34).join(''),15,112);text(`${draftCharacters.length}/140`,198,126,C.grey)
 }
 function menu(){header('MENU');menuItems.forEach((m,i)=>{const y=21+i*13,sel=i===s.menuSelection;rect(6,y,228,12,sel?C.green:C.dark,4);text(m,13,y+3,sel?C.black:C.white)});text('ARROWS MOVE       OK SELECT',6,117,C.grey)}
 function rooms(){header('ROOMS');s.rooms.forEach((m,i)=>{const y=22+i*15,sel=i===s.roomSelection;rect(6,y,228,13,sel?C.green:C.dark,3);text(m,12,y+3,sel?C.black:C.white)});text('UP/DOWN CHOOSE    ENTER OPEN',6,123,C.grey)}

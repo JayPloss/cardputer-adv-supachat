@@ -4,6 +4,7 @@ import tls from 'node:tls';
 
 const firmware = fs.readFileSync(new URL('../firmware/src/main.cpp', import.meta.url), 'utf8');
 const songHeader = fs.readFileSync(new URL('../firmware/include/keypress_song.h', import.meta.url), 'utf8');
+const installedFonts = fs.readFileSync(new URL('../firmware/.pio/libdeps/emmanuelle/M5GFX/src/lgfx/v1/lgfx_fonts.cpp', import.meta.url), 'utf8');
 const pinMatch = firmware.match(/kTlsFingerprint\[\] = "([0-9A-Fa-f :]+)"/);
 assert.ok(pinMatch, 'firmware TLS pin is missing');
 
@@ -68,6 +69,16 @@ const shiftedSlash = { shift: true, word: ['?'], physicalRight: true };
 const navigationChord = !(shiftedSlash.shift || false);
 assert.equal(navigationChord && shiftedSlash.physicalRight, false);
 assert.equal(shiftedSlash.word[0], '?');
+assert.match(firmware, /if \(character == '\?'\) \{ appendKeyboardText\(target, u8"é"/,
+  'French Shift+/ must emit é directly');
+assert.match(firmware, /if \(character == '\\'\'\) \{ frenchGravePending = true; return; \}/,
+  'French apostrophe must wait for its composition key');
+assert.match(firmware, /character == 'a'[\s\S]*u8"à"[\s\S]*character == 'e'[\s\S]*u8"è"/,
+  'French dead-key composition must emit à and è');
+assert.match(installedFonts, /font0_info\[\].*\{\s*0,\s*255,\s*5\s*\}/,
+  'the installed M5GFX Font0 must cover Latin-1 code points');
+assert.match(firmware, /Font2 only contains ASCII[\s\S]*setFont\(&fonts::Font0\); display\.setTextSize\(1\.5f\)/,
+  'chat messages must use the installed Latin-1-capable font');
 
 const bootStep = Number(firmware.match(/kBootTuneStepMs = (\d+)/)[1]);
 const bootTuneBody = firmware.match(/kBootTuneFrequencies\[\] = \{([\s\S]*?)\};/)[1];
