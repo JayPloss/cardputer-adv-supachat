@@ -179,8 +179,8 @@ with transaction.atomic():
         defaults={
             "default": False,
             "branding_title": "SupaChat",
-            "branding_logo": "https://auth.supachat.net/media/public/branding/supachat-logo.png",
-            "branding_favicon": "https://auth.supachat.net/media/public/branding/supachat-logo.png",
+            "branding_logo": "https://supachat.net/supachat-logo.png",
+            "branding_favicon": "https://supachat.net/supachat-logo.png",
             "branding_custom_css": SUPACHAT_CSS,
             "branding_default_flow_background": default_brand.branding_default_flow_background,
             "flow_authentication": default_brand.flow_authentication,

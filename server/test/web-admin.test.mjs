@@ -57,7 +57,7 @@ test('newly enrolled users receive a one-time welcome modal', () => {
 
 test('Authentik is SupaChat branded and room authorization stays out of identity groups', () => {
   assert.match(authentikConfig, /content: "Powered by Authentik"/);
-  assert.match(authentikConfig, /branding_logo.*auth\.supachat\.net\/media\/public\/branding\/supachat-logo\.png/);
+  assert.match(authentikConfig, /branding_logo.*https:\/\/supachat\.net\/supachat-logo\.png/);
   assert.doesNotMatch(authentikConfig, /get_or_create\(name="SupaChat (?:Family|K-BUDS|Wolfpack)"/);
   assert.match(authentikConfig, /user\.groups\.add\(group\)/);
 });
