@@ -2,7 +2,8 @@ param(
     [string]$Port = 'COM4',
     [ValidateSet('albie', 'juju', 'papa', 'emmanuelle', 'naomie', 'andrew')][string]$DeviceKey = 'albie',
     [string]$CredentialsFile = 'C:\Users\PC\OneDrive - Plossco\00_Jay-VSCode-Assets\Assets\projects\assets-cardputer-adv-supachat\private\supachat-credentials.json',
-    [string]$Python = 'C:\dev\repos\personal-projects\milffinder-field-control\.venv\Scripts\python.exe'
+    [string]$Python = 'C:\dev\repos\personal-projects\milffinder-field-control\.venv\Scripts\python.exe',
+    [int]$Baud = 460800
 )
 
 $ErrorActionPreference = 'Stop'
@@ -76,7 +77,7 @@ try {
     if ((Get-Item -LiteralPath $binaryPath).Length -ne 0x5000) { throw 'Generated NVS partition has the wrong size.' }
 
     Invoke-CheckedProcess -FilePath $Python -Arguments @(
-        $esptool, '--chip', 'esp32s3', '--port', $Port, '--baud', '921600',
+        $esptool, '--chip', 'esp32s3', '--port', $Port, '--baud', $Baud.ToString(),
         '--before', 'default_reset', '--after', 'hard_reset', 'write_flash', '0x9000', $binaryPath
     ) -FailureMessage "$DeviceKey NVS flash failed."
 
