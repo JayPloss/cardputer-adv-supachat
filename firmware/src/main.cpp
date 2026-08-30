@@ -753,7 +753,16 @@ void onEspNowReceive(const uint8_t *, const uint8_t *data, int length) {
   } else if (packet->type == static_cast<uint8_t>(EspNowType::Text) && packet->payloadLength > 0) {
     ChatMessage message; message.roomId = currentRoomId; message.clientId = packet->clientId; message.authorId = packet->senderId; message.authorName = packet->senderName;
     message.body = String(reinterpret_cast<const char *>(plain.data())).substring(0, plain.size()); message.state = "nearby";
-    if (stateMutex) { xSemaphoreTake(stateMutex, portMAX_DELAY); if (std::none_of(messages.begin(), messages.end(), [&](const ChatMessage &item){ return item.clientId == message.clientId; })) messages.push_back(message); xSemaphoreGive(stateMutex); renderDirty = true; }
+    if (stateMutex) {
+      bool inserted = false;
+      xSemaphoreTake(stateMutex, portMAX_DELAY);
+      if (std::none_of(messages.begin(), messages.end(), [&](const ChatMessage &item){ return item.clientId == message.clientId; })) {
+        messages.push_back(message); trimHistory(); saveHistoryLocked(); inserted = true;
+      }
+      xSemaphoreGive(stateMutex);
+      if (inserted) messageNotificationPending = true;
+      renderDirty = true;
+    }
   }
 }
 
@@ -1079,8 +1088,13 @@ void synchronize() {
   }
   sendQueuedMessages();
   String response; int status = 0;
-  const String path = "/api/device/sync?after=" + String(lastServerId) + "&receipts_after=" + String(lastReceiptAt)
-      + "&limit=" + String(kSyncBatchLimit) + "&wait=0&room=" + currentRoomId;
+  // Every boot and room switch explicitly hydrates the latest complete room
+  // history. A cursor from SD is only an optimization after hydration; it must
+  // never make an empty or partial local cache look authoritative.
+  const int64_t syncAfter = initialSyncComplete ? lastServerId : 0;
+  const size_t syncLimit = initialSyncComplete ? kSyncBatchLimit : kHistoryLimit;
+  const String path = "/api/device/sync?after=" + String(syncAfter) + "&receipts_after=" + String(lastReceiptAt)
+      + "&limit=" + String(syncLimit) + "&wait=0&room=" + currentRoomId;
   if (!requestJson(path, "GET", "", response, status)) {
     networkStatus = "SYNC IO " + String(status);
     Serial.printf("sync transport error=%d heap=%u\n", status, ESP.getFreeHeap()); renderDirty = true; return;
@@ -1107,7 +1121,9 @@ void synchronize() {
     }
   }
   saveHistoryLocked(); xSemaphoreGive(stateMutex);
-  if (!newlyRead.empty()) messageNotificationPending = true;
+  // Initial history hydration is silent. Only messages arriving after the
+  // current room is fully loaded are notifications.
+  if (initialSyncComplete && !newlyRead.empty()) messageNotificationPending = true;
   for (const int64_t id : newlyRead) if (id > 0) postReadReceipt(id);
   networkStatus = "SYNCED"; renderDirty = true;
   initialSyncComplete = true;
@@ -1439,7 +1455,7 @@ void selectRoom(int next) {
   xSemaphoreTake(stateMutex, portMAX_DELAY);
   saveHistoryLocked();
   currentRoomId = rooms[next].id; currentRoomName = rooms[next].name; roomSelection = next;
-  messages.clear(); lastServerId = 0; lastReceiptAt = 0; historyOffset = 0; syncOverride = true;
+  messages.clear(); lastServerId = 0; lastReceiptAt = 0; historyOffset = 0; initialSyncComplete = false; syncOverride = true;
   loadHistory();
   xSemaphoreGive(stateMutex);
   walkieSocket.disconnect(); walkieInitialized = false; networkStatus = "SWITCHING"; renderDirty = true;

@@ -19,5 +19,10 @@ assert.match(firmware,/roomHistoryPath\(currentRoomId/);assert.match(firmware,/m
 const pin=firmware.match(/kTlsFingerprint\[\] = "([0-9A-F ]+)"/)[1].replaceAll(' ','');assert.equal(pin.length,64);assert.match(firmware,/navigationChord = !\(keys\.shift \|\| keys\.ctrl/);assert.match(firmware,/menuSelection = \(menuSelection \+ 1\) % 7/);assert.match(firmware,/kEspNowEnabled = true/);
 assert.match(firmware,/kDefaultRoomId\[\] = "wolfpack"/);assert.match(firmware,/String currentRoomId = kDefaultRoomId/);
 assert.match(firmware,/char roomId\[9\]/);assert.match(firmware,/String\(packet->roomId\) != currentRoomId/);
+assert.match(firmware,/const int64_t syncAfter = initialSyncComplete \? lastServerId : 0/);
+assert.match(firmware,/const size_t syncLimit = initialSyncComplete \? kSyncBatchLimit : kHistoryLimit/);
+assert.match(firmware,/initialSyncComplete = false; syncOverride = true/);
+assert.match(firmware,/if \(inserted\) messageNotificationPending = true/);
+assert.match(firmware,/trimHistory\(\); saveHistoryLocked\(\); inserted = true/);
 assert.match(firmware,/esp_wifi_set_channel\(kEspNowFallbackChannel, WIFI_SECOND_CHAN_NONE\)/);
 console.log('supachat_emulator_flow=PASS');

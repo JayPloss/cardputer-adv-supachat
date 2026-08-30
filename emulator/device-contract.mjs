@@ -112,8 +112,12 @@ const keypressNotes = new Set(keypressSequence);
 assert.equal(notificationNotes.some(note => keypressNotes.has(note)), false,
   'received-message motif must use pitches distinct from the keypress melody');
 const syncFunction = firmware.slice(firmware.indexOf('void synchronize()'), firmware.indexOf('void networkTask'));
-assert.match(syncFunction, /if \(!newlyRead\.empty\(\)\) messageNotificationPending = true/,
-  'only a nonempty incoming-message batch should request the motif');
+assert.match(syncFunction, /if \(initialSyncComplete && !newlyRead\.empty\(\)\) messageNotificationPending = true/,
+  'only a nonempty post-hydration incoming-message batch should request the motif');
+assert.match(syncFunction, /const int64_t syncAfter = initialSyncComplete \? lastServerId : 0/,
+  'boot and room-switch hydration must not trust a stale local cursor');
+assert.match(syncFunction, /const size_t syncLimit = initialSyncComplete \? kSyncBatchLimit : kHistoryLimit/,
+  'initial hydration must request the complete retained history window');
 assert.doesNotMatch(syncFunction, /downloadVoiceClip/,
   'received voice messages must never auto-download or auto-play');
 
@@ -128,8 +132,8 @@ assert.match(networkFunction, /voiceDownloadRequestedId[\s\S]*downloadVoiceClip\
   'manual voice playback requests must run before the next sync poll');
 assert.equal(Number(firmware.match(/kSyncBatchLimit = (\d+)/)[1]), 20,
   'device sync pages must stay small enough for a no-PSRAM Cardputer');
-assert.match(syncFunction, /&limit=" \+ String\(kSyncBatchLimit\)/,
-  'firmware must request the bounded production sync page');
+assert.match(syncFunction, /&limit=" \+ String\(syncLimit\)/,
+  'firmware must request the bounded hydration or incremental sync page');
 
 // M5Unified maps Cardputer ADV battery sensing to GPIO10 ADC. A stateful SOC
 // estimate must reject a momentary rebound but respond substantially to a
