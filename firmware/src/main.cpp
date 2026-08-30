@@ -44,7 +44,7 @@ constexpr bool kBuildFrenchDefault = false;
 bool frenchUi = kBuildFrenchDefault;
 String languageOverride = "auto";
 const char *uiText(const char *english, const char *french) { return frenchUi ? french : english; }
-constexpr char kFirmwareVersion[] = "v0.47";
+constexpr char kFirmwareVersion[] = "v0.48";
 constexpr size_t kMessageLimit = 140;
 constexpr size_t kHistoryLimit = 100;
 constexpr uint32_t kToneIntervalMs = 40;
@@ -58,9 +58,10 @@ constexpr uint32_t kSyncPollMs = 3000;
 constexpr uint32_t kBatterySampleMs = 1000;
 constexpr uint32_t kBatteryRiseStepMs = 180000;
 constexpr uint32_t kBatteryFastRiseStepMs = 10000;
-constexpr uint32_t kPowerEdgeWindowMs = 6000;
-constexpr int kPowerConnectRiseMv = 40;
-constexpr int kPowerDisconnectFallMv = 30;
+constexpr uint32_t kPowerIdleAfterInputMs = 5000;
+constexpr size_t kPowerTrendSamples = 6;
+constexpr int kPowerTrendMinimumRiseMv = 15;
+constexpr int kPowerTrendNoiseToleranceMv = 3;
 constexpr uint32_t kBatteryFallStepMs = 90000;
 constexpr uint32_t kBatteryPersistMs = 300000;
 constexpr int kSyncBatchLimit = 20;
@@ -200,7 +201,7 @@ uint32_t participantColour(const String &authorId, const String &authorName = ""
   return TFT_WHITE;
 }
 
-enum class ScreenMode { Chat, Menu, Rooms, Volume, Language, Changelog, Walkie, Status, Networks, NetworkPassword };
+enum class ScreenMode { Chat, Menu, Rooms, Volume, Language, Changelog, VoiceMessages, Walkie, Status, Networks, NetworkPassword };
 
 Preferences preferences;
 M5Canvas uiCanvas(&M5Cardputer.Display);
@@ -244,6 +245,7 @@ bool voiceRecording = false;
 bool voiceClipReady = false;
 bool voiceUploadPending = false;
 bool retainCurrentVoice = false;
+bool voiceLiveMode = false;
 bool voiceUsesSd = false;
 bool localReplayActive = false;
 bool spacePttHeld = false;
@@ -262,10 +264,11 @@ volatile bool voiceDownloadActive = false;
 int64_t voicePlayingMessageId = 0;
 int voiceInboxSelection = 0;
 constexpr int kMenuPageCount = 2;
-constexpr int kMenuItemsPerPage = 5;
+constexpr int kMenuItemsPerPage = 6;
 int menuPage = 0;
 int menuSelections[kMenuPageCount] = {0, 0};
 int changelogSelection = 0;
+int changelogLineOffset = 0;
 volatile bool localOnlyMode = false;
 volatile bool wifiResumeRequested = false;
 int roomSelection = 0;
@@ -282,11 +285,11 @@ uint32_t lastBatteryAdjustAt = 0;
 uint32_t lastBatteryPersistAt = 0;
 uint32_t lastClockCheckAt = 0;
 int lastClockMinute = -1;
-uint32_t batteryEdgeStartedAt = 0;
-int batteryEdgeBaselineMv = 0;
-int batteryPreviousMv = 0;
-bool externalPowerDetected = false;
 int persistedBatteryLevel = -1;
+uint32_t lastUserInputAt = 0;
+std::array<int, kPowerTrendSamples> powerTrendVoltages{};
+size_t powerTrendCount = 0;
+bool externalPowerDetected = false;
 
 void serviceMessageNotification();
 uint32_t lastToneAt = 0;
@@ -577,15 +580,16 @@ void processVoiceBlock(const int16_t *samples) {
       voiceSampleCount += kVoiceCaptureBlock;
     }
   }
-  if (walkieGranted && walkieConnected)
+  if (voiceLiveMode && walkieGranted && walkieConnected)
     walkieSocket.sendBIN(reinterpret_cast<const uint8_t *>(samples), kVoiceCaptureBlock * sizeof(int16_t));
-  if (kEspNowEnabled && !walkieConnected) sendEspNowAudio(samples, kVoiceCaptureBlock);
+  if (voiceLiveMode && kEspNowEnabled && !walkieConnected) sendEspNowAudio(samples, kVoiceCaptureBlock);
   voiceCapturedTotal += kVoiceCaptureBlock;
 }
 
 void startVoiceRecording() {
   if (voiceRecording || audioPlaying) return;
-  retainCurrentVoice = !voiceUploadPending;
+  voiceLiveMode = screenMode == ScreenMode::Walkie;
+  retainCurrentVoice = !voiceLiveMode && !voiceUploadPending;
   if (retainCurrentVoice) {
     voiceSampleCount = 0; voiceClipReady = false; voiceUsesSd = false;
     if (sdReady) {
@@ -609,7 +613,7 @@ void startVoiceRecording() {
     walkieStatus = "MIC START FAILED"; retainCurrentVoice = false; renderDirty = true; return;
   }
   voiceRecording = true; voiceStartedAt = millis(); walkieStatus = "RECORDING"; renderDirty = true;
-  if (walkieConnected) walkieSocket.sendTXT("{\"type\":\"ptt_start\"}");
+  if (voiceLiveMode && walkieConnected) walkieSocket.sendTXT("{\"type\":\"ptt_start\"}");
 }
 
 void stopVoiceRecording() {
@@ -633,9 +637,10 @@ void stopVoiceRecording() {
     if (voiceUploadPending) voiceClientId = nextClientId();
   }
   walkieGranted = false;
-  if (walkieConnected) walkieSocket.sendTXT("{\"type\":\"ptt_stop\"}");
-  walkieStatus = retainCurrentVoice && voiceClipReady ? "RECORDED - ENTER PLAYS" :
-      (voiceUploadPending ? "LIVE - LAST CLIP QUEUED" : "READY");
+  if (voiceLiveMode && walkieConnected) walkieSocket.sendTXT("{\"type\":\"ptt_stop\"}");
+  walkieStatus = voiceLiveMode ? "READY TO TALK" :
+      (retainCurrentVoice && voiceClipReady ? "RECORDED - ENTER PLAYS" :
+      (voiceUploadPending ? "LAST MESSAGE QUEUED" : "READY"));
   renderDirty = true;
 }
 
@@ -889,27 +894,27 @@ void sampleBattery(bool force = false) {
   if (batteryFilteredMv <= 0.0f) batteryFilteredMv = nextVoltage;
   else batteryFilteredMv += (nextVoltage - batteryFilteredMv) * 0.12f;
 
-  // Cable presence is an edge detector, independent of the slower SOC model.
-  // Two directional samples plus a substantial raw-voltage edge reject ADC
-  // noise while recognizing a newly connected cable in only a few seconds.
-  if (batteryEdgeBaselineMv == 0) {
-    batteryEdgeBaselineMv = batteryPreviousMv = nextVoltage;
-    batteryEdgeStartedAt = now;
+  // Cardputer ADV exposes no direct VBUS signal. Only claim charging when an
+  // idle device shows a sustained upward voltage trend. User activity changes
+  // load, so discard the trend window instead of classifying those samples.
+  if (now - lastUserInputAt < kPowerIdleAfterInputMs) {
+    powerTrendCount = 0;
   } else {
-    if (!externalPowerDetected && nextVoltage - batteryEdgeBaselineMv >= kPowerConnectRiseMv) {
-      externalPowerDetected = true;
-      lastBatteryAdjustAt = now - kBatteryFastRiseStepMs;
-      renderDirty = true;
-    } else if (externalPowerDetected && batteryPreviousMv - nextVoltage >= kPowerDisconnectFallMv) {
-      externalPowerDetected = false;
-      batteryEdgeBaselineMv = nextVoltage;
-      batteryEdgeStartedAt = now;
-      renderDirty = true;
-    } else if (!externalPowerDetected && now - batteryEdgeStartedAt >= kPowerEdgeWindowMs) {
-      batteryEdgeBaselineMv = nextVoltage;
-      batteryEdgeStartedAt = now;
+    if (powerTrendCount < kPowerTrendSamples) powerTrendVoltages[powerTrendCount++] = nextVoltage;
+    else {
+      std::move(powerTrendVoltages.begin() + 1, powerTrendVoltages.end(), powerTrendVoltages.begin());
+      powerTrendVoltages.back() = nextVoltage;
     }
-    batteryPreviousMv = nextVoltage;
+    if (powerTrendCount == kPowerTrendSamples) {
+      bool steadilyRising = powerTrendVoltages.back() - powerTrendVoltages.front() >= kPowerTrendMinimumRiseMv;
+      for (size_t index = 1; index < powerTrendVoltages.size() && steadilyRising; index++)
+        steadilyRising = powerTrendVoltages[index] + kPowerTrendNoiseToleranceMv >= powerTrendVoltages[index - 1];
+      if (steadilyRising != externalPowerDetected) {
+        externalPowerDetected = steadilyRising;
+        if (steadilyRising) lastBatteryAdjustAt = now - kBatteryFastRiseStepMs;
+        renderDirty = true;
+      }
+    }
   }
 
   // Approximate a single-cell LiPo's nonlinear resting-voltage curve. The
@@ -1125,7 +1130,19 @@ void synchronize() {
     networkStatus = "SYNC HTTP " + String(status);
     Serial.printf("sync http status=%d body=%s\n", status, response.substring(0, 80).c_str()); renderDirty = true; return;
   }
-  JsonDocument document; if (deserializeJson(document, response)) { networkStatus = "BAD DATA"; renderDirty = true; return; }
+  // ArduinoJson treats String input as read-only and duplicates every parsed
+  // string. The mutable buffer selects zero-copy mode, preserving enough heap
+  // for the complete 100-message retained-history hydration.
+  JsonDocument document;
+  const DeserializationError jsonError = response.isEmpty()
+      ? DeserializationError(DeserializationError::EmptyInput)
+      : deserializeJson(document, &response[0], response.length());
+  if (jsonError) {
+    networkStatus = jsonError == DeserializationError::NoMemory ? "JSON MEMORY" : "BAD JSON";
+    Serial.printf("sync json error=%s bytes=%u heap=%u prefix=%s\n", jsonError.c_str(), response.length(),
+                  ESP.getFreeHeap(), response.substring(0, 48).c_str());
+    renderDirty = true; return;
+  }
   std::vector<int64_t> newlyRead;
   xSemaphoreTake(stateMutex, portMAX_DELAY);
   for (JsonObjectConst object : document["messages"].as<JsonArrayConst>()) {
@@ -1183,7 +1200,7 @@ void networkTask(void *) {
     }
     synchronize();
     if (voiceUploadPending && !localReplayActive) uploadVoiceClip();
-    if (syncOverride) { syncOverride = false; WiFi.disconnect(true, false); nextWifiAttempt = millis() + 60000; }
+    if (syncOverride) syncOverride = false;
     vTaskDelay(pdMS_TO_TICKS(kSyncPollMs));
   }
 }
@@ -1211,8 +1228,8 @@ void drawHeader(const char *title) {
   if (!keyboardReady) { display.setTextColor(TFT_RED, TFT_DARKGREEN); display.setCursor(88, 6); display.print("K!"); }
   display.setCursor(106, 6); display.print(networkStatus.substring(0, 10));
   const String batteryText = batteryLevel < 0 ? String("?%") : String(batteryLevel) + "%";
-  display.setTextSize(1.5f); display.setTextColor(TFT_WHITE, TFT_DARKGREEN);
-  display.setCursor(237 - static_cast<int>(batteryText.length()) * 9, 4);
+  display.setTextSize(1); display.setTextColor(TFT_WHITE, TFT_DARKGREEN);
+  display.setCursor(237 - static_cast<int>(batteryText.length()) * 6, 6);
   display.print(batteryText); display.setTextSize(1);
   if (externalPowerDetected) {
     display.fillTriangle(199, 2, 194, 10, 199, 10, TFT_YELLOW);
@@ -1287,18 +1304,19 @@ void drawChat() {
   display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(198, 126); display.printf("%d/140", utf8CharacterCount(draft));
 }
 
-const char *kMenuItemsEn[] = {"BACK TO CHAT", "ROOMS", "SYNC NOW", "VOICE MESSAGES", "VOLUME", "LANGUAGE", "NETWORKS", "ESP-NOW LOCAL", "STATUS", "CHANGELOG"};
-const char *kMenuItemsFr[] = {"RETOUR CHAT", "SALONS", "SYNCHRO", "MESSAGES VOCAUX", "VOLUME", "LANGUE", "RESEAUX", "ESP-NOW LOCAL", "ETAT", "CHANGEMENTS"};
+const char *kMenuItemsEn[] = {"BACK TO CHAT", "ROOMS", "SYNC NOW", "VOICE MESSAGES", "WALKIE-TALKIE", "VOLUME", "LANGUAGE", "NETWORKS", "ESP-NOW LOCAL", "STATUS", "CHANGELOG"};
+const char *kMenuItemsFr[] = {"RETOUR CHAT", "SALONS", "SYNCHRO", "MESSAGES VOCAUX", "WALKIE-TALKIE", "VOLUME", "LANGUE", "RESEAUX", "ESP-NOW LOCAL", "ETAT", "CHANGEMENTS"};
+constexpr int kMenuItemCounts[kMenuPageCount] = {6, 5};
 void drawMenu() {
   auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader("MENU");
   display.setTextSize(1); display.setTextColor(TFT_YELLOW, TFT_DARKGREEN); display.setCursor(78, 6); display.printf("%d/%d", menuPage + 1, kMenuPageCount);
-  for (int row = 0; row < kMenuItemsPerPage; row++) {
+  for (int row = 0; row < kMenuItemCounts[menuPage]; row++) {
     const int index = menuPage * kMenuItemsPerPage + row;
-    const int y = 22 + row * 16; const bool selected = row == menuSelections[menuPage];
-    display.fillRoundRect(6, y, 228, 14, 3, selected ? TFT_GREEN : TFT_DARKGREY);
+    const int y = 21 + row * 14; const bool selected = row == menuSelections[menuPage];
+    display.fillRoundRect(6, y, 228, 12, 3, selected ? TFT_GREEN : TFT_DARKGREY);
     display.setTextColor(selected ? TFT_BLACK : TFT_WHITE, selected ? TFT_GREEN : TFT_DARKGREY);
-    display.setCursor(13, y + 4); display.print(frenchUi ? kMenuItemsFr[index] : kMenuItemsEn[index]);
-    if (index == 7) { display.setCursor(184, y + 4); display.print(localOnlyMode ? "ON" : "OFF"); }
+    display.setCursor(13, y + 3); display.print(frenchUi ? kMenuItemsFr[index] : kMenuItemsEn[index]);
+    if (index == 8) { display.setCursor(184, y + 3); display.print(localOnlyMode ? "ON" : "OFF"); }
   }
   display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 110); display.print(uiText("LEFT/RIGHT PAGE", "GAUCHE/DROITE PAGE"));
   display.setCursor(6, 122); display.print(uiText("UP/DOWN MOVE      ENTER OPEN", "HAUT/BAS BOUGER   ENTER OUVRIR"));
@@ -1317,12 +1335,20 @@ void drawRooms() {
 }
 
 void drawWalkie() {
-  auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader(uiText("VOICE", "VOCAL"));
+  auto &display = uiCanvas; display.fillScreen(TFT_BLACK);
+  const bool liveMode = screenMode == ScreenMode::Walkie;
+  drawHeader(liveMode ? "WALKIE" : uiText("VOICE MESSAGES", "MESSAGES VOCAUX"));
   if (voiceRecording) {
-    display.setTextSize(2); display.setTextColor(TFT_RED, TFT_BLACK); display.setCursor(12, 32); display.print(uiText("RECORDING", "ENREGISTRE"));
+    display.setTextSize(2); display.setTextColor(TFT_RED, TFT_BLACK); display.setCursor(12, 32);
+    display.print(liveMode ? uiText("TRANSMITTING", "TRANSMISSION") : uiText("RECORDING", "ENREGISTRE"));
     display.setTextSize(1); display.setTextColor(TFT_WHITE, TFT_BLACK); display.setCursor(12, 62);
     display.printf("%u.%us / 30s", voiceCapturedTotal / kVoiceSampleRate,
                    (voiceCapturedTotal % kVoiceSampleRate) * 10 / kVoiceSampleRate);
+  } else if (liveMode) {
+    display.setTextSize(2); display.setTextColor(TFT_GREEN, TFT_BLACK); display.setCursor(31, 39);
+    display.print(uiText("READY TO TALK", "PRET A PARLER"));
+    display.setTextSize(1); display.setTextColor(TFT_YELLOW, TFT_BLACK); display.setCursor(7, 78);
+    display.print(walkieStatus.substring(0, 35));
   } else {
     const auto inbox = voiceInbox();
     if (inbox.empty()) { display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(12, 42); display.print(uiText("No voice messages yet", "Aucun message vocal")); }
@@ -1339,8 +1365,13 @@ void drawWalkie() {
     display.setTextColor(TFT_YELLOW, TFT_BLACK); display.setCursor(7, 94); display.print(walkieStatus.substring(0, 35));
   }
   display.setTextSize(1); display.setTextColor(TFT_DARKGREY, TFT_BLACK);
-  display.setCursor(6, 111); display.print(uiText("UP/DOWN CHOOSE  ENTER PLAY/STOP", "HAUT/BAS CHOISIR ENTER ECOUTER"));
-  display.setCursor(6, 123); display.print(uiText("HOLD SPACE RECORD   LEFT MENU", "TENIR ESPACE ENREG. GAUCHE MENU"));
+  if (!liveMode) {
+    display.setCursor(6, 111); display.print(uiText("UP/DOWN CHOOSE  ENTER PLAY/STOP", "HAUT/BAS CHOISIR ENTER ECOUTER"));
+    display.setCursor(6, 123); display.print(uiText("HOLD SPACE RECORD   MENU BACK", "TENIR ESPACE ENREG. MENU RETOUR"));
+  } else {
+    display.setCursor(6, 111); display.print(uiText("HOLD SPACE: PUSH TO TALK", "TENIR ESPACE: PARLER"));
+    display.setCursor(6, 123); display.print(uiText("RELEASE: STOP       MENU BACK", "RELACHER: FIN       MENU RETOUR"));
+  }
 }
 
 void drawVolume() {
@@ -1400,7 +1431,7 @@ void drawChangelog();
 void render() {
   if (screenMode == ScreenMode::Chat) drawChat(); else if (screenMode == ScreenMode::Menu) drawMenu(); else if (screenMode == ScreenMode::Rooms) drawRooms();
   else if (screenMode == ScreenMode::Volume) drawVolume(); else if (screenMode == ScreenMode::Language) drawLanguage(); else if (screenMode == ScreenMode::Changelog) drawChangelog();
-  else if (screenMode == ScreenMode::Walkie) drawWalkie();
+  else if (screenMode == ScreenMode::VoiceMessages || screenMode == ScreenMode::Walkie) drawWalkie();
   else if (screenMode == ScreenMode::Status) drawStatus();
   else if (screenMode == ScreenMode::NetworkPassword) drawNetworkPassword(); else drawNetworks();
   if (uiCanvasReady) uiCanvas.pushSprite(0, 0);
@@ -1461,10 +1492,14 @@ void drawChangelog() {
   const auto &entry = kSupaChatChangelog[changelogSelection];
   display.setTextSize(2); display.setTextColor(TFT_YELLOW, TFT_BLACK); display.setCursor(8, 25); display.print(entry.version);
   display.setTextSize(1); display.setTextColor(TFT_WHITE, TFT_BLACK);
-  for (int line = 0; line < 4; line++) { display.setCursor(12, 49 + line * 13); display.print("- "); display.print(entry.lines[line]); }
+  changelogLineOffset = std::max(0, std::min(changelogLineOffset, std::max(0, entry.lineCount - 4)));
+  for (int row = 0; row < 4 && changelogLineOffset + row < entry.lineCount; row++) {
+    display.setCursor(12, 49 + row * 13); display.print("- "); display.print(entry.lines[changelogLineOffset + row]);
+  }
   display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 110);
-  display.printf("%d/%d  %s", changelogSelection + 1, kSupaChatChangelogCount, uiText("UP/DOWN BUILDS", "HAUT/BAS VERSIONS"));
-  display.setCursor(6, 122); display.print(uiText("LEFT / ENTER BACK", "GAUCHE / ENTER RETOUR"));
+  display.printf("%d/%d  %d-%d/%d", changelogSelection + 1, kSupaChatChangelogCount,
+                 changelogLineOffset + 1, std::min(changelogLineOffset + 4, entry.lineCount), entry.lineCount);
+  display.setCursor(6, 122); display.print(uiText("UP/DOWN SCROLL LEFT/RIGHT BUILD", "HAUT/BAS DEFIL. GAUCHE/DROITE VER."));
 }
 
 void applyEffectiveLanguage() {
@@ -1617,12 +1652,13 @@ void openSelectedMenuItem() {
   if (selection == 0) screenMode = ScreenMode::Chat;
   else if (selection == 1) screenMode = ScreenMode::Rooms;
   else if (selection == 2) { if (!localOnlyMode) syncOverride = true; networkStatus = localOnlyMode ? "ESPNOW LOCAL" : "SYNC REQUESTED"; screenMode = ScreenMode::Chat; }
-  else if (selection == 3) { screenMode = ScreenMode::Walkie; walkieStatus = localOnlyMode ? "ESPNOW LOCAL" : "READY"; }
-  else if (selection == 4) screenMode = ScreenMode::Volume;
-  else if (selection == 5) screenMode = ScreenMode::Language;
-  else if (selection == 6) { if (!localOnlyMode) { screenMode = ScreenMode::Networks; scanForNetworks(); } }
-  else if (selection == 7) setLocalOnlyMode(!localOnlyMode);
-  else if (selection == 8) screenMode = ScreenMode::Status;
+  else if (selection == 3) { screenMode = ScreenMode::VoiceMessages; walkieStatus = "READY"; }
+  else if (selection == 4) { screenMode = ScreenMode::Walkie; walkieStatus = localOnlyMode ? "ESPNOW LOCAL" : "READY TO TALK"; }
+  else if (selection == 5) screenMode = ScreenMode::Volume;
+  else if (selection == 6) screenMode = ScreenMode::Language;
+  else if (selection == 7) { if (!localOnlyMode) { screenMode = ScreenMode::Networks; scanForNetworks(); } }
+  else if (selection == 8) setLocalOnlyMode(!localOnlyMode);
+  else if (selection == 9) screenMode = ScreenMode::Status;
   else screenMode = ScreenMode::Changelog;
   renderDirty = true;
 }
@@ -1660,8 +1696,9 @@ void handleKeyboard() {
   const bool goLeft = navigationChord && navLeft();
   const bool goRight = navigationChord && navRight();
   if (screenMode == ScreenMode::Menu) {
-    if (goUp) { menuSelections[menuPage] = (menuSelections[menuPage] + kMenuItemsPerPage - 1) % kMenuItemsPerPage; playNextTone(); }
-    else if (goDown) { menuSelections[menuPage] = (menuSelections[menuPage] + 1) % kMenuItemsPerPage; playNextTone(); }
+    const int pageItems = kMenuItemCounts[menuPage];
+    if (goUp) { menuSelections[menuPage] = (menuSelections[menuPage] + pageItems - 1) % pageItems; playNextTone(); }
+    else if (goDown) { menuSelections[menuPage] = (menuSelections[menuPage] + 1) % pageItems; playNextTone(); }
     else if (goLeft) { menuPage = (menuPage + kMenuPageCount - 1) % kMenuPageCount; playNextTone(); }
     else if (goRight) { menuPage = (menuPage + 1) % kMenuPageCount; playNextTone(); }
     else if (keys.enter) { openSelectedMenuItem(); playNextTone(); }
@@ -1680,11 +1717,10 @@ void handleKeyboard() {
     else if (keys.enter) screenMode = ScreenMode::Menu;
     renderDirty = true; return;
   }
-  if (screenMode == ScreenMode::Walkie) {
-    if (goLeft) { screenMode = ScreenMode::Menu; playNextTone(); }
-    else if (goUp && voiceInboxSelection > 0) { voiceInboxSelection--; playNextTone(); }
-    else if (goDown) { const auto inbox = voiceInbox(); if (voiceInboxSelection + 1 < static_cast<int>(inbox.size())) voiceInboxSelection++; playNextTone(); }
-    else if (keys.enter && !voiceRecording) playSelectedVoiceMessage();
+  if (screenMode == ScreenMode::VoiceMessages || screenMode == ScreenMode::Walkie) {
+    if (screenMode == ScreenMode::VoiceMessages && goUp && voiceInboxSelection > 0) { voiceInboxSelection--; playNextTone(); }
+    else if (screenMode == ScreenMode::VoiceMessages && goDown) { const auto inbox = voiceInbox(); if (voiceInboxSelection + 1 < static_cast<int>(inbox.size())) voiceInboxSelection++; playNextTone(); }
+    else if (screenMode == ScreenMode::VoiceMessages && keys.enter && !voiceRecording) playSelectedVoiceMessage();
     renderDirty = true; return;
   }
   if (screenMode == ScreenMode::Networks) {
@@ -1707,6 +1743,24 @@ void handleKeyboard() {
       if (character >= 0x20 && character <= 0x7e) typeFrenchCharacter(networkPassword, character, 63, true);
     renderDirty = true; return;
   }
+  if (screenMode == ScreenMode::Language) {
+    if (goLeft || goRight) {
+      if (languageOverride == "auto") languageOverride = goRight ? "en" : "fr";
+      else if (languageOverride == "en") languageOverride = goRight ? "fr" : "auto";
+      else languageOverride = goRight ? "auto" : "en";
+      saveLanguageOverride(); playNextTone();
+    } else if (keys.enter) { screenMode = ScreenMode::Menu; playNextTone(); }
+    renderDirty = true; return;
+  }
+  if (screenMode == ScreenMode::Changelog) {
+    const auto &entry = kSupaChatChangelog[changelogSelection];
+    if (goUp && changelogLineOffset > 0) { changelogLineOffset--; playNextTone(); }
+    else if (goDown && changelogLineOffset + 4 < entry.lineCount) { changelogLineOffset++; playNextTone(); }
+    else if (goLeft && changelogSelection > 0) { changelogSelection--; changelogLineOffset = 0; playNextTone(); }
+    else if (goRight && changelogSelection + 1 < kSupaChatChangelogCount) { changelogSelection++; changelogLineOffset = 0; playNextTone(); }
+    else if (keys.enter) { screenMode = ScreenMode::Menu; playNextTone(); }
+    renderDirty = true; return;
+  }
   if (screenMode != ScreenMode::Chat) {
     if (goLeft || keys.enter) { screenMode = ScreenMode::Menu; playNextTone(); renderDirty = true; }
     return;
@@ -1725,21 +1779,6 @@ void handleKeyboard() {
   if (keys.del) {
     if (frenchGravePending) frenchGravePending = false;
     else removeLastUtf8Character(draft);
-    renderDirty = true; return;
-  }
-  if (screenMode == ScreenMode::Language) {
-    if (goLeft || goRight) {
-      if (languageOverride == "auto") languageOverride = goRight ? "en" : "fr";
-      else if (languageOverride == "en") languageOverride = goRight ? "fr" : "auto";
-      else languageOverride = goRight ? "auto" : "en";
-      saveLanguageOverride(); playNextTone();
-    } else if (keys.enter) { screenMode = ScreenMode::Menu; playNextTone(); }
-    renderDirty = true; return;
-  }
-  if (screenMode == ScreenMode::Changelog) {
-    if (goUp && changelogSelection > 0) { changelogSelection--; playNextTone(); }
-    else if (goDown && changelogSelection + 1 < kSupaChatChangelogCount) { changelogSelection++; playNextTone(); }
-    else if (goLeft || keys.enter) { screenMode = ScreenMode::Menu; playNextTone(); }
     renderDirty = true; return;
   }
   if (keys.space) typeFrenchCharacter(draft, ' ', kMessageLimit, false);
@@ -1777,8 +1816,10 @@ void setup() {
 }
 
 void loop() {
-  M5Cardputer.update(); sampleBattery(); serviceClockRender(); handleKeyboard(); captureVoice(); serviceAudioPlayback(); serviceMessageNotification();
-  if (screenMode == ScreenMode::Walkie) {
+  M5Cardputer.update();
+  if (M5Cardputer.Keyboard.isChange() || M5Cardputer.BtnA.isPressed()) lastUserInputAt = millis();
+  sampleBattery(); serviceClockRender(); handleKeyboard(); captureVoice(); serviceAudioPlayback(); serviceMessageNotification();
+  if (screenMode == ScreenMode::VoiceMessages || screenMode == ScreenMode::Walkie) {
     const bool spacePressed = M5Cardputer.Keyboard.isPressed() && M5Cardputer.Keyboard.keysState().space;
     if (spacePressed) {
       spaceReleaseStartedAt = 0;
@@ -1794,7 +1835,7 @@ void loop() {
   } else if (M5Cardputer.BtnA.wasClicked()) {
     playNextTone(); screenMode = screenMode == ScreenMode::Menu ? ScreenMode::Chat : ScreenMode::Menu; renderDirty = true;
   }
-  if (screenMode != ScreenMode::Walkie && spacePttHeld) { spacePttHeld = false; spaceReleaseStartedAt = 0; stopVoiceRecording(); }
+  if (screenMode != ScreenMode::VoiceMessages && screenMode != ScreenMode::Walkie && spacePttHeld) { spacePttHeld = false; spaceReleaseStartedAt = 0; stopVoiceRecording(); }
   if (kEspNowEnabled && millis() - lastEspNowBeaconAt >= kEspNowBeaconMs) sendEspNowBeacon();
   if (renderDirty && millis() - lastRenderAt >= kRenderIntervalMs) render();
   delay(2);

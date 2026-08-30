@@ -140,6 +140,8 @@ assert.match(syncFunction, /const int64_t syncAfter = initialSyncComplete \? las
   'boot and room-switch hydration must not trust a stale local cursor');
 assert.match(syncFunction, /const size_t syncLimit = initialSyncComplete \? kSyncBatchLimit : kHistoryLimit/,
   'initial hydration must request the complete retained history window');
+assert.match(syncFunction, /deserializeJson\(document, &response\[0\], response\.length\(\)\)/,
+  'full-history JSON must parse the mutable HTTP buffer without duplicating every string');
 assert.doesNotMatch(syncFunction, /downloadVoiceClip/,
   'received voice messages must never auto-download or auto-play');
 
@@ -157,54 +159,44 @@ assert.equal(Number(firmware.match(/kSyncBatchLimit = (\d+)/)[1]), 20,
 assert.match(syncFunction, /&limit=" \+ String\(syncLimit\)/,
   'firmware must request the bounded hydration or incremental sync page');
 
-// M5Unified maps Cardputer ADV battery sensing to GPIO10 ADC. A stateful SOC
-// estimate must reject a momentary rebound but respond substantially to a
-// sustained voltage rise (the only charging evidence this hardware exposes).
+// M5Unified maps Cardputer ADV battery sensing to GPIO10 ADC and exposes no
+// direct VBUS state. Infer charging only from a sustained idle upward trend;
+// user input changes load and invalidates the sample window.
 assert.match(firmware, /M5Cardputer\.Power\.getBatteryVoltage\(\)/);
 assert.doesNotMatch(firmware, /M5Cardputer\.Power\.isCharging\(\)/);
 assert.doesNotMatch(firmware, /M5Cardputer\.Power\.getBatteryLevel\(\)/,
   'raw M5 linear battery percentage must not drive the UI');
 const riseStepMs = Number(firmware.match(/kBatteryRiseStepMs = (\d+)/)[1]);
 const fastRiseStepMs = Number(firmware.match(/kBatteryFastRiseStepMs = (\d+)/)[1]);
-const edgeWindowMs = Number(firmware.match(/kPowerEdgeWindowMs = (\d+)/)[1]);
-const connectRiseMv = Number(firmware.match(/kPowerConnectRiseMv = (\d+)/)[1]);
-const disconnectFallMv = Number(firmware.match(/kPowerDisconnectFallMv = (\d+)/)[1]);
+const trendSamples = Number(firmware.match(/kPowerTrendSamples = (\d+)/)[1]);
+const trendRiseMv = Number(firmware.match(/kPowerTrendMinimumRiseMv = (\d+)/)[1]);
+const trendToleranceMv = Number(firmware.match(/kPowerTrendNoiseToleranceMv = (\d+)/)[1]);
+const idleAfterInputMs = Number(firmware.match(/kPowerIdleAfterInputMs = (\d+)/)[1]);
 const fallStepMs = Number(firmware.match(/kBatteryFallStepMs = (\d+)/)[1]);
 assert.ok(riseStepMs >= 180000, 'battery estimate may rise at most 1% per three minutes');
-assert.ok(fastRiseStepMs <= 10000, 'confirmed voltage rise must produce a substantial SOC increase');
-assert.ok(edgeWindowMs <= 6000, 'cable indication must not take a minute');
-assert.ok(connectRiseMv >= 35, 'tiny ADC fluctuations must not imply cable presence');
+assert.ok(fastRiseStepMs <= 10000, 'confirmed voltage rise must accelerate the SOC estimate');
+assert.ok(trendSamples >= 5, 'charging needs multiple sustained samples');
+assert.ok(trendRiseMv >= 15, 'tiny ADC fluctuations must not imply charging');
+assert.ok(idleAfterInputMs >= 5000, 'power inference must wait until user activity settles');
 assert.ok(fallStepMs >= 90000, 'ordinary discharge estimate may fall at most 1% per 90 seconds');
 assert.match(firmware, /preferences\.getInt\("battery_soc", -1\)/,
   'battery estimate must survive reboot and USB/load transitions');
 assert.match(firmware, /batteryFilteredMv \+= \(nextVoltage - batteryFilteredMv\) \* 0\.12f/,
   'battery ADC readings must be low-pass filtered');
-function detectPower(samples) {
-  let baseline = samples[0], previous = baseline;
-  let connected = false, connectedAt = null, disconnectedAt = null;
-  for (let index = 1; index < samples.length; index++) {
-    const voltage = samples[index];
-    if (!connected && voltage - baseline >= connectRiseMv) {
-      connected = true; connectedAt = index * 1000;
-    } else if (connected && previous - voltage >= disconnectFallMv) {
-      connected = false; disconnectedAt = index * 1000;
-    }
-    previous = voltage;
-  }
-  return { connected, connectedAt, disconnectedAt };
+function steadilyRising(samples) {
+  if (samples.length !== trendSamples || samples.at(-1) - samples[0] < trendRiseMv) return false;
+  return samples.slice(1).every((value, index) => value + trendToleranceMv >= samples[index]);
 }
-assert.equal(detectPower([3700,3703,3698,3705,3701,3707,3702]).connected, false,
-  'ordinary ADC noise must not show a cable');
-const plugged = detectPower([3700,3750,3751]);
-assert.equal(plugged.connected, true);
-assert.ok(plugged.connectedAt <= 1000, 'a correctly connected cable must appear on the next sample');
-const settled = detectPower([3700,3750,3741,3733,3726,3721]);
-assert.equal(settled.connected, true,
-  'ordinary post-plug voltage settling must not drop the cable indicator');
-const unplugged = detectPower([3700,3750,3741,3733,3726,3680]);
-assert.equal(unplugged.connected, false);
-assert.equal(unplugged.disconnectedAt, 5000,
-  'cable removal must clear on the sample containing the substantial fall');
+assert.equal(steadilyRising([3700,3704,3707,3710,3713,3716]), true,
+  'a clear sustained idle rise must indicate charging');
+assert.equal(steadilyRising([3716,3716,3715,3716,3715,3716]), false,
+  'a flat unplugged battery must clear charging');
+assert.equal(steadilyRising([3700,3712,3698,3715,3701,3720]), false,
+  'load-driven jumps must not count as a steady charging trend');
+assert.match(firmware, /Keyboard\.isChange\(\) \|\| M5Cardputer\.BtnA\.isPressed\(\)/,
+  'keyboard or rear-button activity must reset the idle clock');
+assert.match(firmware, /now - lastUserInputAt < kPowerIdleAfterInputMs[\s\S]*powerTrendCount = 0/,
+  'no charging inference may run while user input is active');
 assert.match(firmware, /UP\/DOWN CHOOSE  ENTER PLAY\/STOP/,
   'voice inbox must expose explicit selection and play/stop controls');
 assert.match(firmware, /voicePlaybackCancelled[\s\S]*incomingAudio\.clear\(\)/,
@@ -213,9 +205,9 @@ const headerFunction = firmware.slice(firmware.indexOf('void drawHeader'), firmw
 assert.doesNotMatch(headerFunction, /drawRect/,
   'battery header must not restore the unreadable outline');
 assert.match(headerFunction, /externalPowerDetected[\s\S]*fillTriangle/,
-  'header must show the edge-detected cable indicator');
-assert.match(headerFunction, /setTextSize\(1\.5f\).*setTextColor\(TFT_WHITE/s,
-  'battery percentage must use medium white text');
+  'header must show the bounded cable indicator');
+assert.match(headerFunction, /setTextSize\(1\); display\.setTextColor\(TFT_WHITE/,
+  'battery percentage must use clean integer-size white text');
 const setupFunction = firmware.slice(firmware.indexOf('void setup()'), firmware.indexOf('void loop()'));
 assert.ok(setupFunction.indexOf('drawBootSplash()') < setupFunction.indexOf('SD.begin'),
   'custom art must appear before SD/history initialization');

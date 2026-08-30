@@ -43,26 +43,27 @@ await shot('menu');
 async function openMenu(index) {
   await page.reload();
   await page.getByRole('button', { name: 'REAR · MENU' }).click();
-  if (index >= 5) await page.locator('[data-key="RIGHT"]').click();
-  for (let i = 0; i < index % 5; i++) await page.getByRole('button', { name: '↓ .' }).click();
+  if (index >= 6) await page.locator('[data-key="RIGHT"]').click();
+  for (let i = 0; i < index % 6; i++) await page.getByRole('button', { name: '↓ .' }).click();
   await page.getByRole('button', { name: 'ENTER' }).click();
 }
 
 await openMenu(1); await shot('rooms'); await page.getByRole('button', { name: '↓ .' }).click(); await page.getByRole('button', { name: 'ENTER' }).click(); assert.equal((await state()).currentRoom, 'K-BUDS');
-await openMenu(3); await shot('walkie-ready');
+await openMenu(3); await shot('voice-messages-ready');
 const ptt = page.getByRole('button', { name: 'HOLD SPACE · PTT' });
 const box = await ptt.boundingBox(); assert.ok(box);
 await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2); await page.mouse.down();
-await page.waitForTimeout(250); await shot('walkie-recording'); await page.mouse.up();
+await page.waitForTimeout(250); await shot('voice-message-recording'); await page.mouse.up();
 assert.equal((await state()).clipReady, true); await page.getByRole('button', { name: 'ENTER' }).click();
-assert.equal((await state()).replayAudible, true); await shot('walkie-replay');
-await openMenu(4); await shot('volume');
-await openMenu(5); await shot('language'); await page.locator('[data-key="RIGHT"]').click(); assert.equal((await state()).languageOverride, 'en');
-await openMenu(6); await shot('networks'); await page.getByRole('button', { name: 'ENTER' }).click(); await shot('network-password');
+assert.equal((await state()).replayAudible, true); await shot('voice-message-replay');
+await openMenu(4); await shot('walkie-ready'); await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2); await page.mouse.down(); await page.waitForTimeout(250); await shot('walkie-transmitting'); await page.mouse.up(); assert.equal((await state()).clipPending,false);
+await openMenu(5); await shot('volume');
+await openMenu(6); await shot('language'); await page.locator('[data-key="RIGHT"]').click(); assert.equal((await state()).languageOverride, 'en'); assert.equal((await state()).screen,'language');
+await openMenu(7); await shot('networks'); await page.getByRole('button', { name: 'ENTER' }).click(); await shot('network-password');
 await page.reload(); await page.getByRole('button', { name: 'REAR · MENU' }).click(); await page.locator('[data-key="RIGHT"]').click(); await shot('menu-page-2');
-await openMenu(7); assert.equal((await state()).localOnly,true); assert.equal((await state()).ssid,''); assert.equal((await state()).network,'ESPNOW LOCAL'); await shot('menu-local-only');
-await openMenu(8); await shot('status');
-await openMenu(9); await shot('changelog-current'); await page.getByRole('button', { name: '↓ .' }).click(); assert.equal((await state()).changelogSelection,1); await shot('changelog-previous');
+await openMenu(8); assert.equal((await state()).localOnly,true); assert.equal((await state()).ssid,''); assert.equal((await state()).network,'ESPNOW LOCAL'); await shot('menu-local-only');
+await openMenu(9); await shot('status');
+await openMenu(10); await shot('changelog-current'); await page.getByRole('button', { name: '↓ .' }).click(); assert.equal((await state()).changelogLineOffset,1); await shot('changelog-scrolled'); await page.locator('[data-key="RIGHT"]').click(); assert.equal((await state()).changelogSelection,1); await shot('changelog-previous');
 await page.reload(); await page.getByLabel('Sync fault injection').selectOption('io');
 assert.equal((await state()).network, 'SYNC IO -1'); await shot('chat-sync-io');
 await page.goto(`${base}?language=fr`);
