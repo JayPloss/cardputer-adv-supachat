@@ -178,31 +178,31 @@ test('an authenticated invitee claims only the room targeted by the invitation',
   assert.equal(sent.status, 201);
 });
 
-test('Papa manages rooms and independent top-level user groups', async () => {
+test('group membership grants every room owned by that group', async () => {
   const headers = { authorization: `Bearer ${nativeSessionToken}`, 'content-type': 'application/json' };
-  const created = await fetch(`http://127.0.0.1:${port}/api/admin/rooms`, {method:'POST',headers,body:JSON.stringify({name:'Sunday Crew'})});
-  assert.equal(created.status, 201); assert.equal((await created.json()).room.id, 'sunday-crew');
-  const added = await fetch(`http://127.0.0.1:${port}/api/admin/rooms/sunday-crew/members`, {method:'POST',headers,body:JSON.stringify({user_id:'albie'})});
-  assert.equal(added.status, 200);
-  let rooms = await fetch(`http://127.0.0.1:${port}/api/admin/rooms`, {headers}).then(response=>response.json());
-  assert.deepEqual(rooms.rooms.find(room=>room.id==='sunday-crew').members.map(member=>member.id).sort(), ['albie','papa']);
-  const removed = await fetch(`http://127.0.0.1:${port}/api/admin/rooms/sunday-crew/members/albie`, {method:'DELETE',headers});
-  assert.equal(removed.status, 200);
-  rooms = await fetch(`http://127.0.0.1:${port}/api/admin/rooms`, {headers}).then(response=>response.json());
-  assert.deepEqual(rooms.rooms.find(room=>room.id==='sunday-crew').members.map(member=>member.id), ['papa']);
-  const groupCreated = await fetch(`http://127.0.0.1:${port}/api/admin/user-groups`, {method:'POST',headers,body:JSON.stringify({name:'North Shore'})});
+  const groupCreated = await fetch(`http://127.0.0.1:${port}/api/admin/groups`, {method:'POST',headers,body:JSON.stringify({name:'North Shore',default_language:'fr'})});
   assert.equal(groupCreated.status, 201); assert.equal((await groupCreated.json()).group.id, 'north-shore');
-  assert.equal((await fetch(`http://127.0.0.1:${port}/api/admin/user-groups/north-shore/members`, {method:'POST',headers,body:JSON.stringify({user_id:'albie'})})).status, 200);
-  const userGroups = await fetch(`http://127.0.0.1:${port}/api/admin/user-groups`, {headers}).then(response=>response.json());
+  assert.equal((await fetch(`http://127.0.0.1:${port}/api/admin/groups/north-shore/members`, {method:'POST',headers,body:JSON.stringify({user_id:'albie'})})).status, 200);
+  const created = await fetch(`http://127.0.0.1:${port}/api/admin/rooms`, {method:'POST',headers,body:JSON.stringify({name:'Sunday Crew',group_id:'north-shore'})});
+  assert.equal(created.status, 201); assert.equal((await created.json()).room.id, 'sunday-crew');
+  const userGroups = await fetch(`http://127.0.0.1:${port}/api/admin/groups`, {headers}).then(response=>response.json());
   assert.deepEqual(userGroups.groups.find(group=>group.id==='north-shore').members.map(member=>member.id), ['albie']);
-  assert.equal(rooms.rooms.find(room=>room.id==='sunday-crew').members.some(member=>member.id==='albie'), false);
-  const groupInvite = await fetch(`http://127.0.0.1:${port}/api/admin/invitations`, {method:'POST',headers,body:JSON.stringify({username:'group.friend',display_name:'Group Friend',user_group_id:'north-shore'})});
+  assert.deepEqual(userGroups.groups.find(group=>group.id==='north-shore').rooms.map(room=>room.id), ['sunday-crew']);
+  const albieRooms = await fetch(`http://127.0.0.1:${port}/api/rooms`, {headers:{authorization:`Bearer ${deviceToken}`}}).then(response=>response.json());
+  assert.equal(albieRooms.rooms.some(room=>room.id==='sunday-crew' && room.default_language==='fr'), true);
+  const languageOverride = await fetch(`http://127.0.0.1:${port}/api/preferences/language`, {method:'PATCH',headers:{authorization:`Bearer ${deviceToken}`,'content-type':'application/json'},body:JSON.stringify({language:'fr'})}).then(response=>response.json());
+  assert.equal(languageOverride.rooms.every(room=>room.effective_language==='fr'), true);
+  const languageAuto = await fetch(`http://127.0.0.1:${port}/api/preferences/language`, {method:'PATCH',headers:{authorization:`Bearer ${deviceToken}`,'content-type':'application/json'},body:JSON.stringify({language:'auto'})}).then(response=>response.json());
+  assert.equal(languageAuto.rooms.find(room=>room.id==='family').effective_language, 'en');
+  assert.equal(languageAuto.rooms.find(room=>room.id==='sunday-crew').effective_language, 'fr');
+  assert.equal((await fetch(`http://127.0.0.1:${port}/api/admin/rooms/sunday-crew/members`, {method:'POST',headers,body:JSON.stringify({user_id:'papa'})})).status, 409);
+  const groupInvite = await fetch(`http://127.0.0.1:${port}/api/admin/invitations`, {method:'POST',headers,body:JSON.stringify({username:'group.friend',display_name:'Group Friend',group_ids:['north-shore']})});
   assert.equal(groupInvite.status, 201);
   const groupInvitation = await groupInvite.json();
-  assert.deepEqual(groupInvitation.room_ids, []); assert.equal(groupInvitation.user_group_id, 'north-shore');
+  assert.deepEqual(groupInvitation.group_ids, ['north-shore']);
   const groupFriendHeaders = {'x-forwarded-host':'supachat.net','x-authentik-uid':'uid-group-friend','x-authentik-username':'group.friend','x-authentik-name':'Group Friend'};
   assert.equal((await fetch(`http://127.0.0.1:${port}/api/session`, {headers:groupFriendHeaders})).status, 200);
-  const claimedGroups = await fetch(`http://127.0.0.1:${port}/api/admin/user-groups`, {headers}).then(response=>response.json());
+  const claimedGroups = await fetch(`http://127.0.0.1:${port}/api/admin/groups`, {headers}).then(response=>response.json());
   assert.equal(claimedGroups.groups.find(group=>group.id==='north-shore').members.some(member=>member.display_name==='Group Friend'), true);
 });
 

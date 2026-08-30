@@ -56,8 +56,9 @@ await page.waitForTimeout(250); await shot('walkie-recording'); await page.mouse
 assert.equal((await state()).clipReady, true); await page.getByRole('button', { name: 'ENTER' }).click();
 assert.equal((await state()).replayAudible, true); await shot('walkie-replay');
 await openMenu(4); await shot('volume');
-await openMenu(5); await shot('networks'); await page.getByRole('button', { name: 'ENTER' }).click(); await shot('network-password');
-await openMenu(6); await shot('status');
+await openMenu(5); await shot('language'); await page.locator('[data-key="RIGHT"]').click(); assert.equal((await state()).languageOverride, 'en');
+await openMenu(6); await shot('networks'); await page.getByRole('button', { name: 'ENTER' }).click(); await shot('network-password');
+await openMenu(7); await shot('status');
 await page.reload(); await page.getByLabel('Sync fault injection').selectOption('io');
 assert.equal((await state()).network, 'SYNC IO -1'); await shot('chat-sync-io');
 await page.goto(`${base}?language=fr`);

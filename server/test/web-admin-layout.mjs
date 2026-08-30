@@ -18,11 +18,12 @@ const browser = await chromium.launch({headless:true});
 try {
   for (const viewport of [{width:390,height:844},{width:1440,height:900}]) {
     const page = await browser.newPage({viewport});
+    page.on('pageerror', (error) => console.error('browser_page_error', error.message));
     await page.route('**/api/**', async (route) => {
       const url = route.request().url();
-      const rooms = [{id:'family',name:'Family',member_count:3,members:[{id:'papa',display_name:'Papa',kind:'web'}]},{id:'k-buds',name:'K-BUDS',member_count:1,members:[{id:'papa',display_name:'Papa',kind:'web'}]}];
-      const groups = [{id:'household',name:'Household',member_count:1,members:[{id:'papa',display_name:'Papa',kind:'web'}]}];
-      const json = url.includes('/session') ? {user:{id:'papa',display_name:'Papa',role:'admin'},rooms:rooms.map(({id,name})=>({id,name})),policy:{version:'2026-08-21',accepted_at:Date.now()}} : url.includes('/admin/compliance') ? {reports:[],deletion_requests:[]} : url.includes('/admin/user-groups') ? {groups,users:groups[0].members} : url.includes('/admin/rooms') ? {rooms,users:rooms[0].members} : url.includes('/messages') ? {messages:[]} : url.includes('/presence') ? {presence:[]} : {url:'https://auth.supachat.net/if/flow/supachat-invitation-enrollment/?itoken=test',qr_data_url:'data:image/png;base64,iVBORw0KGgo=',room_ids:['family'],user_group_id:null};
+      const rooms = [{id:'family',name:'Family',group_id:'household',group_name:'Household',member_count:3,members:[{id:'papa',display_name:'Papa',kind:'web'}]},{id:'k-buds',name:'K-BUDS',group_id:'household',group_name:'Household',member_count:1,members:[{id:'papa',display_name:'Papa',kind:'web'}]}];
+      const groups = [{id:'household',name:'Household',default_language:'en',member_count:1,members:[{id:'papa',display_name:'Papa',kind:'web'}],rooms:[rooms[0]]}];
+      const json = url.includes('/session') ? {user:{id:'papa',display_name:'Papa',role:'admin'},rooms:rooms.map(({id,name})=>({id,name})),policy:{version:'2026-08-21',accepted_at:Date.now()}} : url.includes('/admin/compliance') ? {reports:[],deletion_requests:[]} : url.includes('/admin/groups') ? {groups,users:groups[0].members} : url.includes('/admin/rooms') ? {rooms,users:rooms[0].members} : url.includes('/messages') ? {messages:[]} : url.includes('/presence') ? {presence:[]} : {url:'https://auth.supachat.net/if/flow/supachat-invitation-enrollment/?itoken=test',qr_data_url:'data:image/png;base64,iVBORw0KGgo=',group_ids:['household']};
       await route.fulfill({status:url.includes('/invitations') ? 201 : 200,contentType:'application/json',body:JSON.stringify(json)});
     });
     await page.addInitScript(() => {
@@ -46,6 +47,7 @@ try {
     await page.locator('#admin-open').click();
     await page.locator('#invite-name').fill('Aunt Sarah');
     await page.locator('#invite-username').fill('sarah');
+    await page.locator('#invite-user-group').selectOption('household');
     await page.locator('#invite-generate').click();
     await page.locator('#invite-result:not([hidden])').waitFor();
     assert.match(await page.locator('#invite-link').getAttribute('href'), /^https:\/\/auth\.supachat\.net\/if\/flow\//);

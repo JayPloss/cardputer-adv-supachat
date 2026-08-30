@@ -36,12 +36,14 @@ constexpr char kTlsFingerprint[] = "E7 09 64 D3 D6 B2 1D 03 F9 0E 81 59 6C FA 37
 constexpr char kDeviceName[] = SUPACHAT_DEVICE_NAME;
 constexpr char kDeviceId[] = SUPACHAT_DEVICE_ID;
 #if defined(SUPACHAT_LANGUAGE_FR)
-constexpr bool kFrenchUi = true;
+constexpr bool kBuildFrenchDefault = true;
 #else
-constexpr bool kFrenchUi = false;
+constexpr bool kBuildFrenchDefault = false;
 #endif
-const char *uiText(const char *english, const char *french) { return kFrenchUi ? french : english; }
-constexpr char kFirmwareVersion[] = "v0.45";
+bool frenchUi = kBuildFrenchDefault;
+String languageOverride = "auto";
+const char *uiText(const char *english, const char *french) { return frenchUi ? french : english; }
+constexpr char kFirmwareVersion[] = "v0.46";
 constexpr size_t kMessageLimit = 140;
 constexpr size_t kHistoryLimit = 100;
 constexpr uint32_t kToneIntervalMs = 40;
@@ -181,7 +183,8 @@ struct ChatLine {
   bool mine;
   bool showSender;
 };
-struct ChatRoom { String id; String name; int64_t latestMessageId; int64_t seenMessageId; };
+struct ChatRoom { String id; String name; String groupId; String groupName; String defaultLanguage; int64_t latestMessageId; int64_t seenMessageId; };
+void applyEffectiveLanguage();
 
 uint32_t participantColour(const String &authorId, const String &authorName = "") {
   String identity = authorId + " " + authorName; identity.toLowerCase();
@@ -196,7 +199,7 @@ uint32_t participantColour(const String &authorId, const String &authorName = ""
   return TFT_WHITE;
 }
 
-enum class ScreenMode { Chat, Menu, Rooms, Volume, Walkie, Status, Networks, NetworkPassword };
+enum class ScreenMode { Chat, Menu, Rooms, Volume, Language, Walkie, Status, Networks, NetworkPassword };
 
 Preferences preferences;
 M5Canvas uiCanvas(&M5Cardputer.Display);
@@ -462,6 +465,9 @@ void loadHistory() {
 void loadConfiguration() {
   preferences.begin("supachat", false);
   deviceToken = preferences.getString("device_token", "");
+  languageOverride = preferences.getString("language", "auto");
+  if (languageOverride != "auto" && languageOverride != "en" && languageOverride != "fr") languageOverride = "auto";
+  frenchUi = languageOverride == "fr" || (languageOverride == "auto" && kBuildFrenchDefault);
   meshReady = decodeHexKey(preferences.getString("mesh_key", ""), meshKey, sizeof(meshKey));
   volumeLevel = std::min<uint8_t>(preferences.getUChar("volume", kDefaultVolumeLevel), 4);
   // Older installs commonly persisted MAX as their effective default. Migrate
@@ -1085,12 +1091,14 @@ void synchronize() {
         const String id = String(object["id"] | ""); const int64_t latest = object["latest_message_id"] | 0;
         auto previous = std::find_if(rooms.begin(), rooms.end(), [&](const ChatRoom &room) { return room.id == id; });
         const int64_t seen = previous != rooms.end() ? previous->seenMessageId : latest;
-        nextRooms.push_back({id, String(object["name"] | "Room"), latest, seen});
+        nextRooms.push_back({id, String(object["name"] | "Room"), String(object["group_id"] | ""),
+          String(object["group_name"] | ""), String(object["default_language"] | "en"), latest, seen});
       }
       rooms = std::move(nextRooms); roomsInitialized = true;
       auto active = std::find_if(rooms.begin(), rooms.end(), [&](const ChatRoom &room) { return room.id == currentRoomId; });
       if (active == rooms.end() && !rooms.empty()) { currentRoomId = rooms[0].id; currentRoomName = rooms[0].name; }
       else if (active != rooms.end()) currentRoomName = active->name;
+      applyEffectiveLanguage();
     }
   }
   sendQueuedMessages();
@@ -1264,16 +1272,16 @@ void drawChat() {
   display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(198, 126); display.printf("%d/140", utf8CharacterCount(draft));
 }
 
-const char *kMenuItemsEn[] = {"BACK TO CHAT", "ROOMS", "SYNC NOW", "VOICE MESSAGES", "VOLUME", "NETWORKS", "STATUS"};
-const char *kMenuItemsFr[] = {"RETOUR CHAT", "SALONS", "SYNCHRO", "MESSAGES VOCAUX", "VOLUME", "RESEAUX", "ETAT"};
+const char *kMenuItemsEn[] = {"BACK TO CHAT", "ROOMS", "SYNC NOW", "VOICE MESSAGES", "VOLUME", "LANGUAGE", "NETWORKS", "STATUS"};
+const char *kMenuItemsFr[] = {"RETOUR CHAT", "SALONS", "SYNCHRO", "MESSAGES VOCAUX", "VOLUME", "LANGUE", "RESEAUX", "ETAT"};
 void drawMenu() {
   auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader("MENU");
   display.setTextSize(1);
-  for (int index = 0; index < 7; index++) {
-    const int y = 21 + index * 13; const bool selected = index == menuSelection;
-    display.fillRoundRect(6, y, 228, 12, 4, selected ? TFT_GREEN : TFT_DARKGREY);
+  for (int index = 0; index < 8; index++) {
+    const int y = 20 + index * 11; const bool selected = index == menuSelection;
+    display.fillRoundRect(6, y, 228, 9, 3, selected ? TFT_GREEN : TFT_DARKGREY);
     display.setTextColor(selected ? TFT_BLACK : TFT_WHITE, selected ? TFT_GREEN : TFT_DARKGREY);
-    display.setCursor(13, y + 4); display.print(kFrenchUi ? kMenuItemsFr[index] : kMenuItemsEn[index]);
+    display.setCursor(13, y + 2); display.print(frenchUi ? kMenuItemsFr[index] : kMenuItemsEn[index]);
   }
   display.setTextSize(1); display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 117);
   display.print(uiText("ARROWS MOVE       OK SELECT", "FLECHES BOUGER    OK CHOISIR"));
@@ -1308,7 +1316,7 @@ void drawWalkie() {
         const int index = first + row; const bool selected = index == voiceInboxSelection; const int y = 23 + row * 17;
         display.fillRoundRect(5, y, 230, 15, 3, selected ? TFT_GREEN : TFT_DARKGREY);
         display.setTextColor(selected ? TFT_BLACK : participantColour(inbox[index].authorId, inbox[index].authorName), selected ? TFT_GREEN : TFT_DARKGREY);
-        display.setCursor(9, y + 4); display.printf(kFrenchUi ? "%-5s  vocal #%lld" : "%-5s  voice #%lld", inbox[index].authorName.substring(0, 5).c_str(), inbox[index].id);
+        display.setCursor(9, y + 4); display.printf(frenchUi ? "%-5s  vocal #%lld" : "%-5s  voice #%lld", inbox[index].authorName.substring(0, 5).c_str(), inbox[index].id);
       }
     }
     display.setTextColor(TFT_YELLOW, TFT_BLACK); display.setCursor(7, 94); display.print(walkieStatus.substring(0, 35));
@@ -1332,11 +1340,11 @@ void drawVolume() {
 
 void drawStatus() {
   auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader(uiText("STATUS", "ETAT")); display.setTextSize(1);
-  display.setTextColor(TFT_WHITE, TFT_BLACK); display.setCursor(6, 29); display.printf(kFrenchUi ? "APPAREIL  %s\n" : "NODE      %s\n", kDeviceName);
+  display.setTextColor(TFT_WHITE, TFT_BLACK); display.setCursor(6, 29); display.printf(frenchUi ? "APPAREIL  %s\n" : "NODE      %s\n", kDeviceName);
   display.printf("WIFI      %s\n", currentSsid.isEmpty() ? "offline" : currentSsid.c_str());
-  display.printf(kFrenchUi ? "ETAT      %s\n" : "STATE     %s\n", networkStatus.c_str()); display.printf(kFrenchUi ? "HEURE     %s\n" : "TIME      %s\n", timeKnown ? uiText("known", "connue") : uiText("unknown", "inconnue"));
-  display.printf(kFrenchUi ? "BATTERIE  %d%%  %d mV\n" : "BATTERY   %d%%  %d mV\n", batteryLevel, batteryVoltageMv);
-  display.printf(kFrenchUi ? "ALIM.     %s\n" : "POWER     %s\n", externalPowerDetected ? uiText("cable detected", "cable detecte") : uiText("not detected", "non detecte"));
+  display.printf(frenchUi ? "ETAT      %s\n" : "STATE     %s\n", networkStatus.c_str()); display.printf(frenchUi ? "HEURE     %s\n" : "TIME      %s\n", timeKnown ? uiText("known", "connue") : uiText("unknown", "inconnue"));
+  display.printf(frenchUi ? "BATTERIE  %d%%  %d mV\n" : "BATTERY   %d%%  %d mV\n", batteryLevel, batteryVoltageMv);
+  display.printf(frenchUi ? "ALIM.     %s\n" : "POWER     %s\n", externalPowerDetected ? uiText("cable detected", "cable detecte") : uiText("not detected", "non detecte"));
   display.printf("SD/KEY    %s / %s\n", sdReady ? "ready" : "missing", keyboardReady ? "ready" : "fault");
   display.printf("HTTP/HEAP %d / %u\n", lastHttpStatus, ESP.getFreeHeap());
   display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 123); display.print(uiText("LEFT / OK  BACK", "GAUCHE / OK RETOUR"));
@@ -1370,9 +1378,10 @@ void drawNetworkPassword() {
   display.setCursor(6, 121); display.print(uiText("TYPE  ENTER JOIN  LEFT CANCEL", "TAPER ENTER JOINDRE GAUCHE ANNULER"));
 }
 
+void drawLanguage();
 void render() {
   if (screenMode == ScreenMode::Chat) drawChat(); else if (screenMode == ScreenMode::Menu) drawMenu(); else if (screenMode == ScreenMode::Rooms) drawRooms();
-  else if (screenMode == ScreenMode::Volume) drawVolume();
+  else if (screenMode == ScreenMode::Volume) drawVolume(); else if (screenMode == ScreenMode::Language) drawLanguage();
   else if (screenMode == ScreenMode::Walkie) drawWalkie();
   else if (screenMode == ScreenMode::Status) drawStatus();
   else if (screenMode == ScreenMode::NetworkPassword) drawNetworkPassword(); else drawNetworks();
@@ -1401,6 +1410,30 @@ size_t utf8CharacterCount(const String &text) {
   for (size_t index = 0; index < text.length(); index++)
     if ((static_cast<uint8_t>(text[index]) & 0xC0) != 0x80) count++;
   return count;
+}
+
+void drawLanguage() {
+  auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader(uiText("LANGUAGE", "LANGUE"));
+  display.setTextSize(2); display.setTextColor(TFT_YELLOW, TFT_BLACK); display.setCursor(42, 42);
+  display.print(languageOverride == "auto" ? uiText("AUTOMATIC", "AUTOMATIQUE") : languageOverride == "fr" ? "FRANCAIS" : "ENGLISH");
+  display.setTextSize(1); display.setTextColor(TFT_WHITE, TFT_BLACK); display.setCursor(22, 75);
+  if (languageOverride == "auto") display.print(uiText("Uses this room's group", "Selon le groupe du salon"));
+  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 116);
+  display.print(uiText("LEFT/RIGHT CHANGE   OK BACK", "GAUCHE/DROITE CHANGER OK RETOUR"));
+}
+
+void applyEffectiveLanguage() {
+  if (languageOverride == "fr") frenchUi = true;
+  else if (languageOverride == "en") frenchUi = false;
+  else {
+    auto active = std::find_if(rooms.begin(), rooms.end(), [&](const ChatRoom &room) { return room.id == currentRoomId; });
+    frenchUi = active != rooms.end() ? active->defaultLanguage == "fr" : kBuildFrenchDefault;
+  }
+}
+
+void saveLanguageOverride() {
+  preferences.begin("supachat", false); preferences.putString("language", languageOverride); preferences.end();
+  applyEffectiveLanguage(); renderDirty = true;
 }
 
 void removeLastUtf8Character(String &text) {
@@ -1452,7 +1485,7 @@ bool appendKeyboardText(String &target, const char *text, size_t limit, bool byt
 }
 
 void typeFrenchCharacter(String &target, char character, size_t limit, bool byteLimit) {
-  if (!kFrenchUi) {
+  if (!frenchUi) {
     const char text[] = {character, '\0'};
     appendKeyboardText(target, text, limit, byteLimit);
     return;
@@ -1540,7 +1573,8 @@ void openSelectedMenuItem() {
   else if (menuSelection == 2) { syncOverride = true; networkStatus = "SYNC REQUESTED"; screenMode = ScreenMode::Chat; }
   else if (menuSelection == 3) { screenMode = ScreenMode::Walkie; walkieStatus = "READY"; }
   else if (menuSelection == 4) screenMode = ScreenMode::Volume;
-  else if (menuSelection == 5) { screenMode = ScreenMode::Networks; scanForNetworks(); }
+  else if (menuSelection == 5) screenMode = ScreenMode::Language;
+  else if (menuSelection == 6) { screenMode = ScreenMode::Networks; scanForNetworks(); }
   else screenMode = ScreenMode::Status;
   renderDirty = true;
 }
@@ -1550,6 +1584,7 @@ void selectRoom(int next) {
   xSemaphoreTake(stateMutex, portMAX_DELAY);
   saveHistoryLocked();
   currentRoomId = rooms[next].id; currentRoomName = rooms[next].name; roomSelection = next;
+  applyEffectiveLanguage();
   messages.clear(); lastServerId = 0; lastReceiptAt = 0; historyOffset = 0; initialSyncComplete = false; syncOverride = true;
   loadHistory();
   xSemaphoreGive(stateMutex);
@@ -1577,8 +1612,8 @@ void handleKeyboard() {
   const bool goLeft = navigationChord && navLeft();
   const bool goRight = navigationChord && navRight();
   if (screenMode == ScreenMode::Menu) {
-    if (goUp) { menuSelection = (menuSelection + 6) % 7; playNextTone(); }
-    else if (goDown) { menuSelection = (menuSelection + 1) % 7; playNextTone(); }
+    if (goUp) { menuSelection = (menuSelection + 7) % 8; playNextTone(); }
+    else if (goDown) { menuSelection = (menuSelection + 1) % 8; playNextTone(); }
     else if (goLeft) { screenMode = ScreenMode::Chat; playNextTone(); }
     else if (goRight || keys.enter) { openSelectedMenuItem(); playNextTone(); }
     renderDirty = true; return;
@@ -1641,6 +1676,15 @@ void handleKeyboard() {
   if (keys.del) {
     if (frenchGravePending) frenchGravePending = false;
     else removeLastUtf8Character(draft);
+    renderDirty = true; return;
+  }
+  if (screenMode == ScreenMode::Language) {
+    if (goLeft || goRight) {
+      if (languageOverride == "auto") languageOverride = goRight ? "en" : "fr";
+      else if (languageOverride == "en") languageOverride = goRight ? "fr" : "auto";
+      else languageOverride = goRight ? "auto" : "en";
+      saveLanguageOverride(); playNextTone();
+    } else if (keys.enter) { screenMode = ScreenMode::Menu; playNextTone(); }
     renderDirty = true; return;
   }
   if (keys.space) typeFrenchCharacter(draft, ' ', kMessageLimit, false);

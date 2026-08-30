@@ -11,17 +11,19 @@ test('web admin zone is restricted to admin sessions and creates invitations', (
   assert.match(html, /id="admin-open"[^>]+hidden/);
   assert.match(html, /id="admin-zone"/);
   assert.match(html, /id="invite-form"/);
-  assert.match(html, /id="invite-room"/);
+  assert.match(html, /name="group_ids"/);
+  assert.match(html, /id="new-room-group"/);
+  assert.match(html, /id="group-default-language"/);
   assert.match(html, /id="invite-qr"/);
   assert.match(html, /id="manage-user-group"/);
   assert.match(html, /id="compliance-queue"/);
   assert.match(app, /currentUser\?\.role !== 'admin'/);
   assert.match(app, /api\('api\/admin\/invitations'/);
   assert.match(app, /api\('api\/admin\/rooms'/);
-  assert.match(app, /api\('api\/admin\/user-groups'/);
+  assert.match(app, /api\('api\/admin\/groups'/);
   assert.match(app, /api\('api\/admin\/compliance'/);
   assert.match(app, /navigator\.share/);
-  assert.match(app, /Join these SUPACHAT rooms/);
+  assert.match(app, /Join these SUPACHAT groups/);
   assert.doesNotMatch(app, /Join our SUPACHAT Family room/);
   assert.match(app, /if \(currentRoom !== requestedRoom\) return/);
 });
@@ -55,7 +57,7 @@ test('newly enrolled users receive a one-time welcome modal', () => {
   assert.match(app, /welcomeZone\.showModal\(\)/);
 });
 
-test('Authentik is SupaChat branded and room authorization stays out of identity groups', () => {
+test('Authentik is SupaChat branded and application groups stay out of identity-provider groups', () => {
   assert.match(authentikConfig, /content: "Powered by Authentik"/);
   assert.match(authentikConfig, /branding_logo.*https:\/\/supachat\.net\/supachat-logo\.png/);
   assert.doesNotMatch(authentikConfig, /get_or_create\(name="SupaChat (?:Family|K-BUDS|Wolfpack)"/);
