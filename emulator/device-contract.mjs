@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import tls from 'node:tls';
 
 const firmware = fs.readFileSync(new URL('../firmware/src/main.cpp', import.meta.url), 'utf8');
+const songHeader = fs.readFileSync(new URL('../firmware/include/keypress_song.h', import.meta.url), 'utf8');
 const pinMatch = firmware.match(/kTlsFingerprint\[\] = "([0-9A-Fa-f :]+)"/);
 assert.ok(pinMatch, 'firmware TLS pin is missing');
 
@@ -69,17 +70,19 @@ assert.equal(navigationChord && shiftedSlash.physicalRight, false);
 assert.equal(shiftedSlash.word[0], '?');
 
 const bootStep = Number(firmware.match(/kBootTuneStepMs = (\d+)/)[1]);
-const bootTuneBody = firmware.match(/kBootTuneFrequencies\[\] = \{([\s\S]*?)\};/)[1];
+const bootTuneBody = songHeader.match(/kKeypressSongFrequencies\[\] = \{([\s\S]*?)\};/)[1];
 const bootNotes = [...bootTuneBody.matchAll(/\b\d+\b/g)].map(match => Number(match[0]));
-assert.equal(bootNotes.length, 232, 'boot arrangement must contain the original 32 steps plus 200 new steps');
+assert.equal(bootNotes.length, 85, 'boot arrangement must contain every source-MIDI vocal note');
+assert.match(firmware, /kBootTuneFrequencies = kKeypressSongFrequencies/,
+  'boot melody must use the MIDI-generated vocal track rather than a hand-authored approximation');
+assert.match(firmware, /kBootTuneLength = kKeypressSongLength/,
+  'boot melody length must follow the complete generated source track');
 assert.equal(Number(firmware.match(/kBootTuneNoteMs = (\d+)/)[1]), 145,
   'boot notes must retain MiLFFINDER timing rather than being stretched');
-assert.deepEqual(bootNotes.slice(0, 32), [
-  196, 247, 294, 392, 0, 294, 330, 294,
-  247, 196, 220, 247, 294, 0, 392, 370,
-  330, 262, 330, 392, 494, 440, 392, 0,
-  196, 294, 392, 494, 587, 523, 392, 294,
-], 'boot tune must open with the complete MiLFFINDER splash melody');
+assert.deepEqual(bootNotes.slice(-16), [
+  370, 370, 330, 370, 330, 415, 494, 494,
+  494, 415, 659, 494, 554, 494, 415, 494,
+], 'boot tune must retain the complete source-MIDI chorus ending');
 const bootFunction = firmware.slice(firmware.indexOf('void showBootSplash()'), firmware.indexOf('String cleanField'));
 const firmwareVersion = firmware.match(/kFirmwareVersion\[\] = "(v\d+\.\d{2})"/);
 assert.ok(firmwareVersion, 'splash firmware version must use exactly two decimal places');
@@ -102,7 +105,6 @@ assert.match(bootFunction, /Keyboard\.isPressed\(\) \|\| M5Cardputer\.BtnA\.isPr
 
 const notificationBody = firmware.match(/kMessageNotificationFrequencies\[\] = \{([^}]+)\}/)[1];
 const notificationNotes = [...notificationBody.matchAll(/\d+/g)].map(match => Number(match[0]));
-const songHeader = fs.readFileSync(new URL('../firmware/include/keypress_song.h', import.meta.url), 'utf8');
 const keypressBody = songHeader.match(/kKeypressSongFrequencies\[\] = \{([\s\S]*?)\};/)[1];
 const keypressNotes = new Set([...keypressBody.matchAll(/\d+/g)].map(match => Number(match[0])));
 assert.equal(notificationNotes.some(note => keypressNotes.has(note)), false,
