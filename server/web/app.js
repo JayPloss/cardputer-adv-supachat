@@ -51,7 +51,7 @@ const translations = {
     generateInvite:'Generate one-time link', welcomeEyebrow:'WELCOME TO SUPACHAT', startChatting:'Start chatting',
     empty:'No messages yet.\nSay the first thing.', messageRoom:'Message {room}', voiceRoom:'One person talks at a time. Voice clips stay in {room} history.',
     welcomeRoom:'You’re in {room}.', welcomeCopy:'This invitation added you to the {room} conversation.', online:'online', offline:'offline', seen:'seen {time}',
-    playing:'Playing…', playVoice:'▶ Play voice', uploading:'Uploading…', uploadFailed:'Upload failed — retry', stopSend:'Stop + send (5s max)', micUnavailable:'Microphone unavailable', walkieReady:'Ready — hold to talk', transmitting:'Transmitting as {name}', talking:'{name} is talking', hasChannel:'{name} has the channel', reconnecting:'Reconnecting…', sending:'Sending…', sent:'Sent', sendFailed:'Not sent — try again'
+    playing:'Playing…', playVoice:'▶ Play voice', uploading:'Uploading…', uploadFailed:'Upload failed — retry', stopSend:'Stop + send (5s max)', micUnavailable:'Microphone unavailable', walkieReady:'Ready — hold to talk', transmitting:'Transmitting as {name}', talking:'{name} is talking', hasChannel:'{name} has the channel', reconnecting:'Reconnecting…', sending:'Sending…', sent:'Sent', sendFailed:'Not sent — try again', saved:'Saved', readBy:'Read by {names}', deliveredTo:'Delivered to {names}'
   },
   fr: {
     tagline:'SALONS PRIVÉS / TOUJOURS PRÊT', room:'Salon', language:'Langue', admin:'Admin', safety:'Sécurité', logout:'Déconnexion',
@@ -63,7 +63,7 @@ const translations = {
     generateInvite:'Créer un lien unique', welcomeEyebrow:'BIENVENUE SUR SUPACHAT', startChatting:'Commencer à clavarder',
     empty:'Aucun message.\nLancez la conversation.', messageRoom:'Message à {room}', voiceRoom:'Une personne parle à la fois. Les messages vocaux restent dans l’historique de {room}.',
     welcomeRoom:'Vous êtes dans {room}.', welcomeCopy:'Cette invitation vous a ajouté à la conversation {room}.', online:'en ligne', offline:'hors ligne', seen:'vu à {time}',
-    playing:'Lecture…', playVoice:'▶ Écouter', uploading:'Téléversement…', uploadFailed:'Échec du téléversement — réessayer', stopSend:'Arrêter et envoyer (5 s max)', micUnavailable:'Microphone indisponible', walkieReady:'Prêt — maintenir pour parler', transmitting:'Transmission comme {name}', talking:'{name} parle', hasChannel:'{name} a le canal', reconnecting:'Reconnexion…', sending:'Envoi…', sent:'Envoyé', sendFailed:'Non envoyé — réessayer'
+    playing:'Lecture…', playVoice:'▶ Écouter', uploading:'Téléversement…', uploadFailed:'Échec du téléversement — réessayer', stopSend:'Arrêter et envoyer (5 s max)', micUnavailable:'Microphone indisponible', walkieReady:'Prêt — maintenir pour parler', transmitting:'Transmission comme {name}', talking:'{name} parle', hasChannel:'{name} a le canal', reconnecting:'Reconnexion…', sending:'Envoi…', sent:'Envoyé', sendFailed:'Non envoyé — réessayer', saved:'Enregistré', readBy:'Lu par {names}', deliveredTo:'Livré à {names}'
   }
 };
 let locale = localStorage.getItem('supachat-language') || (navigator.language?.toLowerCase().startsWith('fr') ? 'fr' : 'en');
@@ -97,9 +97,9 @@ const receiptLabel = (message) => {
   const names = { albie: 'Albie', juju: 'Juju' };
   const deviceReceipts = (message.receipts || []).filter((item) => names[item.user_id]);
   const read = deviceReceipts.filter((item) => item.state === 'read').map((item) => names[item.user_id]);
-  if (read.length) return `Read by ${read.join(', ')}`;
+  if (read.length) return t('readBy', {names:read.join(', ')});
   const delivered = deviceReceipts.filter((item) => item.state === 'delivered').map((item) => names[item.user_id]);
-  return delivered.length ? `Delivered to ${delivered.join(', ')}` : 'Saved';
+  return delivered.length ? t('deliveredTo', {names:delivered.join(', ')}) : t('saved');
 };
 function renderMessages(scroll = false) {
   messagesEl.innerHTML = messages.length ? messages.map((message) => `
