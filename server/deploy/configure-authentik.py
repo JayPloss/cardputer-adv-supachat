@@ -51,11 +51,18 @@ body, .pf-c-background-image, .pf-v5-c-background-image {
   border-color: #9df260 !important;
   box-shadow: 0 0 0 1px #9df260 !important;
 }
-.pf-c-login__footer, .pf-v5-c-login__footer { color: #b9c7bd; }
-.pf-c-login__footer ul, .pf-v5-c-login__footer ul { font-size: 0; }
-.pf-c-login__footer ul::after, .pf-v5-c-login__footer ul::after {
-  content: "Created by Jay Ploss. Auth powered by Authentik";
-  font-size: 13px;
+body::after {
+  content: "Powered by Authentik";
+  position: fixed;
+  right: 18px;
+  bottom: 14px;
+  z-index: 1000;
+  color: #91a198;
+  font: 12px/1.2 ui-sans-serif, system-ui, sans-serif;
+}
+.pf-c-login__footer, .pf-v5-c-login__footer,
+ak-brand-links, [class*="brand-links"], [class*="powered-by"] {
+  display: none !important;
 }
 """
 
@@ -114,12 +121,6 @@ with transaction.atomic():
     )
 
     group, _ = Group.objects.get_or_create(name="SupaChat Users")
-    family_group, _ = Group.objects.get_or_create(name="SupaChat Family")
-    kbuds_group, _ = Group.objects.get_or_create(name="SupaChat K-BUDS")
-    wolfpack_group, _ = Group.objects.get_or_create(name="SupaChat Wolfpack")
-    family_group.parents.set([group])
-    kbuds_group.parents.set([group])
-    wolfpack_group.parents.set([group])
     for username, name in (("papa", "Papa"), ("albie", "Albie"), ("julien", "Julien")):
         user, _ = User.objects.get_or_create(
             username=username,
@@ -128,7 +129,7 @@ with transaction.atomic():
         user.name = name
         user.path = "users/supachat"
         user.save(update_fields=["name", "path"])
-        user.groups.add(group, family_group, kbuds_group)
+        user.groups.add(group)
     PolicyBinding.objects.get_or_create(target=application, group=group, defaults={"order": 0})
 
     mobile_provider, _ = OAuth2Provider.objects.get_or_create(
@@ -178,8 +179,8 @@ with transaction.atomic():
         defaults={
             "default": False,
             "branding_title": "SupaChat",
-            "branding_logo": "branding/supachat-logo.png",
-            "branding_favicon": "branding/supachat-logo.png",
+            "branding_logo": "https://auth.supachat.net/media/public/branding/supachat-logo.png",
+            "branding_favicon": "https://auth.supachat.net/media/public/branding/supachat-logo.png",
             "branding_custom_css": SUPACHAT_CSS,
             "branding_default_flow_background": default_brand.branding_default_flow_background,
             "flow_authentication": default_brand.flow_authentication,

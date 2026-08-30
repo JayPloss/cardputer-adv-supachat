@@ -18,6 +18,7 @@ cp -a "$staging"/. "$install_root"/
 chown -R root:root "$install_root"
 find "$install_root" -type d -exec chmod 0755 {} +
 find "$install_root" -type f -exec chmod 0644 {} +
+npm --prefix "$install_root" ci --omit=dev --ignore-scripts
 
 install -o root -g root -m 0600 "$env_source" /etc/supachat.env
 install -o root -g root -m 0644 "$install_root/deploy/supachat.service" /etc/systemd/system/supachat.service

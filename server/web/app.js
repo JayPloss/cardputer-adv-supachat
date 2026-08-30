@@ -20,6 +20,7 @@ const inviteForm = document.querySelector('#invite-form');
 const inviteState = document.querySelector('#invite-state');
 const inviteResult = document.querySelector('#invite-result');
 const inviteLink = document.querySelector('#invite-link');
+const inviteQr = document.querySelector('#invite-qr');
 const inviteShare = document.querySelector('#invite-share');
 const inviteGenerate = document.querySelector('#invite-generate');
 const roomSelect = document.querySelector('#room-select');
@@ -36,17 +37,23 @@ const manageRoom = document.querySelector('#manage-room');
 const groupMembers = document.querySelector('#group-members');
 const existingUser = document.querySelector('#existing-user');
 const addMember = document.querySelector('#add-member');
+const newUserGroupForm = document.querySelector('#new-user-group-form');
+const userGroupState = document.querySelector('#user-group-state');
+const manageUserGroup = document.querySelector('#manage-user-group');
+const userGroupMembers = document.querySelector('#user-group-members');
+const existingGroupUser = document.querySelector('#existing-group-user');
+const addGroupMember = document.querySelector('#add-group-member');
 const complianceRefresh = document.querySelector('#compliance-refresh');
 const complianceState = document.querySelector('#compliance-state');
 const complianceQueue = document.querySelector('#compliance-queue');
-let adminGroups = []; let adminUsers = [];
+let adminRooms = []; let adminUserGroups = []; let adminUsers = [];
 const translations = {
   en: {
     tagline:'PRIVATE ROOMS / ALWAYS WAITING', room:'Room', language:'Language', admin:'Admin', safety:'Safety', logout:'Log out',
     soundOn:'Sound: on', soundOff:'Sound: off', write:'Write something…', send:'Send', ready:'Ready', connecting:'Connecting…',
     liveVoice:'LIVE VOICE', holdTalk:'Hold to talk', orVoice:'or leave a message', recordClip:'Record voice clip',
-    adminZone:'ADMIN ZONE', groups:'Groups', adminIntro:'Create rooms, manage their members, and invite someone directly into one.',
-    newGroup:'New group', create:'Create', inviteUser:'Invite new user', inviteExpiry:'One-use link · expires in seven days.',
+    adminZone:'ADMIN ZONE', rooms:'Rooms', adminIntro:'Manage chat rooms and keep user groups separate.',
+    newRoom:'New room', manageRoom:'Manage room', newUserGroup:'New user group', manageUserGroup:'Manage user group', userGroup:'User group', userGroupHelp:'User groups organize people and do not grant room access.', addExisting:'Add existing user', add:'Add', none:'None', create:'Create', inviteUser:'Invite new user', inviteExpiry:'One-use link · expires in seven days.',
     name:'Name', username:'Username', email:'Email', optional:'(optional)', inviteReady:'Invite ready', shareInvite:'Share invite',
     generateInvite:'Generate one-time link', welcomeEyebrow:'WELCOME TO SUPACHAT', startChatting:'Start chatting',
     empty:'No messages yet.\nSay the first thing.', messageRoom:'Message {room}', voiceRoom:'One person talks at a time. Voice clips stay in {room} history.',
@@ -57,8 +64,8 @@ const translations = {
     tagline:'SALONS PRIVÉS / TOUJOURS PRÊT', room:'Salon', language:'Langue', admin:'Admin', safety:'Sécurité', logout:'Déconnexion',
     soundOn:'Son : activé', soundOff:'Son : désactivé', write:'Écrivez un message…', send:'Envoyer', ready:'Prêt', connecting:'Connexion…',
     liveVoice:'VOIX EN DIRECT', holdTalk:'Maintenir pour parler', orVoice:'ou laisser un message', recordClip:'Enregistrer un message vocal',
-    adminZone:'ZONE ADMIN', groups:'Groupes', adminIntro:'Créez des salons, gérez les membres et invitez directement une personne.',
-    newGroup:'Nouveau groupe', create:'Créer', inviteUser:'Inviter une personne', inviteExpiry:'Lien à usage unique · expire dans sept jours.',
+    adminZone:'ZONE ADMIN', rooms:'Salons', adminIntro:'Gérez les salons tout en gardant les groupes d’utilisateurs séparés.',
+    newRoom:'Nouveau salon', manageRoom:'Gérer le salon', newUserGroup:'Nouveau groupe d’utilisateurs', manageUserGroup:'Gérer le groupe d’utilisateurs', userGroup:'Groupe d’utilisateurs', userGroupHelp:'Les groupes organisent les personnes sans donner accès aux salons.', addExisting:'Ajouter une personne', add:'Ajouter', none:'Aucun', create:'Créer', inviteUser:'Inviter une personne', inviteExpiry:'Lien à usage unique · expire dans sept jours.',
     name:'Nom', username:'Nom d’utilisateur', email:'Courriel', optional:'(facultatif)', inviteReady:'Invitation prête', shareInvite:'Partager l’invitation',
     generateInvite:'Créer un lien unique', welcomeEyebrow:'BIENVENUE SUR SUPACHAT', startChatting:'Commencer à clavarder',
     empty:'Aucun message.\nLancez la conversation.', messageRoom:'Message à {room}', voiceRoom:'Une personne parle à la fois. Les messages vocaux restent dans l’historique de {room}.',
@@ -332,17 +339,27 @@ function dismissWelcome() {
 }
 welcomeClose.addEventListener('click', dismissWelcome);
 welcomeZone.addEventListener('cancel', (event) => { event.preventDefault(); dismissWelcome(); });
-async function loadAdminGroups(selected = manageRoom.value) {
-  const data = await api('api/admin/groups'); adminGroups = data.groups; adminUsers = data.users;
-  manageRoom.innerHTML = adminGroups.map((group) => `<option value="${escapeHtml(group.id)}">${escapeHtml(group.name)} (${group.member_count})</option>`).join('');
-  manageRoom.value = adminGroups.some((group) => group.id === selected) ? selected : adminGroups[0]?.id || '';
-  const group = adminGroups.find((item) => item.id === manageRoom.value);
-  groupMembers.innerHTML = group?.members.length ? group.members.map((member) => `<div class="group-member"><span>${escapeHtml(member.display_name)} <small>${escapeHtml(member.kind)}</small></span><button type="button" data-remove-user="${escapeHtml(member.id)}" ${member.id === currentUser.id ? 'disabled title="You cannot remove yourself"' : ''}>Remove</button></div>`).join('') : '<p class="empty-inline">No members.</p>';
-  const memberIds = new Set(group?.members.map((member) => member.id));
-  existingUser.innerHTML = adminUsers.filter((item) => !memberIds.has(item.id)).map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.display_name)}</option>`).join('');
+const memberRows = (members, attribute, protectSelf = false) => members?.length ? members.map((member) => `<div class="group-member"><span>${escapeHtml(member.display_name)} <small>${escapeHtml(member.kind)}</small></span><button type="button" ${attribute}="${escapeHtml(member.id)}" ${protectSelf && member.id === currentUser.id ? 'disabled title="You cannot remove yourself"' : ''}>Remove</button></div>`).join('') : '<p class="empty-inline">No members.</p>';
+async function loadAdminData(selectedRoom = manageRoom.value, selectedUserGroup = manageUserGroup.value) {
+  const [roomData, userGroupData] = await Promise.all([api('api/admin/rooms'), api('api/admin/user-groups')]);
+  adminRooms = roomData.rooms; adminUserGroups = userGroupData.groups; adminUsers = roomData.users;
+  manageRoom.innerHTML = adminRooms.map((room) => `<option value="${escapeHtml(room.id)}">${escapeHtml(room.name)} (${room.member_count})</option>`).join('');
+  manageRoom.value = adminRooms.some((room) => room.id === selectedRoom) ? selectedRoom : adminRooms[0]?.id || '';
+  const room = adminRooms.find((item) => item.id === manageRoom.value);
+  groupMembers.innerHTML = memberRows(room?.members, 'data-remove-user', true);
+  const roomMemberIds = new Set(room?.members.map((member) => member.id));
+  existingUser.innerHTML = adminUsers.filter((item) => !roomMemberIds.has(item.id)).map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.display_name)}</option>`).join('');
   addMember.disabled = !existingUser.value;
-  inviteForm.elements.room_id.innerHTML = adminGroups.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join('');
-  if (group) inviteForm.elements.room_id.value = group.id;
+  manageUserGroup.innerHTML = adminUserGroups.map((group) => `<option value="${escapeHtml(group.id)}">${escapeHtml(group.name)} (${group.member_count})</option>`).join('');
+  manageUserGroup.value = adminUserGroups.some((group) => group.id === selectedUserGroup) ? selectedUserGroup : adminUserGroups[0]?.id || '';
+  const userGroup = adminUserGroups.find((item) => item.id === manageUserGroup.value);
+  userGroupMembers.innerHTML = memberRows(userGroup?.members, 'data-remove-group-user');
+  const groupMemberIds = new Set(userGroup?.members.map((member) => member.id));
+  existingGroupUser.innerHTML = adminUsers.filter((item) => !groupMemberIds.has(item.id)).map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.display_name)}</option>`).join('');
+  addGroupMember.disabled = !existingGroupUser.value || !userGroup;
+  inviteForm.elements.room_ids.innerHTML = adminRooms.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join('');
+  if (room) inviteForm.elements.room_ids.value = room.id;
+  inviteForm.elements.user_group_id.innerHTML = `<option value="">${escapeHtml(t('none'))}</option>${adminUserGroups.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join('')}`;
 }
 async function loadComplianceQueue() {
   complianceState.textContent = 'Loading…';
@@ -354,7 +371,7 @@ async function loadComplianceQueue() {
     complianceState.textContent = '';
   } catch { complianceState.textContent = 'Could not load the safety queue.'; }
 }
-adminOpen.addEventListener('click', async () => { adminZone.showModal(); await Promise.allSettled([loadAdminGroups(currentRoom),loadComplianceQueue()]); });
+adminOpen.addEventListener('click', async () => { adminZone.showModal(); await Promise.allSettled([loadAdminData(currentRoom),loadComplianceQueue()]); });
 complianceRefresh.addEventListener('click', loadComplianceQueue);
 complianceQueue.addEventListener('click', async (event) => {
   const button = event.target.closest('[data-compliance-kind]'); if (!button) return;
@@ -364,10 +381,14 @@ complianceQueue.addEventListener('click', async (event) => {
 });
 adminClose.addEventListener('click', () => adminZone.close());
 adminZone.addEventListener('click', (event) => { if (event.target === adminZone) adminZone.close(); });
-manageRoom.addEventListener('change', () => loadAdminGroups(manageRoom.value));
-newGroupForm.addEventListener('submit', async (event) => { event.preventDefault(); groupState.textContent = 'Creating…'; try { const result = await api('api/admin/groups', {method:'POST',body:JSON.stringify({name:new FormData(newGroupForm).get('name')})}); newGroupForm.reset(); groupState.textContent = `${result.group.name} created.`; await loadAdminGroups(result.group.id); await refresh(); } catch(error) { groupState.textContent = error.message === 'group_exists' ? 'That group already exists.' : 'Could not create group.'; } });
-addMember.addEventListener('click', async () => { if (!existingUser.value) return; await api(`api/admin/groups/${encodeURIComponent(manageRoom.value)}/members`, {method:'POST',body:JSON.stringify({user_id:existingUser.value})}); await loadAdminGroups(manageRoom.value); });
-groupMembers.addEventListener('click', async (event) => { const button = event.target.closest('[data-remove-user]'); if (!button) return; button.disabled = true; try { await api(`api/admin/groups/${encodeURIComponent(manageRoom.value)}/members/${encodeURIComponent(button.dataset.removeUser)}`, {method:'DELETE'}); await loadAdminGroups(manageRoom.value); } catch { groupState.textContent = 'Could not remove that member.'; button.disabled = false; } });
+manageRoom.addEventListener('change', () => loadAdminData(manageRoom.value));
+manageUserGroup.addEventListener('change', () => loadAdminData(manageRoom.value, manageUserGroup.value));
+newGroupForm.addEventListener('submit', async (event) => { event.preventDefault(); groupState.textContent = 'Creating…'; try { const result = await api('api/admin/rooms', {method:'POST',body:JSON.stringify({name:new FormData(newGroupForm).get('name')})}); newGroupForm.reset(); groupState.textContent = `${result.room.name} created.`; await loadAdminData(result.room.id); await refresh(); } catch(error) { groupState.textContent = error.message === 'room_exists' ? 'That room already exists.' : 'Could not create room.'; } });
+addMember.addEventListener('click', async () => { if (!existingUser.value) return; await api(`api/admin/rooms/${encodeURIComponent(manageRoom.value)}/members`, {method:'POST',body:JSON.stringify({user_id:existingUser.value})}); await loadAdminData(manageRoom.value); });
+groupMembers.addEventListener('click', async (event) => { const button = event.target.closest('[data-remove-user]'); if (!button) return; button.disabled = true; try { await api(`api/admin/rooms/${encodeURIComponent(manageRoom.value)}/members/${encodeURIComponent(button.dataset.removeUser)}`, {method:'DELETE'}); await loadAdminData(manageRoom.value); } catch { groupState.textContent = 'Could not remove that member.'; button.disabled = false; } });
+newUserGroupForm.addEventListener('submit', async (event) => { event.preventDefault(); userGroupState.textContent = 'Creating…'; try { const result = await api('api/admin/user-groups', {method:'POST',body:JSON.stringify({name:new FormData(newUserGroupForm).get('name')})}); newUserGroupForm.reset(); userGroupState.textContent = `${result.group.name} created.`; await loadAdminData(manageRoom.value, result.group.id); } catch(error) { userGroupState.textContent = error.message === 'user_group_exists' ? 'That user group already exists.' : 'Could not create user group.'; } });
+addGroupMember.addEventListener('click', async () => { if (!existingGroupUser.value || !manageUserGroup.value) return; await api(`api/admin/user-groups/${encodeURIComponent(manageUserGroup.value)}/members`, {method:'POST',body:JSON.stringify({user_id:existingGroupUser.value})}); await loadAdminData(manageRoom.value, manageUserGroup.value); });
+userGroupMembers.addEventListener('click', async (event) => { const button = event.target.closest('[data-remove-group-user]'); if (!button) return; button.disabled = true; try { await api(`api/admin/user-groups/${encodeURIComponent(manageUserGroup.value)}/members/${encodeURIComponent(button.dataset.removeGroupUser)}`, {method:'DELETE'}); await loadAdminData(manageRoom.value, manageUserGroup.value); } catch { userGroupState.textContent = 'Could not remove that user.'; button.disabled = false; } });
 inviteForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   const data = new FormData(inviteForm);
@@ -379,11 +400,13 @@ inviteForm.addEventListener('submit', async (event) => {
         display_name:String(data.get('display_name') || '').trim(),
         username:String(data.get('username') || '').trim(),
         email:String(data.get('email') || '').trim(),
-        room_id:String(data.get('room_id') || ''),
+        room_ids:data.getAll('room_ids').map(String),
+        user_group_id:String(data.get('user_group_id') || ''),
       }),
     });
     inviteLink.href = invitation.url; inviteLink.textContent = invitation.url;
-    inviteLink.dataset.roomName = adminGroups.find((group) => group.id === invitation.room_id)?.name || invitation.room_id;
+    inviteQr.src = invitation.qr_data_url;
+    inviteLink.dataset.roomName = invitation.room_ids.map((id) => adminRooms.find((room) => room.id === id)?.name || id).join(', ');
     inviteResult.hidden = false; inviteState.textContent = '';
   } catch (error) {
     inviteState.textContent = error.message === 'invalid_invitation' ? 'Check the name, username, and email.' : 'Could not generate the invite.';
@@ -391,8 +414,8 @@ inviteForm.addEventListener('submit', async (event) => {
 });
 inviteShare.addEventListener('click', async () => {
   const url = inviteLink.href;
-  const roomName = inviteLink.dataset.roomName || 'group';
-  if (navigator.share) await navigator.share({title:'Join SUPACHAT', text:`Join our SUPACHAT ${roomName} room`, url});
+  const roomName = inviteLink.dataset.roomName;
+  if (navigator.share) await navigator.share({title:'Join SUPACHAT', text:roomName ? `Join these SUPACHAT rooms: ${roomName}` : 'Join SUPACHAT', url});
   else { await navigator.clipboard.writeText(url); inviteState.textContent = 'Invite link copied.'; }
 });
 function renderPresence(presence) {

@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
+import QRCode from 'qrcode';
 
 const sourceRoot = dirname(fileURLToPath(import.meta.url));
 const webRoot = join(sourceRoot, '..', 'web');
@@ -71,6 +72,15 @@ db.exec(`
     user_id TEXT NOT NULL REFERENCES users(id),
     PRIMARY KEY (conversation_id, user_id)
   );
+  CREATE TABLE IF NOT EXISTS user_groups (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE
+  );
+  CREATE TABLE IF NOT EXISTS user_group_members (
+    group_id TEXT NOT NULL REFERENCES user_groups(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    PRIMARY KEY (group_id, user_id)
+  );
   CREATE TABLE IF NOT EXISTS pending_room_memberships (
     username TEXT NOT NULL,
     conversation_id TEXT NOT NULL REFERENCES conversations(id),
@@ -79,6 +89,14 @@ db.exec(`
     expires_at INTEGER NOT NULL,
     claimed_at INTEGER,
     PRIMARY KEY (username, conversation_id)
+  );
+  CREATE TABLE IF NOT EXISTS pending_user_group_memberships (
+    username TEXT NOT NULL,
+    group_id TEXT NOT NULL REFERENCES user_groups(id) ON DELETE CASCADE,
+    invitation_id TEXT,
+    expires_at INTEGER NOT NULL,
+    claimed_at INTEGER,
+    PRIMARY KEY (username, group_id)
   );
   CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -259,16 +277,16 @@ function authentikUserId(username, uid) {
     || `web-${createHash('sha256').update(String(uid)).digest('hex').slice(0, 16)}`;
 }
 
-function authentikGroups(value) {
-  return new Set(String(value || '').split(/[,|]/).map((group) => group.trim().toLowerCase()).filter(Boolean));
-}
-
-function claimPendingRoomMemberships(userId, username) {
+function claimPendingMemberships(userId, username) {
   const now = Date.now();
   const pending = db.prepare('SELECT conversation_id FROM pending_room_memberships WHERE username = ? AND claimed_at IS NULL AND expires_at > ?').all(username, now);
   const grant = db.prepare('INSERT OR IGNORE INTO conversation_members(conversation_id, user_id) VALUES (?, ?)');
   const claim = db.prepare('UPDATE pending_room_memberships SET claimed_at = ? WHERE username = ? AND conversation_id = ?');
   for (const row of pending) { grant.run(row.conversation_id, userId); claim.run(now, username, row.conversation_id); }
+  const pendingGroups = db.prepare('SELECT group_id FROM pending_user_group_memberships WHERE username = ? AND claimed_at IS NULL AND expires_at > ?').all(username, now);
+  const grantGroup = db.prepare('INSERT OR IGNORE INTO user_group_members(group_id, user_id) VALUES (?, ?)');
+  const claimGroup = db.prepare('UPDATE pending_user_group_memberships SET claimed_at = ? WHERE username = ? AND group_id = ?');
+  for (const row of pendingGroups) { grantGroup.run(row.group_id, userId); claimGroup.run(now, username, row.group_id); }
 }
 
 function roomsFor(userId) {
@@ -304,7 +322,7 @@ function webUser(req) {
       INSERT INTO users(id, display_name, short_name, kind) VALUES (?, ?, ?, 'web')
       ON CONFLICT(id) DO UPDATE SET display_name = excluded.display_name, short_name = excluded.short_name
     `).run(id, displayName, shortName);
-    claimPendingRoomMemberships(id, normalizedUsername);
+    claimPendingMemberships(id, normalizedUsername);
     return id;
   }
   return verifySignedSession(parseCookies(req).supachat_session);
@@ -593,7 +611,7 @@ const server = createServer(async (req, res) => {
         INSERT INTO users(id, display_name, short_name, kind) VALUES (?, ?, ?, 'web')
         ON CONFLICT(id) DO UPDATE SET display_name = excluded.display_name, short_name = excluded.short_name
       `).run(id, displayName, shortName);
-      claimPendingRoomMemberships(id, username);
+      claimPendingMemberships(id, username);
       const token = signSession({ user: id, kind: 'native', exp: Date.now() + 30 * 24 * 60 * 60_000 });
       const user = db.prepare('SELECT id, display_name, short_name, role FROM users WHERE id = ?').get(id);
       return json(res, 200, { token, user, rooms: roomsFor(id) });
@@ -724,32 +742,32 @@ const server = createServer(async (req, res) => {
       const result = db.prepare('UPDATE account_deletion_requests SET status = ?, resolved_at = ?, resolution_note = ? WHERE id = ?').run(status, ['completed','rejected'].includes(status) ? Date.now() : null, note, Number(deletionStatusPath[1]));
       return result.changes ? json(res, 200, { ok: true }) : json(res, 404, { error: 'deletion_request_not_found' });
     }
-    if (url.pathname === '/api/admin/groups' && req.method === 'GET') {
+    if (url.pathname === '/api/admin/rooms' && req.method === 'GET') {
       if (!admin) return json(res, 403, { error: 'admin_required' });
-      const groups = db.prepare(`SELECT c.id, c.name, COUNT(cm.user_id) AS member_count FROM conversations c
+      const rooms = db.prepare(`SELECT c.id, c.name, COUNT(cm.user_id) AS member_count FROM conversations c
         LEFT JOIN conversation_members cm ON cm.conversation_id = c.id WHERE c.kind IN ('shared','room') GROUP BY c.id ORDER BY c.name`).all();
       const members = db.prepare(`SELECT cm.conversation_id, u.id, COALESCE(cm.display_name, u.display_name) AS display_name, u.short_name, u.kind, u.role
         FROM conversation_members cm JOIN users u ON u.id = cm.user_id ORDER BY COALESCE(cm.display_name, u.display_name)`).all();
       const users = db.prepare('SELECT id, display_name, short_name, kind, role FROM users WHERE revoked_at IS NULL ORDER BY display_name').all();
-      return json(res, 200, { groups: groups.map((group) => ({ ...group, members: members.filter((member) => member.conversation_id === group.id) })), users });
+      return json(res, 200, { rooms: rooms.map((room) => ({ ...room, members: members.filter((member) => member.conversation_id === room.id) })), users });
     }
-    if (url.pathname === '/api/admin/groups' && req.method === 'POST') {
+    if (url.pathname === '/api/admin/rooms' && req.method === 'POST') {
       if (!admin) return json(res, 403, { error: 'admin_required' });
       if (webUser(req) && !sameOrigin(req)) return json(res, 403, { error: 'origin_rejected' });
       const payload = await body(req); const name = String(payload.name || '').trim();
       const id = String(payload.id || name).trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
-      if (!/^[a-z0-9][a-z0-9-]{1,39}$/.test(id) || name.length < 2 || name.length > 60) return json(res, 400, { error: 'invalid_group' });
+      if (!/^[a-z0-9][a-z0-9-]{1,39}$/.test(id) || name.length < 2 || name.length > 60) return json(res, 400, { error: 'invalid_room' });
       try { db.prepare("INSERT INTO conversations(id, name, kind) VALUES (?, ?, 'room')").run(id, name); }
-      catch (error) { if (String(error).includes('UNIQUE')) return json(res, 409, { error: 'group_exists' }); throw error; }
+      catch (error) { if (String(error).includes('UNIQUE')) return json(res, 409, { error: 'room_exists' }); throw error; }
       db.prepare('INSERT INTO conversation_members(conversation_id, user_id, display_name) VALUES (?, ?, ?)').run(id, user, user === 'papa' ? 'Jay' : null);
-      return json(res, 201, { group: { id, name, members: [db.prepare('SELECT id, display_name, short_name, kind, role FROM users WHERE id = ?').get(user)] } });
+      return json(res, 201, { room: { id, name, members: [db.prepare('SELECT id, display_name, short_name, kind, role FROM users WHERE id = ?').get(user)] } });
     }
-    const memberPath = url.pathname.match(/^\/api\/admin\/groups\/([^/]+)\/members(?:\/([^/]+))?$/);
+    const memberPath = url.pathname.match(/^\/api\/admin\/rooms\/([^/]+)\/members(?:\/([^/]+))?$/);
     if (memberPath && ['POST','DELETE'].includes(req.method)) {
       if (!admin) return json(res, 403, { error: 'admin_required' });
       if (webUser(req) && !sameOrigin(req)) return json(res, 403, { error: 'origin_rejected' });
       const roomId = decodeURIComponent(memberPath[1]);
-      if (!db.prepare("SELECT 1 FROM conversations WHERE id = ? AND kind IN ('shared','room')").get(roomId)) return json(res, 404, { error: 'group_not_found' });
+      if (!db.prepare("SELECT 1 FROM conversations WHERE id = ? AND kind IN ('shared','room')").get(roomId)) return json(res, 404, { error: 'room_not_found' });
       if (req.method === 'POST') {
         const payload = await body(req); const memberId = String(payload.user_id || '');
         if (!db.prepare('SELECT 1 FROM users WHERE id = ? AND revoked_at IS NULL').get(memberId)) return json(res, 404, { error: 'user_not_found' });
@@ -762,6 +780,41 @@ const server = createServer(async (req, res) => {
       return json(res, 200, { ok: true });
     }
 
+    if (url.pathname === '/api/admin/user-groups' && req.method === 'GET') {
+      if (!admin) return json(res, 403, { error: 'admin_required' });
+      const groups = db.prepare(`SELECT g.id, g.name, COUNT(gm.user_id) AS member_count FROM user_groups g
+        LEFT JOIN user_group_members gm ON gm.group_id = g.id GROUP BY g.id ORDER BY g.name`).all();
+      const members = db.prepare(`SELECT gm.group_id, u.id, u.display_name, u.short_name, u.kind, u.role FROM user_group_members gm
+        JOIN users u ON u.id = gm.user_id ORDER BY u.display_name`).all();
+      const users = db.prepare('SELECT id, display_name, short_name, kind, role FROM users WHERE revoked_at IS NULL ORDER BY display_name').all();
+      return json(res, 200, { groups: groups.map((group) => ({ ...group, members: members.filter((member) => member.group_id === group.id) })), users });
+    }
+    if (url.pathname === '/api/admin/user-groups' && req.method === 'POST') {
+      if (!admin) return json(res, 403, { error: 'admin_required' });
+      if (webUser(req) && !sameOrigin(req)) return json(res, 403, { error: 'origin_rejected' });
+      const payload = await body(req); const name = String(payload.name || '').trim();
+      const id = String(payload.id || name).trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
+      if (!/^[a-z0-9][a-z0-9-]{1,39}$/.test(id) || name.length < 2 || name.length > 60) return json(res, 400, { error: 'invalid_user_group' });
+      try { db.prepare('INSERT INTO user_groups(id, name) VALUES (?, ?)').run(id, name); }
+      catch (error) { if (String(error).includes('UNIQUE')) return json(res, 409, { error: 'user_group_exists' }); throw error; }
+      return json(res, 201, { group: { id, name, members: [] } });
+    }
+    const userGroupMemberPath = url.pathname.match(/^\/api\/admin\/user-groups\/([^/]+)\/members(?:\/([^/]+))?$/);
+    if (userGroupMemberPath && ['POST','DELETE'].includes(req.method)) {
+      if (!admin) return json(res, 403, { error: 'admin_required' });
+      if (webUser(req) && !sameOrigin(req)) return json(res, 403, { error: 'origin_rejected' });
+      const groupId = decodeURIComponent(userGroupMemberPath[1]);
+      if (!db.prepare('SELECT 1 FROM user_groups WHERE id = ?').get(groupId)) return json(res, 404, { error: 'user_group_not_found' });
+      if (req.method === 'POST') {
+        const payload = await body(req); const memberId = String(payload.user_id || '');
+        if (!db.prepare('SELECT 1 FROM users WHERE id = ? AND revoked_at IS NULL').get(memberId)) return json(res, 404, { error: 'user_not_found' });
+        db.prepare('INSERT OR IGNORE INTO user_group_members(group_id, user_id) VALUES (?, ?)').run(groupId, memberId);
+        return json(res, 200, { ok: true });
+      }
+      db.prepare('DELETE FROM user_group_members WHERE group_id = ? AND user_id = ?').run(groupId, decodeURIComponent(userGroupMemberPath[2] || ''));
+      return json(res, 200, { ok: true });
+    }
+
     if (url.pathname === '/api/admin/invitations' && req.method === 'POST') {
       if (!admin) return json(res, 403, { error: 'admin_required' });
       if (webUser(req) && !sameOrigin(req)) return json(res, 403, { error: 'origin_rejected' });
@@ -769,8 +822,12 @@ const server = createServer(async (req, res) => {
       const username = String(payload.username || '').trim().toLowerCase();
       const displayName = String(payload.display_name || '').trim();
       const email = String(payload.email || '').trim().toLowerCase();
-      const roomId = String(payload.room_id || '').trim().toLowerCase();
-      if (!db.prepare("SELECT 1 FROM conversations WHERE id = ? AND kind IN ('shared','room')").get(roomId) || !/^[a-z0-9][a-z0-9._-]{1,31}$/.test(username) || !displayName || displayName.length > 80 || (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) {
+      const requestedRoomIds = Array.isArray(payload.room_ids) ? payload.room_ids : payload.room_id ? [payload.room_id] : [];
+      const roomIds = [...new Set(requestedRoomIds.map((value) => String(value).trim().toLowerCase()).filter(Boolean))];
+      const userGroupId = String(payload.user_group_id || '').trim().toLowerCase();
+      const validRooms = roomIds.every((roomId) => db.prepare("SELECT 1 FROM conversations WHERE id = ? AND kind IN ('shared','room')").get(roomId));
+      const validUserGroup = !userGroupId || db.prepare('SELECT 1 FROM user_groups WHERE id = ?').get(userGroupId);
+      if (!validRooms || !validUserGroup || (!roomIds.length && !userGroupId) || !/^[a-z0-9][a-z0-9._-]{1,31}$/.test(username) || !displayName || displayName.length > 80 || (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) {
         return json(res, 400, { error: 'invalid_invitation' });
       }
       const expiresAt = Date.now() + 7 * 24 * 60 * 60_000;
@@ -781,7 +838,7 @@ const server = createServer(async (req, res) => {
         if (!config.authentikApiToken || !inviteFlowId) return json(res, 503, { error: 'invites_not_configured' });
         const invitationResponse = await fetch(`${config.authentikApiUrl}/stages/invitation/invitations/`, {
           method: 'POST', headers: { authorization: `Bearer ${config.authentikApiToken}`, 'content-type': 'application/json', accept: 'application/json' },
-          body: JSON.stringify({ name: `supachat_${roomId}_${Date.now()}`, expires: new Date(expiresAt).toISOString(), fixed_data: { username, name: displayName, email }, single_use: true, flow: inviteFlowId }),
+          body: JSON.stringify({ name: `supachat_${username}_${Date.now()}`, expires: new Date(expiresAt).toISOString(), fixed_data: { username, name: displayName, email }, single_use: true, flow: inviteFlowId }),
         });
         if (!invitationResponse.ok) {
           console.error('Authentik invitation creation failed', invitationResponse.status, await invitationResponse.text());
@@ -789,15 +846,22 @@ const server = createServer(async (req, res) => {
         }
         invitation = await invitationResponse.json();
       }
-      db.prepare(`INSERT INTO pending_room_memberships(username, conversation_id, display_name, invitation_id, expires_at, claimed_at)
+      const pendingRoom = db.prepare(`INSERT INTO pending_room_memberships(username, conversation_id, display_name, invitation_id, expires_at, claimed_at)
         VALUES (?, ?, ?, ?, ?, NULL) ON CONFLICT(username, conversation_id) DO UPDATE SET display_name=excluded.display_name,
-        invitation_id=excluded.invitation_id, expires_at=excluded.expires_at, claimed_at=NULL`).run(username, roomId, displayName, invitation.pk, expiresAt);
+        invitation_id=excluded.invitation_id, expires_at=excluded.expires_at, claimed_at=NULL`);
+      for (const roomId of roomIds) pendingRoom.run(username, roomId, displayName, invitation.pk, expiresAt);
+      if (userGroupId) db.prepare(`INSERT INTO pending_user_group_memberships(username, group_id, invitation_id, expires_at, claimed_at)
+        VALUES (?, ?, ?, ?, NULL) ON CONFLICT(username, group_id) DO UPDATE SET invitation_id=excluded.invitation_id,
+        expires_at=excluded.expires_at, claimed_at=NULL`).run(username, userGroupId, invitation.pk, expiresAt);
       const enrollmentSlug = 'supachat-invitation-enrollment';
       const enrollmentUrl = new URL(`https://auth.${config.portalHost}/if/flow/${enrollmentSlug}/`);
       enrollmentUrl.searchParams.set('itoken', invitation.pk);
-      enrollmentUrl.searchParams.set('next', `https://${config.portalHost}/?welcome=1&room=${encodeURIComponent(roomId)}`);
-      enrollmentUrl.searchParams.set('room', roomId);
-      return json(res, 201, { url: enrollmentUrl.toString(), username, room_id: roomId, expires_at: expiresAt });
+      const portalUrl = new URL(`https://${config.portalHost}/`); portalUrl.searchParams.set('welcome', '1');
+      if (roomIds.length) portalUrl.searchParams.set('room', roomIds[0]);
+      enrollmentUrl.searchParams.set('next', portalUrl.toString());
+      const invitationUrl = enrollmentUrl.toString();
+      const qrDataUrl = await QRCode.toDataURL(invitationUrl, { errorCorrectionLevel: 'M', margin: 2, width: 320, color: { dark: '#10200f', light: '#f6f0dc' } });
+      return json(res, 201, { url: invitationUrl, qr_data_url: qrDataUrl, username, room_ids: roomIds, user_group_id: userGroupId || null, expires_at: expiresAt });
     }
 
     if (url.pathname === '/api/notifications/devices' && req.method === 'POST') {

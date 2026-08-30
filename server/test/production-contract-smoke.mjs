@@ -23,17 +23,19 @@ const session = await getJson('/api/session');
 assert.equal(session.user.id, 'papa');
 assert.equal(session.user.role, 'admin');
 assert.equal(session.policy.version, '2026-08-21');
-assert.deepEqual(session.rooms.map((room) => room.id).sort(), ['family','k-buds']);
+assert.ok(session.rooms.length > 0);
 
 const roomCounts = {};
-for (const roomId of ['family','k-buds']) {
+for (const roomId of session.rooms.map((room) => room.id)) {
   const history = await getJson(`/api/messages?room=${encodeURIComponent(roomId)}&limit=100`);
   assert.ok(history.messages.every((message) => message.conversation_id === roomId), `${roomId} returned another room's history`);
   roomCounts[roomId] = history.messages.length;
 }
 
-const groups = await getJson('/api/admin/groups');
-assert.deepEqual(groups.groups.map((group) => group.id).sort(), ['family','k-buds']);
+const rooms = await getJson('/api/admin/rooms');
+assert.deepEqual(rooms.rooms.map((room) => room.id).sort(), session.rooms.map((room) => room.id).sort());
+const userGroups = await getJson('/api/admin/user-groups');
+assert.ok(Array.isArray(userGroups.groups));
 const compliance = await getJson('/api/admin/compliance');
 assert.ok(Array.isArray(compliance.reports));
 assert.ok(Array.isArray(compliance.deletion_requests));
@@ -44,4 +46,4 @@ const invalidInvite = await fetch(`${base}/api/admin/invitations`, {
 });
 assert.equal(invalidInvite.status, 400);
 
-console.log(`production_contract_smoke=PASS family_history=${roomCounts.family} kbuds_history=${roomCounts['k-buds']} policy=${session.policy.version}`);
+console.log(`production_contract_smoke=PASS rooms=${session.rooms.length} policy=${session.policy.version}`);

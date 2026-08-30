@@ -20,8 +20,9 @@ try {
     const page = await browser.newPage({viewport});
     await page.route('**/api/**', async (route) => {
       const url = route.request().url();
-      const groups = [{id:'family',name:'Family',member_count:3,members:[{id:'papa',display_name:'Papa',kind:'web'}]},{id:'k-buds',name:'K-BUDS',member_count:1,members:[{id:'papa',display_name:'Papa',kind:'web'}]}];
-      const json = url.includes('/session') ? {user:{id:'papa',display_name:'Papa',role:'admin'},rooms:[{id:'family',name:'Family'},{id:'k-buds',name:'K-BUDS'}],policy:{version:'2026-08-21',accepted_at:Date.now()}} : url.includes('/admin/compliance') ? {reports:[],deletion_requests:[]} : url.includes('/admin/groups') ? {groups,users:groups[0].members} : url.includes('/messages') ? {messages:[]} : url.includes('/presence') ? {presence:[]} : {url:'https://auth.supachat.net/if/flow/supachat-invitation-enrollment/?itoken=test'};
+      const rooms = [{id:'family',name:'Family',member_count:3,members:[{id:'papa',display_name:'Papa',kind:'web'}]},{id:'k-buds',name:'K-BUDS',member_count:1,members:[{id:'papa',display_name:'Papa',kind:'web'}]}];
+      const groups = [{id:'household',name:'Household',member_count:1,members:[{id:'papa',display_name:'Papa',kind:'web'}]}];
+      const json = url.includes('/session') ? {user:{id:'papa',display_name:'Papa',role:'admin'},rooms:rooms.map(({id,name})=>({id,name})),policy:{version:'2026-08-21',accepted_at:Date.now()}} : url.includes('/admin/compliance') ? {reports:[],deletion_requests:[]} : url.includes('/admin/user-groups') ? {groups,users:groups[0].members} : url.includes('/admin/rooms') ? {rooms,users:rooms[0].members} : url.includes('/messages') ? {messages:[]} : url.includes('/presence') ? {presence:[]} : {url:'https://auth.supachat.net/if/flow/supachat-invitation-enrollment/?itoken=test',qr_data_url:'data:image/png;base64,iVBORw0KGgo=',room_ids:['family'],user_group_id:null};
       await route.fulfill({status:url.includes('/invitations') ? 201 : 200,contentType:'application/json',body:JSON.stringify(json)});
     });
     await page.addInitScript(() => {

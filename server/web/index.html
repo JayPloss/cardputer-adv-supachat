@@ -37,22 +37,27 @@
     <dialog id="admin-zone" class="admin-zone" aria-labelledby="admin-title">
       <section class="admin-card" data-vi-container="true">
         <div class="admin-heading">
-          <div><p class="eyebrow" data-i18n="adminZone">ADMIN ZONE</p><h2 id="admin-title" data-i18n="groups">Groups</h2><p data-i18n="adminIntro">Create rooms, manage their members, and invite someone directly into one.</p></div>
+          <div><p class="eyebrow" data-i18n="adminZone">ADMIN ZONE</p><h2 id="admin-title" data-i18n="rooms">Rooms</h2><p data-i18n="adminIntro">Manage chat rooms and keep user groups separate.</p></div>
           <button id="admin-close" class="admin-close" type="button" aria-label="Close admin zone">×</button>
         </div>
-        <form id="new-group-form" class="admin-section"><h3 data-i18n="newGroup">New group</h3><div class="admin-inline"><input id="new-group-name" name="name" placeholder="Sunday Crew" required maxlength="60"><button type="submit" data-i18n="create">Create</button></div><p id="group-state" class="invite-state" role="status"></p></form>
-        <div class="admin-section"><h3>Manage group</h3><label for="manage-room">Group</label><select id="manage-room"></select><div id="group-members" class="group-members"></div><label for="existing-user">Add existing user</label><div class="admin-inline"><select id="existing-user"></select><button id="add-member" type="button">Add</button></div></div>
+        <form id="new-group-form" class="admin-section"><h3 data-i18n="newRoom">New room</h3><div class="admin-inline"><input id="new-group-name" name="name" placeholder="Sunday Crew" required maxlength="60"><button type="submit" data-i18n="create">Create</button></div><p id="group-state" class="invite-state" role="status"></p></form>
+        <div class="admin-section"><h3 data-i18n="manageRoom">Manage room</h3><label for="manage-room" data-i18n="room">Room</label><select id="manage-room"></select><div id="group-members" class="group-members"></div><label for="existing-user" data-i18n="addExisting">Add existing user</label><div class="admin-inline"><select id="existing-user"></select><button id="add-member" type="button" data-i18n="add">Add</button></div></div>
+        <form id="new-user-group-form" class="admin-section"><h3 data-i18n="newUserGroup">New user group</h3><p data-i18n="userGroupHelp">User groups organize people and do not grant room access.</p><div class="admin-inline"><input id="new-user-group-name" name="name" placeholder="North Shore" required maxlength="60"><button type="submit" data-i18n="create">Create</button></div><p id="user-group-state" class="invite-state" role="status"></p></form>
+        <div class="admin-section"><h3 data-i18n="manageUserGroup">Manage user group</h3><label for="manage-user-group" data-i18n="userGroup">User group</label><select id="manage-user-group"></select><div id="user-group-members" class="group-members"></div><label for="existing-group-user" data-i18n="addExisting">Add existing user</label><div class="admin-inline"><select id="existing-group-user"></select><button id="add-group-member" type="button" data-i18n="add">Add</button></div></div>
         <form id="invite-form" class="admin-section"><h3 data-i18n="inviteUser">Invite new user</h3><p data-i18n="inviteExpiry">One-use link · expires in seven days.</p><label for="invite-name" data-i18n="name">Name</label>
         <input id="invite-name" name="display_name" autocomplete="name" placeholder="Aunt Sarah" required maxlength="80">
         <label for="invite-username" data-i18n="username">Username</label>
         <input id="invite-username" name="username" autocomplete="username" placeholder="sarah" required maxlength="80">
         <label for="invite-email"><span data-i18n="email">Email</span> <span data-i18n="optional">(optional)</span></label>
         <input id="invite-email" name="email" type="email" autocomplete="email" placeholder="sarah@example.com" maxlength="160">
-        <label for="invite-room" data-i18n="room">Room</label>
-        <select id="invite-room" name="room_id" required></select>
+        <label for="invite-room" data-i18n="rooms">Rooms</label>
+        <select id="invite-room" name="room_ids" multiple size="4"></select>
+        <label for="invite-user-group" data-i18n="userGroup">User group</label>
+        <select id="invite-user-group" name="user_group_id"><option value="" data-i18n="none">None</option></select>
         <p id="invite-state" class="invite-state" role="status" aria-live="polite"></p>
         <div id="invite-result" class="invite-result" hidden>
           <strong data-i18n="inviteReady">Invite ready</strong>
+          <img id="invite-qr" class="invite-qr" alt="One-time signup QR code">
           <a id="invite-link" href="#" target="_blank" rel="noreferrer"></a>
           <button id="invite-share" type="button" data-i18n="shareInvite">Share invite</button>
         </div>
