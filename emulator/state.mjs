@@ -23,6 +23,7 @@ export class SupaChatState {
   up(){if(this.screen==='menu')this.menuSelection=(this.menuSelection+6)%7;else if(this.screen==='rooms')this.roomSelection=Math.max(0,this.roomSelection-1);else if(this.screen==='networks')this.networkSelection=Math.max(0,this.networkSelection-1);else if(this.screen==='walkie')this.voiceSelection=Math.max(0,this.voiceSelection-1);this.tone()}
   down(){if(this.screen==='menu')this.menuSelection=(this.menuSelection+1)%7;else if(this.screen==='rooms')this.roomSelection=Math.min(this.rooms.length-1,this.roomSelection+1);else if(this.screen==='networks')this.networkSelection=Math.min(networks.length-1,this.networkSelection+1);else if(this.screen==='walkie')this.voiceSelection=Math.min(this.messages.filter(m=>m.voice).length-1,this.voiceSelection+1);this.tone()}
   right(){if(this.screen==='chat')this.switchRoom(1);else if(this.screen==='menu')this.open(menuItems[this.menuSelection]);else if(this.screen==='networks')this.selectNetwork();else if(this.screen==='volume')this.volume=Math.min(4,this.volume+1);this.tone()}
+  physicalKey(direction,printable,{fn=false}={}){const textEntry=this.screen==='chat'||this.screen==='password';if((textEntry&&fn)||(!textEntry&&!fn)){this[direction]?.();return'navigation'}if(textEntry){this.type(printable);return'text'}return'ignored'}
   enter(){
     if(this.gravePending&&(this.screen==='chat'||this.screen==='password')){this[this.screen==='chat'?'draft':'password']+="'";this.gravePending=false}
     if(this.screen==='menu')this.open(menuItems[this.menuSelection]);

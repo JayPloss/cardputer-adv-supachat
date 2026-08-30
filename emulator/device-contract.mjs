@@ -5,6 +5,7 @@ import tls from 'node:tls';
 const firmware = fs.readFileSync(new URL('../firmware/src/main.cpp', import.meta.url), 'utf8');
 const songHeader = fs.readFileSync(new URL('../firmware/include/keypress_song.h', import.meta.url), 'utf8');
 const installedFonts = fs.readFileSync(new URL('../firmware/.pio/libdeps/emmanuelle/M5GFX/src/lgfx/v1/lgfx_fonts.cpp', import.meta.url), 'utf8');
+const installedGlcdFont = fs.readFileSync(new URL('../firmware/.pio/libdeps/emmanuelle/M5GFX/src/lgfx/Fonts/glcdfont.h', import.meta.url), 'utf8');
 const pinMatch = firmware.match(/kTlsFingerprint\[\] = "([0-9A-Fa-f :]+)"/);
 assert.ok(pinMatch, 'firmware TLS pin is missing');
 
@@ -66,7 +67,7 @@ assert.deepEqual(consumed, [101, 202], 'M5 two-slot DMA delay contract');
 // Shift+/ must be printable '?' and must not activate the same physical key's
 // right-arrow navigation role.
 const shiftedSlash = { shift: true, word: ['?'], physicalRight: true };
-const navigationChord = !(shiftedSlash.shift || false);
+const navigationChord = Boolean(shiftedSlash.fn) && !(shiftedSlash.shift || false);
 assert.equal(navigationChord && shiftedSlash.physicalRight, false);
 assert.equal(shiftedSlash.word[0], '?');
 assert.match(firmware, /if \(character == '\?'\) \{ appendKeyboardText\(target, u8"é"/,
@@ -75,10 +76,20 @@ assert.match(firmware, /if \(character == '\\'\'\) \{ frenchGravePending = true;
   'French apostrophe must wait for its composition key');
 assert.match(firmware, /character == 'a'[\s\S]*u8"à"[\s\S]*character == 'e'[\s\S]*u8"è"/,
   'French dead-key composition must emit à and è');
-assert.match(installedFonts, /font0_info\[\].*\{\s*0,\s*255,\s*5\s*\}/,
-  'the installed M5GFX Font0 must cover Latin-1 code points');
-assert.match(firmware, /Font2 only contains ASCII[\s\S]*setFont\(&fonts::Font0\); display\.setTextSize\(1\.5f\)/,
-  'chat messages must use the installed Latin-1-capable font');
+assert.match(firmware, /textEntryScreen[\s\S]*textEntryScreen \? keys\.fn : !keys\.fn/,
+  'arrows must require Fn during text entry and remain primary elsewhere');
+const cp437 = new Map([[0xA9,0x82],[0xA8,0x8A],[0xA0,0x85]]);
+assert.deepEqual([...Buffer.from('éèà')].reduce((out,byte,index,input)=>{if(byte===0xC3)out.push(cp437.get(input[index+1]));return out},[]),[0x82,0x8A,0x85]);
+assert.match(firmware, /0xA9[\s\S]*0x82[\s\S]*0xA8[\s\S]*0x8A[\s\S]*0xA0[\s\S]*0x85/,
+  'UTF-8 accents must map to the matching CP437 bitmap slots');
+assert.match(firmware, /UTF8_SWITCH, false[\s\S]*cp437\(true\)[\s\S]*print\(encoded\)[\s\S]*UTF8_SWITCH, true/,
+  'Font0 accent output must bypass Unicode-to-wrong-slot rendering');
+const fontBytes = [...installedGlcdFont.match(/font\[\].*?= \{([\s\S]*?)\};/)[1].matchAll(/0x([0-9A-Fa-f]{2})/g)].map(match=>Number.parseInt(match[1],16));
+const glyph = code => fontBytes.slice(code*5,code*5+5);
+assert.deepEqual(glyph(0x82),[0x38,0x54,0x54,0x55,0x59],'é must use the installed CP437 e-acute bitmap');
+assert.deepEqual(glyph(0x8A),[0x39,0x55,0x54,0x54,0x58],'è must use the installed CP437 e-grave bitmap');
+assert.deepEqual(glyph(0x85),[0x21,0x55,0x54,0x78,0x40],'à must use the installed CP437 a-grave bitmap');
+assert.notDeepEqual(glyph(0x82),glyph(0xE9),'é must not render through the Greek-symbol slot reported on hardware');
 
 const bootStep = Number(firmware.match(/kBootTuneStepMs = (\d+)/)[1]);
 const bootTuneBody = firmware.match(/kBootTuneFrequencies\[\] = \{([\s\S]*?)\};/)[1];

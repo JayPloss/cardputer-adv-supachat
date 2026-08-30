@@ -41,7 +41,7 @@ constexpr bool kFrenchUi = true;
 constexpr bool kFrenchUi = false;
 #endif
 const char *uiText(const char *english, const char *french) { return kFrenchUi ? french : english; }
-constexpr char kFirmwareVersion[] = "v0.44";
+constexpr char kFirmwareVersion[] = "v0.45";
 constexpr size_t kMessageLimit = 140;
 constexpr size_t kHistoryLimit = 100;
 constexpr uint32_t kToneIntervalMs = 40;
@@ -1199,6 +1199,7 @@ void drawHeader(const char *title) {
 
 size_t utf8CharacterCount(const String &text);
 String utf8Tail(const String &text, size_t maximumCharacters);
+void printFont0Text(const String &text);
 
 void drawChat() {
   auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader("");
@@ -1243,23 +1244,23 @@ void drawChat() {
   if (firstLine < static_cast<int>(lines.size())) lines[firstLine].showSender = true;
   int y = 24;
   for (int index = firstLine; index < static_cast<int>(lines.size()); index++) {
-    // Font2 only contains ASCII (32..127). Font0 covers Latin-1, including é/è/à.
+    // Font0 stores CP437 bitmaps; map UTF-8 accents to their actual glyph slots.
     display.setFont(&fonts::Font0); display.setTextSize(1.5f);
     const String prefix = lines[index].showSender ? lines[index].sender + ": " : "";
     const int x = lines[index].mine ? std::max(3, 237 - display.textWidth(prefix + lines[index].text)) : 3;
     display.setCursor(x, y);
     if (lines[index].showSender) {
-      display.setTextColor(lines[index].colour, TFT_BLACK); display.print(lines[index].sender);
+      display.setTextColor(lines[index].colour, TFT_BLACK); printFont0Text(lines[index].sender);
       display.setTextColor(TFT_WHITE, TFT_BLACK); display.print(": ");
     } else display.setTextColor(TFT_WHITE, TFT_BLACK);
-    display.print(lines[index].text); y += 17;
+    printFont0Text(lines[index].text); y += 17;
   }
   xSemaphoreGive(stateMutex);
   display.setFont(&fonts::Font0);
   display.drawFastHLine(0, 106, 240, TFT_DARKGREY);
   display.setTextSize(1);
   display.setTextColor(TFT_YELLOW, TFT_BLACK); display.setCursor(3, 112); display.print("> ");
-  display.setTextColor(TFT_WHITE, TFT_BLACK); display.print(utf8Tail(draft, 34));
+  display.setTextColor(TFT_WHITE, TFT_BLACK); printFont0Text(utf8Tail(draft, 34));
   display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(198, 126); display.printf("%d/140", utf8CharacterCount(draft));
 }
 
@@ -1419,6 +1420,30 @@ String utf8Tail(const String &text, size_t maximumCharacters) {
   return text.substring(start);
 }
 
+String font0Cp437Text(const String &text) {
+  String encoded;
+  encoded.reserve(text.length());
+  for (size_t index = 0; index < text.length(); index++) {
+    const uint8_t first = static_cast<uint8_t>(text[index]);
+    if (first == 0xC3 && index + 1 < text.length()) {
+      const uint8_t second = static_cast<uint8_t>(text[index + 1]);
+      if (second == 0xA9) { encoded += static_cast<char>(0x82); index++; continue; } // é
+      if (second == 0xA8) { encoded += static_cast<char>(0x8A); index++; continue; } // è
+      if (second == 0xA0) { encoded += static_cast<char>(0x85); index++; continue; } // à
+    }
+    encoded += static_cast<char>(first);
+  }
+  return encoded;
+}
+
+void printFont0Text(const String &text) {
+  const String encoded = font0Cp437Text(text);
+  uiCanvas.setAttribute(lgfx::attribute::UTF8_SWITCH, false);
+  uiCanvas.cp437(true);
+  uiCanvas.print(encoded);
+  uiCanvas.setAttribute(lgfx::attribute::UTF8_SWITCH, true);
+}
+
 bool appendKeyboardText(String &target, const char *text, size_t limit, bool byteLimit) {
   const size_t added = strlen(text);
   if (byteLimit ? target.length() + added > limit : utf8CharacterCount(target) + 1 > limit) return false;
@@ -1540,9 +1565,13 @@ void switchRoom(int direction) {
 void handleKeyboard() {
   if (!M5Cardputer.Keyboard.isChange() || !M5Cardputer.Keyboard.isPressed()) return;
   const auto keys = M5Cardputer.Keyboard.keysState();
-  // Shift+/ is '?', Shift+. is '>', etc. Modifier chords are text input,
-  // never navigation, even when the printed arrow shares that physical key.
-  const bool navigationChord = !(keys.shift || keys.ctrl || keys.alt || keys.fn || keys.opt);
+  // Shift+/ is '?', Shift+. is '>', etc. Shifted punctuation remains text;
+  // only Fn selects the arrow layer while a text field is active.
+  // Text-entry screens prioritize punctuation and require Fn for arrows. On
+  // navigation screens, the coloured arrows are primary and need no Fn.
+  const bool textEntryScreen = screenMode == ScreenMode::Chat || screenMode == ScreenMode::NetworkPassword;
+  const bool otherModifier = keys.shift || keys.ctrl || keys.alt || keys.opt;
+  const bool navigationChord = !otherModifier && (textEntryScreen ? keys.fn : !keys.fn);
   const bool goUp = navigationChord && navUp();
   const bool goDown = navigationChord && navDown();
   const bool goLeft = navigationChord && navLeft();
