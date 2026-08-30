@@ -13,5 +13,8 @@ assert.match(firmware,/client\.verify\(kTlsFingerprint, kApiHost\)/);assert.matc
 assert.match(firmware,/latest_message_id/);assert.match(firmware,/void switchRoom\(int direction\)/);assert.match(firmware,/if \(goLeft\) \{ switchRoom\(-1\)/);assert.match(firmware,/if \(goRight\) \{ switchRoom\(1\)/);
 assert.match(firmware,/messageRoomId\.isEmpty\(\) \|\| messageRoomId != currentRoomId/);
 assert.match(firmware,/roomHistoryPath\(currentRoomId/);assert.match(firmware,/message\.roomId = currentRoomId/);assert.match(firmware,/queuedRoomId != currentRoomId/);
-const pin=firmware.match(/kTlsFingerprint\[\] = "([0-9A-F ]+)"/)[1].replaceAll(' ','');assert.equal(pin.length,64);assert.match(firmware,/navigationChord = !\(keys\.shift \|\| keys\.ctrl/);assert.match(firmware,/menuSelection = \(menuSelection \+ 1\) % 7/);assert.match(firmware,/kEspNowEnabled = false/);
+const pin=firmware.match(/kTlsFingerprint\[\] = "([0-9A-F ]+)"/)[1].replaceAll(' ','');assert.equal(pin.length,64);assert.match(firmware,/navigationChord = !\(keys\.shift \|\| keys\.ctrl/);assert.match(firmware,/menuSelection = \(menuSelection \+ 1\) % 7/);assert.match(firmware,/kEspNowEnabled = true/);
+assert.match(firmware,/kDefaultRoomId\[\] = "wolfpack"/);assert.match(firmware,/String currentRoomId = kDefaultRoomId/);
+assert.match(firmware,/char roomId\[9\]/);assert.match(firmware,/String\(packet->roomId\) != currentRoomId/);
+assert.match(firmware,/esp_wifi_set_channel\(kEspNowFallbackChannel, WIFI_SECOND_CHAN_NONE\)/);
 console.log('supachat_emulator_flow=PASS');

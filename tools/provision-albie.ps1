@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$profileNames = @('COGECO-4BD000', 'Etang', 'Pianoface', '✨Starface✨', 'Porky Worky')
+$profileNames = @('COGECO-4BD000', 'Etang', 'Pianoface', '✨Starface✨', 'Porky Worky', 'Twincessland')
 $esptool = 'C:\Users\PC\.platformio\packages\tool-esptoolpy\esptool.py'
 
 function Get-SavedWifiKey {

@@ -65,7 +65,15 @@ constexpr char kVoiceClipPath[] = "/supachat-voice-last.pcm";
 constexpr uint32_t kWalkieMaxMs = 30000;
 constexpr uint32_t kPttReleaseDebounceMs = 500;
 constexpr uint32_t kEspNowBeaconMs = 30000;
-constexpr bool kEspNowEnabled = false;
+constexpr bool kEspNowEnabled = true;
+constexpr uint8_t kEspNowFallbackChannel = 1;
+#if defined(SUPACHAT_DEVICE_EMMANUELLE) || defined(SUPACHAT_DEVICE_NAOMIE) || defined(SUPACHAT_DEVICE_ANDREW)
+constexpr char kDefaultRoomId[] = "wolfpack";
+constexpr char kDefaultRoomName[] = "Wolfpack";
+#else
+constexpr char kDefaultRoomId[] = "family";
+constexpr char kDefaultRoomName[] = "Family";
+#endif
 constexpr gpio_num_t kSdSckPin = GPIO_NUM_40;
 constexpr gpio_num_t kSdMisoPin = GPIO_NUM_39;
 constexpr gpio_num_t kSdMosiPin = GPIO_NUM_14;
@@ -185,8 +193,8 @@ std::vector<WifiProfile> wifiProfiles;
 std::vector<ScannedNetwork> scannedNetworks;
 std::vector<ChatMessage> messages;
 std::vector<ChatRoom> rooms;
-String currentRoomId = "family";
-String currentRoomName = "Family";
+String currentRoomId = kDefaultRoomId;
+String currentRoomName = kDefaultRoomName;
 // Retained clips stream to microSD. The small fallback keeps voice usable
 // without a card while reserving heap for simultaneous HTTPS and WSS TLS.
 std::array<int16_t, kVoiceFallbackSamples> voiceSamples{};
@@ -284,12 +292,14 @@ struct __attribute__((packed)) EspNowPacket {
   uint16_t sequence;
   char senderId[6];
   char senderName[8];
+  char roomId[9];
   char clientId[48];
   uint16_t payloadLength;
   uint8_t nonce[12];
   uint8_t tag[16];
-  uint8_t payload[144];
+  uint8_t payload[142];
 };
+static_assert(sizeof(EspNowPacket) <= ESP_NOW_MAX_DATA_LEN, "ESP-NOW packet exceeds transport limit");
 uint16_t espNowSequence = 0;
 String walkieHeaders;
 uint8_t meshKey[32]{};
@@ -610,6 +620,7 @@ void sendEspNowAudio(const int16_t *samples, size_t count) {
   while (offset < count) {
     EspNowPacket packet{}; packet.magic = kEspNowMagic; packet.type = static_cast<uint8_t>(EspNowType::Audio); packet.sequence = ++espNowSequence;
     strncpy(packet.senderId, kDeviceId, sizeof(packet.senderId) - 1); strncpy(packet.senderName, kDeviceName, sizeof(packet.senderName) - 1);
+    strncpy(packet.roomId, currentRoomId.c_str(), sizeof(packet.roomId) - 1);
     const size_t take = std::min<size_t>((sizeof(packet.payload) / 2), count - offset);
     if (encryptMeshPacket(packet, reinterpret_cast<const uint8_t *>(samples + offset), take * 2))
       esp_now_send(broadcast, reinterpret_cast<uint8_t *>(&packet), offsetof(EspNowPacket, payload) + packet.payloadLength);
@@ -725,7 +736,8 @@ void onEspNowReceive(const uint8_t *, const uint8_t *data, int length) {
   if (length < static_cast<int>(offsetof(EspNowPacket, payload))) return;
   const auto *packet = reinterpret_cast<const EspNowPacket *>(data);
   if (packet->magic != kEspNowMagic || packet->payloadLength > sizeof(packet->payload) ||
-      static_cast<int>(offsetof(EspNowPacket, payload) + packet->payloadLength) > length || String(packet->senderId) == kDeviceId) return;
+      static_cast<int>(offsetof(EspNowPacket, payload) + packet->payloadLength) > length ||
+      String(packet->senderId) == kDeviceId || String(packet->roomId) != currentRoomId) return;
   lastNearbyAt = millis();
   if (packet->type == static_cast<uint8_t>(EspNowType::Beacon)) { renderDirty = true; return; }
   std::vector<uint8_t> plain; if (!decryptMeshPacket(*packet, plain) || !acceptMeshNonce(packet->nonce)) return;
@@ -750,6 +762,7 @@ void sendEspNowBeacon() {
   static const uint8_t broadcast[] = {0xff,0xff,0xff,0xff,0xff,0xff};
   EspNowPacket packet{}; packet.magic = kEspNowMagic; packet.type = static_cast<uint8_t>(EspNowType::Beacon); packet.sequence = ++espNowSequence;
   strncpy(packet.senderId, kDeviceId, sizeof(packet.senderId) - 1); strncpy(packet.senderName, kDeviceName, sizeof(packet.senderName) - 1);
+  strncpy(packet.roomId, currentRoomId.c_str(), sizeof(packet.roomId) - 1);
   esp_now_send(broadcast, reinterpret_cast<uint8_t *>(&packet), offsetof(EspNowPacket, payload)); lastEspNowBeaconAt = millis();
 }
 
@@ -766,7 +779,10 @@ bool connectKnownWifi() {
     }
   }
   WiFi.scanDelete();
-  if (bestProfile < 0) { networkStatus = "NO KNOWN WIFI"; return false; }
+  if (bestProfile < 0) {
+    if (kEspNowEnabled) esp_wifi_set_channel(kEspNowFallbackChannel, WIFI_SECOND_CHAN_NONE);
+    networkStatus = "ESPNOW ONLY"; return false;
+  }
   networkStatus = "JOINING"; renderDirty = true;
   WiFi.begin(wifiProfiles[bestProfile].ssid.c_str(), wifiProfiles[bestProfile].password.c_str());
   const uint32_t started = millis();
@@ -1349,6 +1365,7 @@ void sendDraft() {
     static const uint8_t broadcast[] = {0xff,0xff,0xff,0xff,0xff,0xff};
     EspNowPacket packet{}; packet.magic = kEspNowMagic; packet.type = static_cast<uint8_t>(EspNowType::Text); packet.sequence = ++espNowSequence;
     strncpy(packet.senderId, kDeviceId, sizeof(packet.senderId) - 1); strncpy(packet.senderName, kDeviceName, sizeof(packet.senderName) - 1);
+    strncpy(packet.roomId, currentRoomId.c_str(), sizeof(packet.roomId) - 1);
     strncpy(packet.clientId, message.clientId.c_str(), sizeof(packet.clientId) - 1);
     const size_t length = std::min<size_t>(message.body.length(), sizeof(packet.payload));
     if (encryptMeshPacket(packet, reinterpret_cast<const uint8_t *>(message.body.c_str()), length))
