@@ -3,6 +3,7 @@
 #include <HTTPClient.h>
 #include <M5Cardputer.h>
 #include <Preferences.h>
+#include "changelog.h"
 #include <WebSocketsClient.h>
 #include <SD.h>
 #include <SPI.h>
@@ -43,7 +44,7 @@ constexpr bool kBuildFrenchDefault = false;
 bool frenchUi = kBuildFrenchDefault;
 String languageOverride = "auto";
 const char *uiText(const char *english, const char *french) { return frenchUi ? french : english; }
-constexpr char kFirmwareVersion[] = "v0.46";
+constexpr char kFirmwareVersion[] = "v0.47";
 constexpr size_t kMessageLimit = 140;
 constexpr size_t kHistoryLimit = 100;
 constexpr uint32_t kToneIntervalMs = 40;
@@ -199,7 +200,7 @@ uint32_t participantColour(const String &authorId, const String &authorName = ""
   return TFT_WHITE;
 }
 
-enum class ScreenMode { Chat, Menu, Rooms, Volume, Language, Walkie, Status, Networks, NetworkPassword };
+enum class ScreenMode { Chat, Menu, Rooms, Volume, Language, Changelog, Walkie, Status, Networks, NetworkPassword };
 
 Preferences preferences;
 M5Canvas uiCanvas(&M5Cardputer.Display);
@@ -260,7 +261,13 @@ volatile bool voicePlaybackCancelled = false;
 volatile bool voiceDownloadActive = false;
 int64_t voicePlayingMessageId = 0;
 int voiceInboxSelection = 0;
-int menuSelection = 0;
+constexpr int kMenuPageCount = 2;
+constexpr int kMenuItemsPerPage = 5;
+int menuPage = 0;
+int menuSelections[kMenuPageCount] = {0, 0};
+int changelogSelection = 0;
+volatile bool localOnlyMode = false;
+volatile bool wifiResumeRequested = false;
 int roomSelection = 0;
 int networkSelection = 0;
 uint8_t volumeLevel = kDefaultVolumeLevel;
@@ -1150,6 +1157,14 @@ void networkTask(void *) {
   uint32_t nextWifiAttempt = 0;
   for (;;) {
     if (manualWifiMode) { vTaskDelay(pdMS_TO_TICKS(100)); continue; }
+    if (localOnlyMode) {
+      if (WiFi.status() == WL_CONNECTED) WiFi.disconnect(false, false);
+      if (currentSsid.length() || networkStatus != "ESPNOW LOCAL") {
+        currentSsid = ""; networkStatus = "ESPNOW LOCAL"; renderDirty = true;
+      }
+      vTaskDelay(pdMS_TO_TICKS(250)); continue;
+    }
+    if (wifiResumeRequested) { wifiResumeRequested = false; nextWifiAttempt = 0; }
     const uint32_t now = millis();
     if (WiFi.status() != WL_CONNECTED && now < nextWifiAttempt) { vTaskDelay(pdMS_TO_TICKS(250)); continue; }
     if (!connectKnownWifi()) { nextWifiAttempt = millis() + kWifiRetryMs; vTaskDelay(pdMS_TO_TICKS(500)); continue; }
@@ -1272,19 +1287,21 @@ void drawChat() {
   display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(198, 126); display.printf("%d/140", utf8CharacterCount(draft));
 }
 
-const char *kMenuItemsEn[] = {"BACK TO CHAT", "ROOMS", "SYNC NOW", "VOICE MESSAGES", "VOLUME", "LANGUAGE", "NETWORKS", "STATUS"};
-const char *kMenuItemsFr[] = {"RETOUR CHAT", "SALONS", "SYNCHRO", "MESSAGES VOCAUX", "VOLUME", "LANGUE", "RESEAUX", "ETAT"};
+const char *kMenuItemsEn[] = {"BACK TO CHAT", "ROOMS", "SYNC NOW", "VOICE MESSAGES", "VOLUME", "LANGUAGE", "NETWORKS", "ESP-NOW LOCAL", "STATUS", "CHANGELOG"};
+const char *kMenuItemsFr[] = {"RETOUR CHAT", "SALONS", "SYNCHRO", "MESSAGES VOCAUX", "VOLUME", "LANGUE", "RESEAUX", "ESP-NOW LOCAL", "ETAT", "CHANGEMENTS"};
 void drawMenu() {
   auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader("MENU");
-  display.setTextSize(1);
-  for (int index = 0; index < 8; index++) {
-    const int y = 20 + index * 11; const bool selected = index == menuSelection;
-    display.fillRoundRect(6, y, 228, 9, 3, selected ? TFT_GREEN : TFT_DARKGREY);
+  display.setTextSize(1); display.setTextColor(TFT_YELLOW, TFT_DARKGREEN); display.setCursor(78, 6); display.printf("%d/%d", menuPage + 1, kMenuPageCount);
+  for (int row = 0; row < kMenuItemsPerPage; row++) {
+    const int index = menuPage * kMenuItemsPerPage + row;
+    const int y = 22 + row * 16; const bool selected = row == menuSelections[menuPage];
+    display.fillRoundRect(6, y, 228, 14, 3, selected ? TFT_GREEN : TFT_DARKGREY);
     display.setTextColor(selected ? TFT_BLACK : TFT_WHITE, selected ? TFT_GREEN : TFT_DARKGREY);
-    display.setCursor(13, y + 2); display.print(frenchUi ? kMenuItemsFr[index] : kMenuItemsEn[index]);
+    display.setCursor(13, y + 4); display.print(frenchUi ? kMenuItemsFr[index] : kMenuItemsEn[index]);
+    if (index == 7) { display.setCursor(184, y + 4); display.print(localOnlyMode ? "ON" : "OFF"); }
   }
-  display.setTextSize(1); display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 117);
-  display.print(uiText("ARROWS MOVE       OK SELECT", "FLECHES BOUGER    OK CHOISIR"));
+  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 110); display.print(uiText("LEFT/RIGHT PAGE", "GAUCHE/DROITE PAGE"));
+  display.setCursor(6, 122); display.print(uiText("UP/DOWN MOVE      ENTER OPEN", "HAUT/BAS BOUGER   ENTER OUVRIR"));
 }
 
 void drawRooms() {
@@ -1379,9 +1396,10 @@ void drawNetworkPassword() {
 }
 
 void drawLanguage();
+void drawChangelog();
 void render() {
   if (screenMode == ScreenMode::Chat) drawChat(); else if (screenMode == ScreenMode::Menu) drawMenu(); else if (screenMode == ScreenMode::Rooms) drawRooms();
-  else if (screenMode == ScreenMode::Volume) drawVolume(); else if (screenMode == ScreenMode::Language) drawLanguage();
+  else if (screenMode == ScreenMode::Volume) drawVolume(); else if (screenMode == ScreenMode::Language) drawLanguage(); else if (screenMode == ScreenMode::Changelog) drawChangelog();
   else if (screenMode == ScreenMode::Walkie) drawWalkie();
   else if (screenMode == ScreenMode::Status) drawStatus();
   else if (screenMode == ScreenMode::NetworkPassword) drawNetworkPassword(); else drawNetworks();
@@ -1412,6 +1430,21 @@ size_t utf8CharacterCount(const String &text) {
   return count;
 }
 
+void setLocalOnlyMode(bool enabled) {
+  localOnlyMode = enabled;
+  manualWifiMode = false;
+  walkieSocket.disconnect(); walkieInitialized = false; walkieConnected = false;
+  if (enabled) {
+    WiFi.disconnect(false, false); currentSsid = "";
+    esp_wifi_set_channel(kEspNowFallbackChannel, WIFI_SECOND_CHAN_NONE);
+    networkStatus = "ESPNOW LOCAL"; walkieStatus = "ESPNOW LOCAL";
+  } else {
+    wifiResumeRequested = true;
+    networkStatus = "WIFI RESUME"; walkieStatus = "RECONNECTING";
+  }
+  renderDirty = true;
+}
+
 void drawLanguage() {
   auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader(uiText("LANGUAGE", "LANGUE"));
   display.setTextSize(2); display.setTextColor(TFT_YELLOW, TFT_BLACK); display.setCursor(42, 42);
@@ -1420,6 +1453,18 @@ void drawLanguage() {
   if (languageOverride == "auto") display.print(uiText("Uses this room's group", "Selon le groupe du salon"));
   display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 116);
   display.print(uiText("LEFT/RIGHT CHANGE   OK BACK", "GAUCHE/DROITE CHANGER OK RETOUR"));
+}
+
+void drawChangelog() {
+  auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader(uiText("CHANGELOG", "CHANGEMENTS"));
+  changelogSelection = std::max(0, std::min(changelogSelection, kSupaChatChangelogCount - 1));
+  const auto &entry = kSupaChatChangelog[changelogSelection];
+  display.setTextSize(2); display.setTextColor(TFT_YELLOW, TFT_BLACK); display.setCursor(8, 25); display.print(entry.version);
+  display.setTextSize(1); display.setTextColor(TFT_WHITE, TFT_BLACK);
+  for (int line = 0; line < 4; line++) { display.setCursor(12, 49 + line * 13); display.print("- "); display.print(entry.lines[line]); }
+  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 110);
+  display.printf("%d/%d  %s", changelogSelection + 1, kSupaChatChangelogCount, uiText("UP/DOWN BUILDS", "HAUT/BAS VERSIONS"));
+  display.setCursor(6, 122); display.print(uiText("LEFT / ENTER BACK", "GAUCHE / ENTER RETOUR"));
 }
 
 void applyEffectiveLanguage() {
@@ -1568,14 +1613,17 @@ void joinSelectedNetwork() {
 }
 
 void openSelectedMenuItem() {
-  if (menuSelection == 0) screenMode = ScreenMode::Chat;
-  else if (menuSelection == 1) screenMode = ScreenMode::Rooms;
-  else if (menuSelection == 2) { syncOverride = true; networkStatus = "SYNC REQUESTED"; screenMode = ScreenMode::Chat; }
-  else if (menuSelection == 3) { screenMode = ScreenMode::Walkie; walkieStatus = "READY"; }
-  else if (menuSelection == 4) screenMode = ScreenMode::Volume;
-  else if (menuSelection == 5) screenMode = ScreenMode::Language;
-  else if (menuSelection == 6) { screenMode = ScreenMode::Networks; scanForNetworks(); }
-  else screenMode = ScreenMode::Status;
+  const int selection = menuPage * kMenuItemsPerPage + menuSelections[menuPage];
+  if (selection == 0) screenMode = ScreenMode::Chat;
+  else if (selection == 1) screenMode = ScreenMode::Rooms;
+  else if (selection == 2) { if (!localOnlyMode) syncOverride = true; networkStatus = localOnlyMode ? "ESPNOW LOCAL" : "SYNC REQUESTED"; screenMode = ScreenMode::Chat; }
+  else if (selection == 3) { screenMode = ScreenMode::Walkie; walkieStatus = localOnlyMode ? "ESPNOW LOCAL" : "READY"; }
+  else if (selection == 4) screenMode = ScreenMode::Volume;
+  else if (selection == 5) screenMode = ScreenMode::Language;
+  else if (selection == 6) { if (!localOnlyMode) { screenMode = ScreenMode::Networks; scanForNetworks(); } }
+  else if (selection == 7) setLocalOnlyMode(!localOnlyMode);
+  else if (selection == 8) screenMode = ScreenMode::Status;
+  else screenMode = ScreenMode::Changelog;
   renderDirty = true;
 }
 
@@ -1612,10 +1660,11 @@ void handleKeyboard() {
   const bool goLeft = navigationChord && navLeft();
   const bool goRight = navigationChord && navRight();
   if (screenMode == ScreenMode::Menu) {
-    if (goUp) { menuSelection = (menuSelection + 7) % 8; playNextTone(); }
-    else if (goDown) { menuSelection = (menuSelection + 1) % 8; playNextTone(); }
-    else if (goLeft) { screenMode = ScreenMode::Chat; playNextTone(); }
-    else if (goRight || keys.enter) { openSelectedMenuItem(); playNextTone(); }
+    if (goUp) { menuSelections[menuPage] = (menuSelections[menuPage] + kMenuItemsPerPage - 1) % kMenuItemsPerPage; playNextTone(); }
+    else if (goDown) { menuSelections[menuPage] = (menuSelections[menuPage] + 1) % kMenuItemsPerPage; playNextTone(); }
+    else if (goLeft) { menuPage = (menuPage + kMenuPageCount - 1) % kMenuPageCount; playNextTone(); }
+    else if (goRight) { menuPage = (menuPage + 1) % kMenuPageCount; playNextTone(); }
+    else if (keys.enter) { openSelectedMenuItem(); playNextTone(); }
     renderDirty = true; return;
   }
   if (screenMode == ScreenMode::Rooms) {
@@ -1685,6 +1734,12 @@ void handleKeyboard() {
       else languageOverride = goRight ? "auto" : "en";
       saveLanguageOverride(); playNextTone();
     } else if (keys.enter) { screenMode = ScreenMode::Menu; playNextTone(); }
+    renderDirty = true; return;
+  }
+  if (screenMode == ScreenMode::Changelog) {
+    if (goUp && changelogSelection > 0) { changelogSelection--; playNextTone(); }
+    else if (goDown && changelogSelection + 1 < kSupaChatChangelogCount) { changelogSelection++; playNextTone(); }
+    else if (goLeft || keys.enter) { screenMode = ScreenMode::Menu; playNextTone(); }
     renderDirty = true; return;
   }
   if (keys.space) typeFrenchCharacter(draft, ' ', kMessageLimit, false);

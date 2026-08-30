@@ -100,13 +100,17 @@ At boot, the MVP handheld:
 
 The firmware enables WiFi power saving and keeps network work on a separate FreeRTOS task so typing, display refresh, and melody playback stay responsive. Its Networks menu scans visible SSIDs, shows passwords during entry by design, joins the selected network, and saves up to 12 profiles in NVS. The provisioning tool can also import saved Windows profiles without printing or committing their keys.
 
-### Planned: paginated menus
+### Paginated menus
 
-Split the Cardputer's crowded top-level menu across multiple screens. Left and Right move between menu pages; Up and Down move the selection within the visible page; Enter opens the selected item. Each page must include an obvious page indicator, preserve its last selection while paging, and avoid conflicting with text-entry or room-switch navigation outside the menu.
+The Cardputer's top-level menu is split across two pages. Left and Right move between pages; Up and Down move the selection within the visible page; Enter opens the selected item. Each page has an obvious page indicator and preserves its own last selection. Text-entry punctuation and room-switch navigation keep their contextual behavior outside the menu.
 
-### Planned: on-device changelog
+### On-device changelog
 
-Add a Changelog area to the paginated Cardputer menu. Show releases by firmware build number and let users scroll through the features and fixes included in each build. The current build should be identified clearly, entries must remain readable within the 240×135 display budget, and changelog data should be generated from one maintained release source rather than duplicated manually in firmware code.
+The second menu page includes a Changelog area. Up and Down scroll releases by firmware build number, starting with the installed build. The canonical release notes live in `firmware/include/changelog.h`; emulator contracts verify every rendered build and line against that source.
+
+### ESP-NOW local-only mode
+
+The second menu page also exposes `ESP-NOW LOCAL`. Turning it on deliberately disconnects Wi-Fi, stops HTTPS/WSS work, pins the radio to the shared fallback channel, and leaves encrypted nearby text and audio active. Turning it off resumes normal Wi-Fi discovery. This operator choice is intentionally held only in RAM and always resets to off after reboot.
 
 Custom firmware now broadcasts nearby presence and sends encrypted text or 8 kHz audio over ESP-NOW when the Hetzner walkie socket is unavailable. Two-device RF acceptance is still required before calling this path production-ready.
 

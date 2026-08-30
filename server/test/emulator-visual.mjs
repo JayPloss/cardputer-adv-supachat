@@ -43,7 +43,8 @@ await shot('menu');
 async function openMenu(index) {
   await page.reload();
   await page.getByRole('button', { name: 'REAR · MENU' }).click();
-  for (let i = 0; i < index; i++) await page.getByRole('button', { name: '↓ .' }).click();
+  if (index >= 5) await page.locator('[data-key="RIGHT"]').click();
+  for (let i = 0; i < index % 5; i++) await page.getByRole('button', { name: '↓ .' }).click();
   await page.getByRole('button', { name: 'ENTER' }).click();
 }
 
@@ -58,7 +59,10 @@ assert.equal((await state()).replayAudible, true); await shot('walkie-replay');
 await openMenu(4); await shot('volume');
 await openMenu(5); await shot('language'); await page.locator('[data-key="RIGHT"]').click(); assert.equal((await state()).languageOverride, 'en');
 await openMenu(6); await shot('networks'); await page.getByRole('button', { name: 'ENTER' }).click(); await shot('network-password');
-await openMenu(7); await shot('status');
+await page.reload(); await page.getByRole('button', { name: 'REAR · MENU' }).click(); await page.locator('[data-key="RIGHT"]').click(); await shot('menu-page-2');
+await openMenu(7); assert.equal((await state()).localOnly,true); assert.equal((await state()).ssid,''); assert.equal((await state()).network,'ESPNOW LOCAL'); await shot('menu-local-only');
+await openMenu(8); await shot('status');
+await openMenu(9); await shot('changelog-current'); await page.getByRole('button', { name: '↓ .' }).click(); assert.equal((await state()).changelogSelection,1); await shot('changelog-previous');
 await page.reload(); await page.getByLabel('Sync fault injection').selectOption('io');
 assert.equal((await state()).network, 'SYNC IO -1'); await shot('chat-sync-io');
 await page.goto(`${base}?language=fr`);
