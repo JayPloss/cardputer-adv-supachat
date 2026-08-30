@@ -8,10 +8,13 @@ s.menu();s.menuSelection=3;s.enter();assert.equal(s.screen,'walkie');s.holdSpace
 s.left();s.open('BACK TO CHAT');assert.equal(s.type('?',{shift:true}),'punctuation');assert.equal(s.draft,'?');const notices=s.notifications;s.receive('Papa','Dinner!');assert.equal(s.notifications,notices+1);
 s.sync('io');assert.equal(s.network,'SYNC IO -1');s.sync('ok');assert.equal(s.network,'SYNCED');for(const item of menuItems){s.open(item);assert.ok(['chat','rooms','walkie','volume','networks','status'].includes(s.screen)||item==='SYNC NOW')}
 const firmware=fs.readFileSync(new URL('../firmware/src/main.cpp',import.meta.url),'utf8');const capture=firmware.slice(firmware.indexOf('void captureVoice()'),firmware.indexOf('void playSamples('));
-assert.match(firmware,/identity\.indexOf\("albie"\) >= 0\) return TFT_SKYBLUE/);assert.match(firmware,/participantColour\(message\.authorId, message\.authorName\)/);assert.match(capture,/voiceDmaQueued > 2/);assert.match(capture,/voiceDmaBlocks\[\(queuedIndex \+ 1\) % 3\]/);
+assert.match(firmware,/identity\.indexOf\("albie"\) >= 0\) return 0x7DD3FC/);assert.match(firmware,/participantColour\(message\.authorId, message\.authorName\)/);assert.match(capture,/voiceDmaQueued > 2/);assert.match(capture,/voiceDmaBlocks\[\(queuedIndex \+ 1\) % 3\]/);
 assert.match(firmware,/client\.verify\(kTlsFingerprint, kApiHost\)/);assert.match(firmware,/walkieSocket\.beginSSL\(kApiHost, 443, walkiePath\.c_str\(\), kTlsFingerprint\)/);assert.match(firmware,/room_id/);assert.match(firmware,/X-Room-Id/);assert.match(firmware,/ScreenMode::Rooms/);
 assert.match(firmware,/latest_message_id/);assert.match(firmware,/void switchRoom\(int direction\)/);assert.match(firmware,/if \(goLeft\) \{ switchRoom\(-1\)/);assert.match(firmware,/if \(goRight\) \{ switchRoom\(1\)/);
 assert.match(firmware,/messageRoomId\.isEmpty\(\) \|\| messageRoomId != currentRoomId/);
+assert.match(firmware,/sender \+ ": "/);assert.match(firmware,/Never show an orphaned body whose sender prefix was clipped/);
+assert.match(firmware,/setTextColor\(lines\[index\]\.colour[\s\S]*print\(lines\[index\]\.sender\)[\s\S]*setTextColor\(TFT_WHITE/);
+for (const id of ['theo','josee','emman','andrew','naomie']) assert.match(firmware,new RegExp(`identity\\.indexOf\\(\"${id}`));
 assert.match(firmware,/roomHistoryPath\(currentRoomId/);assert.match(firmware,/message\.roomId = currentRoomId/);assert.match(firmware,/queuedRoomId != currentRoomId/);
 const pin=firmware.match(/kTlsFingerprint\[\] = "([0-9A-F ]+)"/)[1].replaceAll(' ','');assert.equal(pin.length,64);assert.match(firmware,/navigationChord = !\(keys\.shift \|\| keys\.ctrl/);assert.match(firmware,/menuSelection = \(menuSelection \+ 1\) % 7/);assert.match(firmware,/kEspNowEnabled = true/);
 assert.match(firmware,/kDefaultRoomId\[\] = "wolfpack"/);assert.match(firmware,/String currentRoomId = kDefaultRoomId/);

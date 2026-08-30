@@ -170,17 +170,23 @@ struct ChatMessage {
 
 struct ChatLine {
   String text;
+  String sender;
   uint32_t colour;
   bool mine;
-  bool label;
+  bool showSender;
 };
 struct ChatRoom { String id; String name; int64_t latestMessageId; int64_t seenMessageId; };
 
 uint32_t participantColour(const String &authorId, const String &authorName = "") {
   String identity = authorId + " " + authorName; identity.toLowerCase();
-  if (identity.indexOf("albie") >= 0) return TFT_SKYBLUE;
-  if (identity.indexOf("juju") >= 0 || identity.indexOf("julien") >= 0) return TFT_ORANGE;
-  if (identity.indexOf("papa") >= 0) return TFT_GREEN;
+  if (identity.indexOf("albie") >= 0) return 0x7DD3FC;
+  if (identity.indexOf("juju") >= 0 || identity.indexOf("julien") >= 0) return 0xFFAD5C;
+  if (identity.indexOf("papa") >= 0 || identity.indexOf("jay") >= 0) return 0xA7F070;
+  if (identity.indexOf("theo") >= 0 || identity.indexOf("théo") >= 0) return 0xC4A7FF;
+  if (identity.indexOf("josee") >= 0 || identity.indexOf("josée") >= 0) return 0xFF8FB8;
+  if (identity.indexOf("emman") >= 0) return 0x60E1E0;
+  if (identity.indexOf("andrew") >= 0) return 0xF4D35E;
+  if (identity.indexOf("naomie") >= 0) return 0xFF6B6B;
   return TFT_WHITE;
 }
 
@@ -1187,34 +1193,39 @@ void drawChat() {
     const auto &message = messages[index];
     const bool mine = message.authorId == kDeviceId;
     const uint32_t colour = participantColour(message.authorId, message.authorName);
-    if (!mine) lines.push_back({message.authorName.substring(0, 5), colour, false, true});
+    const String sender = (message.authorName.isEmpty() ? message.authorId : message.authorName).substring(0, 12);
     String text = message.voice ? String("[voice message]") : message.body;
+    bool firstChunk = true;
     while (!text.isEmpty()) {
-      int split = text.length() <= 25 ? text.length() : text.lastIndexOf(' ', 25);
-      if (split < 6) split = std::min(25, static_cast<int>(text.length()));
+      const int width = firstChunk ? std::max(8, 23 - static_cast<int>(sender.length())) : 25;
+      int split = text.length() <= width ? text.length() : text.lastIndexOf(' ', width);
+      if (split < 6) split = std::min(width, static_cast<int>(text.length()));
       String line = text.substring(0, split);
       text = text.substring(split);
       while (text.startsWith(" ")) text.remove(0, 1);
-      lines.push_back({line, colour, mine, false});
+      lines.push_back({line, sender, colour, mine, firstChunk});
+      firstChunk = false;
     }
   }
   int firstLine = static_cast<int>(lines.size());
   int usedHeight = 0;
   while (firstLine > 0) {
-    const int lineHeight = lines[firstLine - 1].label ? 10 : 17;
-    if (usedHeight + lineHeight > 82) break;
-    usedHeight += lineHeight; firstLine--;
+    if (usedHeight + 17 > 82) break;
+    usedHeight += 17; firstLine--;
   }
+  // Never show an orphaned body whose sender prefix was clipped by the viewport.
+  if (firstLine < static_cast<int>(lines.size())) lines[firstLine].showSender = true;
   int y = 24;
   for (int index = firstLine; index < static_cast<int>(lines.size()); index++) {
-    if (lines[index].label) {
-      display.setFont(&fonts::Font0); display.setTextSize(1);
-    } else {
-      display.setFont(&fonts::Font2); display.setTextSize(1);
-    }
-    display.setTextColor(lines[index].colour, TFT_BLACK);
-    const int x = lines[index].mine ? std::max(3, 237 - display.textWidth(lines[index].text)) : 3;
-    display.setCursor(x, y); display.print(lines[index].text); y += lines[index].label ? 10 : 17;
+    display.setFont(&fonts::Font2); display.setTextSize(1);
+    const String prefix = lines[index].showSender ? lines[index].sender + ": " : "";
+    const int x = lines[index].mine ? std::max(3, 237 - display.textWidth(prefix + lines[index].text)) : 3;
+    display.setCursor(x, y);
+    if (lines[index].showSender) {
+      display.setTextColor(lines[index].colour, TFT_BLACK); display.print(lines[index].sender);
+      display.setTextColor(TFT_WHITE, TFT_BLACK); display.print(": ");
+    } else display.setTextColor(TFT_WHITE, TFT_BLACK);
+    display.print(lines[index].text); y += 17;
   }
   xSemaphoreGive(stateMutex);
   display.setFont(&fonts::Font0);

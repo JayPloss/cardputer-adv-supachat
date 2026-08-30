@@ -7,12 +7,18 @@
 .room-picker { display:flex; align-items:center; gap:8px; margin-top:8px; color:var(--muted); font:700 .72rem/1 ui-monospace,monospace; text-transform:uppercase; letter-spacing:.08em; }
 .room-picker select,.admin-card select { min-height:40px; border:1px solid var(--line); border-radius:11px; padding:0 34px 0 11px; background:var(--bg); color:var(--ink); font:inherit; }
 
-:root { --albie:#7dd3fc; --julien:#ffad5c; --papa:#a7f070; }
+:root { --albie:#7dd3fc; --julien:#ffad5c; --papa:#a7f070; --theo:#c4a7ff; --josee:#ff8fb8; --emmanuelle:#60e1e0; --andrew:#f4d35e; --naomie:#ff6b6b; }
 .author-albie { --identity:var(--albie); }
 .author-juju { --identity:var(--julien); }
 .author-papa { --identity:var(--papa); }
+.author-theo { --identity:var(--theo); }
+.author-josee { --identity:var(--josee); }
+.author-emmanuelle { --identity:var(--emmanuelle); }
+.author-andrew { --identity:var(--andrew); }
+.author-naomie { --identity:var(--naomie); }
 .author-other { --identity:var(--ink); }
-.person strong, .message .message-meta strong { color:var(--identity); }
+.person strong, .message-sender { color:var(--identity); }
+.message-separator,.message-body { color:var(--ink); }
 .person .dot { background:var(--identity); opacity:.32; box-shadow:none; }
 .person .dot.online { background:var(--identity); opacity:1; box-shadow:0 0 12px var(--identity); }
 .person .dot.recent { background:var(--identity); opacity:.72; }

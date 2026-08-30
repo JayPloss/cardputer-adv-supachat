@@ -56,7 +56,7 @@ const api = async (path, options = {}) => {
 };
 const escapeHtml = (value) => value.replace(/[&<>'"]/g, (char) => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
 const time = (value) => new Intl.DateTimeFormat([], {hour:'numeric',minute:'2-digit'}).format(new Date(value));
-const identityClass = (id) => ['albie', 'juju', 'papa'].includes(id) ? `author-${id}` : 'author-other';
+const identityClass = (id) => ['albie', 'juju', 'papa', 'theo', 'josee', 'emmanuelle', 'andrew', 'naomie'].includes(id) ? `author-${id}` : 'author-other';
 const receiptLabel = (message) => {
   const names = { albie: 'Albie', juju: 'Juju' };
   const deviceReceipts = (message.receipts || []).filter((item) => names[item.user_id]);
@@ -68,8 +68,8 @@ const receiptLabel = (message) => {
 function renderMessages(scroll = false) {
   messagesEl.innerHTML = messages.length ? messages.map((message) => `
     <article class="message ${message.author_id === currentUser?.id ? 'mine' : ''} ${identityClass(message.author_id)}" data-id="${message.id}">
-      <div class="bubble">${message.type === 'voice' ? `<button class="voice-play" data-voice-id="${message.id}">▶ Play voice</button><span class="voice-wave">${Math.round((message.voice?.duration_ms || 0) / 100) / 10}s</span>` : escapeHtml(message.body)}</div>
-      <div class="message-meta"><strong>${escapeHtml(message.author_name)}</strong><span>${time(message.created_at)}</span>${message.author_id === currentUser?.id ? `<span class="receipt">${receiptLabel(message)}</span>` : ''}</div>
+      <div class="bubble"><strong class="message-sender">${escapeHtml(message.author_name)}</strong><span class="message-separator">: </span><span class="message-body">${message.type === 'voice' ? `<button class="voice-play" data-voice-id="${message.id}">▶ Play voice</button><span class="voice-wave">${Math.round((message.voice?.duration_ms || 0) / 100) / 10}s</span>` : escapeHtml(message.body)}</span></div>
+      <div class="message-meta"><span>${time(message.created_at)}</span>${message.author_id === currentUser?.id ? `<span class="receipt">${receiptLabel(message)}</span>` : ''}</div>
     </article>`).join('') : '<p class="empty">No messages yet.<br>Say the first thing.</p>';
   if (scroll) messagesEl.scrollTop = messagesEl.scrollHeight;
 }
