@@ -17,7 +17,7 @@ if (-not (Test-Path -LiteralPath $PrivateEnvironmentFile)) { throw "Missing priv
 
 try {
     New-Item -ItemType Directory -Path $temporaryDirectory | Out-Null
-    & tar.exe -czf $archive -C $serverRoot package.json src web deploy
+    & tar.exe -czf $archive -C $serverRoot package.json package-lock.json src web deploy
     if ($LASTEXITCODE -ne 0) { throw 'Failed to create deployment archive.' }
     $installerSource = Get-Content -LiteralPath (Join-Path $serverRoot 'deploy\install-remote.sh') -Raw
     [IO.File]::WriteAllText($installer, $installerSource.Replace("`r`n", "`n"), [Text.UTF8Encoding]::new($false))
