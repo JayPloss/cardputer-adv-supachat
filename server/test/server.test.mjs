@@ -204,6 +204,10 @@ test('group membership grants every room owned by that group', async () => {
   assert.equal((await fetch(`http://127.0.0.1:${port}/api/session`, {headers:groupFriendHeaders})).status, 200);
   const claimedGroups = await fetch(`http://127.0.0.1:${port}/api/admin/groups`, {headers}).then(response=>response.json());
   assert.equal(claimedGroups.groups.find(group=>group.id==='north-shore').members.some(member=>member.display_name==='Group Friend'), true);
+  const sundayPresence = await fetch(`http://127.0.0.1:${port}/api/presence?room=sunday-crew`, {headers:{authorization:`Bearer ${deviceToken}`}}).then(response=>response.json());
+  assert.equal(sundayPresence.presence.length, 2);
+  assert.equal(new Set(sundayPresence.presence.map(member=>member.color_index)).size, 2);
+  assert.equal(sundayPresence.presence.every(member=>Number.isInteger(member.color_index) && member.color_index >= 0 && member.color_index < 16), true);
 });
 
 test('members can report, block, and unblock objectionable messages', async () => {
@@ -352,7 +356,9 @@ test('Wolfpack uses Jay as Papa\'s room-specific display name', async () => {
   });
   assert.equal(sent.status, 201);
   const history = await fetch(`http://127.0.0.1:${port}/api/messages?room=wolfpack`, { headers: { cookie } }).then((response) => response.json());
-  assert.equal(history.messages.find((message) => message.client_id === 'wolfpack-jay-test').author_name, 'Jay');
+  const wolfpackMessage = history.messages.find((message) => message.client_id === 'wolfpack-jay-test');
+  assert.equal(wolfpackMessage.author_name, 'Jay');
+  assert.equal(Number.isInteger(wolfpackMessage.author_color), true);
   const family = await fetch(`http://127.0.0.1:${port}/api/messages?room=family`, { headers: { cookie } }).then((response) => response.json());
   assert.equal(family.messages.find((message) => message.author_id === 'papa').author_name, 'Papa');
 });
@@ -368,6 +374,10 @@ test('family login identities have the correct room memberships and names', asyn
   assert.equal(familyPresence.presence.find((person) => person.id === 'mama').display_name, 'Mama');
   const wolfpackPresence = await fetch(`http://127.0.0.1:${port}/api/presence?room=wolfpack`, { headers: { cookie } }).then((response) => response.json());
   assert.equal(wolfpackPresence.presence.find((person) => person.id === 'josee').display_name, 'Maman');
+  assert.equal(new Set(wolfpackPresence.presence.map((person) => person.color_index)).size, wolfpackPresence.presence.length);
+  const wolfpackHistory = await fetch(`http://127.0.0.1:${port}/api/messages?room=wolfpack`, { headers: { cookie } }).then((response) => response.json());
+  assert.equal(wolfpackPresence.presence.find((person) => person.id === 'papa').color_index,
+    wolfpackHistory.messages.find((message) => message.client_id === 'wolfpack-jay-test').author_color);
 });
 
 test('messages over 140 characters are rejected', async () => {

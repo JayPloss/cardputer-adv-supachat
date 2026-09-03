@@ -188,6 +188,8 @@ The deployed hosted stack is deliberately small:
 
 Cardputer devices are pre-registered by an operator and keep separate bearer credentials. Web and Android members enroll through one-time Authentik invitations targeted to a specific room. Administrators can create rooms, manage membership, review safety reports, and process account-deletion requests from the web portal.
 
+Planned admin feature: edit each member's room/group-specific display alias in the web portal, while preserving one stable account identity across groups.
+
 Public Play-policy pages are served at `/privacy`, `/terms`, and `/delete-account`. Interactive web and Android users must accept the current community standards before posting; managed Cardputer device credentials retain their existing protocol. Message reporting, user blocking, and deletion requests are stored in SQLite and exposed to the administrator safety queue.
 
 Version 1 is expected to use TLS without end-to-end message encryption. A shared group-key design may be added later, but its browser key management and lost-device recovery costs must be resolved first.

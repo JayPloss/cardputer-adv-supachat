@@ -196,6 +196,9 @@ try { db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'member' 
 try { db.exec("ALTER TABLE conversation_members ADD COLUMN display_name TEXT"); } catch (error) {
   if (!String(error).includes('duplicate column')) throw error;
 }
+try { db.exec("ALTER TABLE conversation_members ADD COLUMN color_index INTEGER CHECK (color_index BETWEEN 0 AND 15)"); } catch (error) {
+  if (!String(error).includes('duplicate column')) throw error;
+}
 for (const statement of [
   "ALTER TABLE users ADD COLUMN language_preference TEXT CHECK (language_preference IN ('en','fr'))",
   "ALTER TABLE user_groups ADD COLUMN default_language TEXT NOT NULL DEFAULT 'en' CHECK (default_language IN ('en','fr'))",
@@ -257,6 +260,7 @@ for (const room of db.prepare("SELECT id, name FROM conversations WHERE kind IN 
 }
 db.exec(`INSERT OR IGNORE INTO user_group_members(group_id, user_id)
   SELECT c.group_id, cm.user_id FROM conversation_members cm JOIN conversations c ON c.id = cm.conversation_id WHERE c.group_id IS NOT NULL`);
+ensureRoomMembershipMetadata();
 
 const clients = new Map();
 const longPolls = new Set();
@@ -325,6 +329,33 @@ function authentikUserId(username, uid) {
     || `web-${createHash('sha256').update(String(uid)).digest('hex').slice(0, 16)}`;
 }
 
+function randomPaletteIndex(indices) {
+  return indices[randomBytes(4).readUInt32BE(0) % indices.length];
+}
+
+function ensureRoomMembershipMetadata() {
+  db.exec(`INSERT OR IGNORE INTO conversation_members(conversation_id, user_id)
+    SELECT c.id, gm.user_id FROM conversations c JOIN user_group_members gm ON gm.group_id = c.group_id
+    WHERE c.kind IN ('shared','room')`);
+  const rooms = db.prepare("SELECT id FROM conversations WHERE kind IN ('shared','room')").all();
+  const unassignedQuery = db.prepare(`SELECT cm.user_id FROM conversation_members cm
+    JOIN conversations c ON c.id=cm.conversation_id JOIN user_group_members gm ON gm.group_id=c.group_id AND gm.user_id=cm.user_id
+    WHERE cm.conversation_id=? AND cm.color_index IS NULL ORDER BY cm.rowid`);
+  const usedQuery = db.prepare(`SELECT cm.color_index FROM conversation_members cm
+    JOIN conversations c ON c.id=cm.conversation_id JOIN user_group_members gm ON gm.group_id=c.group_id AND gm.user_id=cm.user_id
+    WHERE cm.conversation_id=? AND cm.color_index IS NOT NULL`);
+  const assign = db.prepare('UPDATE conversation_members SET color_index=? WHERE conversation_id=? AND user_id=?');
+  for (const room of rooms) {
+    const used = new Set(usedQuery.all(room.id).map((row) => row.color_index));
+    for (const member of unassignedQuery.all(room.id)) {
+      const available = Array.from({ length: 16 }, (_, index) => index).filter((index) => !used.has(index));
+      const colorIndex = randomPaletteIndex(available.length ? available : Array.from({ length: 16 }, (_, index) => index));
+      assign.run(colorIndex, room.id, member.user_id);
+      if (available.length) used.add(colorIndex);
+    }
+  }
+}
+
 function claimPendingMemberships(userId, username) {
   const now = Date.now();
   const pending = db.prepare('SELECT conversation_id FROM pending_room_memberships WHERE username = ? AND claimed_at IS NULL AND expires_at > ?').all(username, now);
@@ -336,6 +367,7 @@ function claimPendingMemberships(userId, username) {
   const grantGroup = db.prepare('INSERT OR IGNORE INTO user_group_members(group_id, user_id) VALUES (?, ?)');
   const claimGroup = db.prepare('UPDATE pending_user_group_memberships SET claimed_at = ? WHERE username = ? AND group_id = ?');
   for (const row of pendingGroups) { grantGroup.run(row.group_id, userId); claimGroup.run(now, username, row.group_id); }
+  ensureRoomMembershipMetadata();
 }
 
 function roomsFor(userId) {
@@ -487,7 +519,7 @@ function pcmWav(pcm, sampleRate = 8000) {
 function messageRows(roomId, after = 0, limit = 100, viewerId = null) {
   const bounded = Math.min(Math.max(limit, 1), 100);
   const rows = after > 0 ? db.prepare(`
-    SELECT m.id, m.client_id, m.conversation_id, m.author_id, COALESCE(cm.display_name, u.display_name) AS author_name,
+    SELECT m.id, m.client_id, m.conversation_id, m.author_id, COALESCE(cm.display_name, u.display_name) AS author_name, cm.color_index AS author_color,
            u.short_name AS author_short, m.type, m.body, m.created_at
     FROM messages m JOIN users u ON u.id = m.author_id
       LEFT JOIN conversation_members cm ON cm.conversation_id = m.conversation_id AND cm.user_id = m.author_id
@@ -496,7 +528,7 @@ function messageRows(roomId, after = 0, limit = 100, viewerId = null) {
     ORDER BY m.id ASC LIMIT ?
   `).all(roomId, after, viewerId, viewerId, bounded) : db.prepare(`
     SELECT * FROM (
-      SELECT m.id, m.client_id, m.conversation_id, m.author_id, COALESCE(cm.display_name, u.display_name) AS author_name,
+      SELECT m.id, m.client_id, m.conversation_id, m.author_id, COALESCE(cm.display_name, u.display_name) AS author_name, cm.color_index AS author_color,
              u.short_name AS author_short, m.type, m.body, m.created_at
       FROM messages m JOIN users u ON u.id = m.author_id
         LEFT JOIN conversation_members cm ON cm.conversation_id = m.conversation_id AND cm.user_id = m.author_id
@@ -518,7 +550,7 @@ function messageRows(roomId, after = 0, limit = 100, viewerId = null) {
 function presenceRows(roomId) {
   const now = Date.now();
   return db.prepare(`
-    SELECT u.id, COALESCE(cm.display_name, u.display_name) AS display_name, u.short_name, p.last_seen_at, p.connected
+    SELECT u.id, COALESCE(cm.display_name, u.display_name) AS display_name, u.short_name, cm.color_index, p.last_seen_at, p.connected
     FROM conversations c JOIN user_group_members gm ON gm.group_id = c.group_id JOIN users u ON u.id = gm.user_id
     LEFT JOIN conversation_members cm ON cm.user_id = u.id AND cm.conversation_id = c.id LEFT JOIN presence p ON p.user_id = u.id
     WHERE u.revoked_at IS NULL AND c.id = ? ORDER BY COALESCE(cm.display_name, u.display_name)
@@ -830,6 +862,7 @@ const server = createServer(async (req, res) => {
       if (!db.prepare('SELECT 1 FROM user_groups WHERE id = ?').get(groupId)) return json(res, 400, { error: 'invalid_group' });
       try { db.prepare("INSERT INTO conversations(id, name, kind, group_id) VALUES (?, ?, 'room', ?)").run(id, name, groupId); }
       catch (error) { if (String(error).includes('UNIQUE')) return json(res, 409, { error: 'room_exists' }); throw error; }
+      ensureRoomMembershipMetadata();
       return json(res, 201, { room: { id, name, group_id: groupId } });
     }
     const memberPath = url.pathname.match(/^\/api\/admin\/rooms\/([^/]+)\/members(?:\/([^/]+))?$/);
@@ -871,6 +904,7 @@ const server = createServer(async (req, res) => {
         const payload = await body(req); const memberId = String(payload.user_id || '');
         if (!db.prepare('SELECT 1 FROM users WHERE id = ? AND revoked_at IS NULL').get(memberId)) return json(res, 404, { error: 'user_not_found' });
         db.prepare('INSERT OR IGNORE INTO user_group_members(group_id, user_id) VALUES (?, ?)').run(groupId, memberId);
+        ensureRoomMembershipMetadata();
         return json(res, 200, { ok: true });
       }
       db.prepare('DELETE FROM user_group_members WHERE group_id = ? AND user_id = ?').run(groupId, decodeURIComponent(userGroupMemberPath[2] || ''));
