@@ -41,6 +41,7 @@ const authentikIdentityMap = new Map([
   ['albie', 'albie'],
   ['julien', 'juju'],
   ['josee', 'josee'],
+  ['vero', 'mama'],
   ['veronique', 'mama'],
   ['mama', 'mama'],
   ['nico', 'nico'],
@@ -232,13 +233,20 @@ db.prepare("INSERT OR IGNORE INTO conversation_members(conversation_id, user_id)
 db.prepare("INSERT OR IGNORE INTO conversation_members(conversation_id, user_id) VALUES ('family', ?)").run('albie');
 db.prepare("INSERT OR IGNORE INTO conversation_members(conversation_id, user_id) VALUES ('family', ?)").run('juju');
 db.prepare("INSERT OR IGNORE INTO conversation_members(conversation_id, user_id) VALUES ('family', ?)").run('theo');
+db.prepare("INSERT OR IGNORE INTO conversation_members(conversation_id, user_id) VALUES ('family', ?)").run('mama');
 for (const userId of ['papa', 'albie', 'juju']) db.prepare("INSERT OR IGNORE INTO conversation_members(conversation_id, user_id) VALUES ('k-buds', ?)").run(userId);
+db.prepare("INSERT OR IGNORE INTO conversation_members(conversation_id, user_id) VALUES ('k-buds', ?)").run('theo');
+db.prepare("INSERT OR IGNORE INTO conversation_members(conversation_id, user_id) VALUES ('k-buds', ?)").run('mama');
 for (const userId of ['papa', 'josee', 'emmanuelle', 'andrew', 'naomie']) db.prepare("INSERT OR IGNORE INTO conversation_members(conversation_id, user_id) VALUES ('wolfpack', ?)").run(userId);
 db.prepare("UPDATE conversation_members SET display_name = 'Jay' WHERE conversation_id = 'wolfpack' AND user_id = 'papa'").run();
 db.prepare("UPDATE conversation_members SET display_name = 'Jay' WHERE conversation_id <> 'family' AND user_id = 'papa'").run();
+db.prepare("UPDATE conversation_members SET display_name = 'Mama' WHERE conversation_id = 'family' AND user_id = 'mama'").run();
+db.prepare("UPDATE conversation_members SET display_name = 'Véro' WHERE conversation_id = 'k-buds' AND user_id = 'mama'").run();
+db.prepare("UPDATE conversation_members SET display_name = 'Maman' WHERE conversation_id = 'wolfpack' AND user_id = 'josee'").run();
+db.prepare("UPDATE conversation_members SET display_name = 'Théo' WHERE conversation_id IN ('family', 'k-buds') AND user_id = 'theo'").run();
 for (const [groupId, members] of [
   ['family', ['papa','albie','juju','theo','mama']],
-  ['k-buds', ['papa','albie','juju','nico','miro']],
+  ['k-buds', ['papa','albie','juju','theo','mama','nico','miro']],
   ['wolfpack', ['papa','josee','emmanuelle','andrew','naomie']],
 ]) for (const userId of members) db.prepare('INSERT OR IGNORE INTO user_group_members(group_id, user_id) VALUES (?, ?)').run(groupId, userId);
 // Preserve custom rooms and access from the former per-room model by giving each

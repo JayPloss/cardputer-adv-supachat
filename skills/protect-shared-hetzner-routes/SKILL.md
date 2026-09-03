@@ -17,4 +17,12 @@ Assume the host serves many unrelated production applications.
 8. Roll back only SupaChat-owned changes if validation fails.
 9. Treat certificate rotation as shared infrastructure; prefer client trust updates that do not change server behavior.
 
+## Authentication completion gate
+
+Account creation, password assignment, `check_password`, healthy routes, and server-side identity simulation are intermediate checks only. Never call login fixed or functional, and never predict that it will work, until the actual released client completes credential entry, Authentik authentication, its redirect or deep link, code/token exchange, SupaChat session creation, identity mapping, and expected-room retrieval.
+
+When the real client has not completed that sequence, report the narrow facts established and explicitly label end-to-end login unproven. A successful claim must record the client/build, username, resulting SupaChat identity, and returned room set without exposing credentials.
+
+Do not use the user as the first integration test. Before handing over a build, validate every independently testable stage across the release-configured client and live service, including built-APK callback registration, callback resumption, PKCE state/verifier survival, token exchange, native-session exchange, identity mapping, room retrieval, and bounded error handling. The user's physical-device run is final acceptance after this preflight, not a way to discover omitted integration work.
+
 Read [references/boundaries.md](references/boundaries.md) before any server mutation.

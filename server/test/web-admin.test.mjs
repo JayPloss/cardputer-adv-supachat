@@ -62,4 +62,5 @@ test('Authentik is SupaChat branded and application groups stay out of identity-
   assert.match(authentikConfig, /branding_logo.*https:\/\/supachat\.net\/supachat-logo\.png/);
   assert.doesNotMatch(authentikConfig, /get_or_create\(name="SupaChat (?:Family|K-BUDS|Wolfpack)"/);
   assert.match(authentikConfig, /user\.groups\.add\(group\)/);
+  for (const username of ['josee', 'vero', 'theo']) assert.match(authentikConfig, new RegExp(`\\("${username}",`));
 });

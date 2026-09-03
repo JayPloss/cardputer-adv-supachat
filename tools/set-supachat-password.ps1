@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('papa', 'albie', 'julien')]
+    [ValidateSet('papa', 'albie', 'julien', 'josee', 'vero', 'theo')]
     [string]$Username = 'papa',
     [string]$Server = 'root@65.108.148.87',
     [string]$IdentityFile = 'C:\Users\PC\.ssh\id_ed25519'

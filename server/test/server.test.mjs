@@ -310,7 +310,10 @@ test('Papa Authentik identity maps to existing Papa history', async () => {
 });
 
 test('SupaChat-native Authentik usernames preserve family identities', async () => {
-  for (const [username, expectedId] of [['papa', 'papa'], ['albie', 'albie'], ['julien', 'juju']]) {
+  for (const [username, expectedId] of [
+    ['papa', 'papa'], ['albie', 'albie'], ['julien', 'juju'],
+    ['josee', 'josee'], ['vero', 'mama'], ['theo', 'theo'],
+  ]) {
     const response = await fetch(`http://127.0.0.1:${port}/api/session`, {
       headers: {
         'x-forwarded-host': 'supachat.net',
@@ -354,12 +357,17 @@ test('Wolfpack uses Jay as Papa\'s room-specific display name', async () => {
   assert.equal(family.messages.find((message) => message.author_id === 'papa').author_name, 'Papa');
 });
 
-test('Papa is Jay in every non-Family room and Théo belongs to Family', async () => {
+test('family login identities have the correct room memberships and names', async () => {
   const kbudsPresence = await fetch(`http://127.0.0.1:${port}/api/presence?room=k-buds`, { headers: { cookie } }).then((response) => response.json());
   assert.equal(kbudsPresence.presence.find((person) => person.id === 'papa').display_name, 'Jay');
+  assert.equal(kbudsPresence.presence.find((person) => person.id === 'mama').display_name, 'Véro');
+  assert.equal(kbudsPresence.presence.find((person) => person.id === 'theo').display_name, 'Théo');
   const familyPresence = await fetch(`http://127.0.0.1:${port}/api/presence?room=family`, { headers: { cookie } }).then((response) => response.json());
   assert.equal(familyPresence.presence.find((person) => person.id === 'papa').display_name, 'Papa');
   assert.equal(familyPresence.presence.find((person) => person.id === 'theo').display_name, 'Théo');
+  assert.equal(familyPresence.presence.find((person) => person.id === 'mama').display_name, 'Mama');
+  const wolfpackPresence = await fetch(`http://127.0.0.1:${port}/api/presence?room=wolfpack`, { headers: { cookie } }).then((response) => response.json());
+  assert.equal(wolfpackPresence.presence.find((person) => person.id === 'josee').display_name, 'Maman');
 });
 
 test('messages over 140 characters are rejected', async () => {

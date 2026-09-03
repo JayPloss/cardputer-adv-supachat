@@ -74,16 +74,18 @@ assert.deepEqual(interpretRawKeys('chat',{fn:true,word:['/'],keyList:rightKey}),
   'Fn plus the same physical key must navigate on a text screen');
 assert.deepEqual(interpretRawKeys('menu',{word:['/'],keyList:rightKey}),{kind:'navigation',direction:'right'},
   'physical arrows must be primary on navigation screens');
-assert.deepEqual(interpretRawKeys('menu',{fn:true,word:['/'],keyList:rightKey}),{kind:'navigation',direction:'right'},
-  'holding Fn must not disable navigation-screen arrows');
+assert.deepEqual(interpretRawKeys('menu',{fn:true,word:['/'],keyList:rightKey}),{kind:'ignored'},
+  'navigation screens use the primary unmodified arrow layer');
 assert.match(firmware, /if \(character == '\?'\) \{ appendKeyboardText\(target, u8"é"/,
   'French Shift+/ must emit é directly');
 assert.match(firmware, /if \(character == '\\'\'\) \{ frenchGravePending = true; return; \}/,
   'French apostrophe must wait for its composition key');
 assert.match(firmware, /character == 'a'[\s\S]*u8"à"[\s\S]*character == 'e'[\s\S]*u8"è"/,
   'French dead-key composition must emit à and è');
-assert.match(firmware, /textEntryScreen[\s\S]*!textEntryScreen \|\| keys\.fn/,
+assert.match(firmware, /textEntryScreen[\s\S]*textEntryScreen \? keys\.fn : !keys\.fn/,
   'arrows must require Fn during text entry and remain primary elsewhere');
+const loopBody=firmware.slice(firmware.indexOf('void loop()'),firmware.indexOf('delay(2);',firmware.indexOf('void loop()')));
+assert.doesNotMatch(loopBody,/Keyboard\.isChange/,'loop must not consume the keyboard edge before handleKeyboard');
 const cp437 = new Map([[0xA9,0x82],[0xA8,0x8A],[0xA0,0x85]]);
 assert.deepEqual([...Buffer.from('éèà')].reduce((out,byte,index,input)=>{if(byte===0xC3)out.push(cp437.get(input[index+1]));return out},[]),[0x82,0x8A,0x85]);
 assert.match(firmware, /0xA9[\s\S]*0x82[\s\S]*0xA8[\s\S]*0x8A[\s\S]*0xA0[\s\S]*0x85/,
@@ -199,8 +201,10 @@ assert.equal(steadilyRising([3716,3716,3715,3716,3715,3716]), false,
   'a flat unplugged battery must clear charging');
 assert.equal(steadilyRising([3700,3712,3698,3715,3701,3720]), false,
   'load-driven jumps must not count as a steady charging trend');
-assert.match(firmware, /Keyboard\.isChange\(\) \|\| M5Cardputer\.BtnA\.isPressed\(\)/,
-  'keyboard or rear-button activity must reset the idle clock');
+assert.match(firmware, /handleKeyboard\(\)[\s\S]*Keyboard\.isChange\(\)[\s\S]*lastUserInputAt = millis\(\)/,
+  'keyboard activity must reset the idle clock after consuming its edge exactly once');
+assert.match(firmware, /if \(M5Cardputer\.BtnA\.isPressed\(\)\) lastUserInputAt = millis\(\)/,
+  'rear-button activity must reset the idle clock');
 assert.match(firmware, /now - lastUserInputAt < kPowerIdleAfterInputMs[\s\S]*powerTrendCount = 0/,
   'no charging inference may run while user input is active');
 assert.match(firmware, /UP\/DOWN CHOOSE  ENTER PLAY\/STOP/,

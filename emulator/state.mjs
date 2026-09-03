@@ -20,7 +20,7 @@ export const navPositions = {up:[11,2],left:[10,3],down:[11,3],right:[12,3]};
 export function interpretRawKeys(screen,{fn=false,shift=false,ctrl=false,alt=false,opt=false,enter=false,word=[],keyList=[]}={}){
   if(enter)return{kind:'enter'};
   const textEntry=screen==='chat'||screen==='password',otherModifier=shift||ctrl||alt||opt;
-  const navigationChord=!otherModifier&&(!textEntry||fn);
+  const navigationChord=!otherModifier&&(textEntry?fn:!fn);
   if(navigationChord)for(const[direction,[x,y]]of Object.entries(navPositions))if(keyList.some(key=>key.x===x&&key.y===y))return{kind:'navigation',direction};
   if(textEntry&&word.length)return{kind:'text',text:word.join('')};
   return{kind:'ignored'};

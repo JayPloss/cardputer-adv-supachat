@@ -1683,6 +1683,7 @@ void switchRoom(int direction) {
 
 void handleKeyboard() {
   if (!M5Cardputer.Keyboard.isChange() || !M5Cardputer.Keyboard.isPressed()) return;
+  lastUserInputAt = millis();
   const auto keys = M5Cardputer.Keyboard.keysState();
   // Shift+/ is '?', Shift+. is '>', etc. Shifted punctuation remains text;
   // only Fn selects the arrow layer while a text field is active.
@@ -1692,7 +1693,7 @@ void handleKeyboard() {
   const bool otherModifier = keys.shift || keys.ctrl || keys.alt || keys.opt;
   // Text entry requires Fn to select the physical arrow layer. Navigation
   // screens treat those physical positions as arrows with or without Fn.
-  const bool navigationChord = !otherModifier && (!textEntryScreen || keys.fn);
+  const bool navigationChord = !otherModifier && (textEntryScreen ? keys.fn : !keys.fn);
   const bool goUp = navigationChord && navUp();
   const bool goDown = navigationChord && navDown();
   const bool goLeft = navigationChord && navLeft();
@@ -1819,7 +1820,7 @@ void setup() {
 
 void loop() {
   M5Cardputer.update();
-  if (M5Cardputer.Keyboard.isChange() || M5Cardputer.BtnA.isPressed()) lastUserInputAt = millis();
+  if (M5Cardputer.BtnA.isPressed()) lastUserInputAt = millis();
   sampleBattery(); serviceClockRender(); handleKeyboard(); captureVoice(); serviceAudioPlayback(); serviceMessageNotification();
   if (screenMode == ScreenMode::VoiceMessages || screenMode == ScreenMode::Walkie) {
     const bool spacePressed = M5Cardputer.Keyboard.isPressed() && M5Cardputer.Keyboard.keysState().space;

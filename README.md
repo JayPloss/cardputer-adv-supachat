@@ -8,6 +8,10 @@ A repository's currently checked-out branch or worktree is only local filesystem
 
 > **Status (August 2026):** Text chat is working through the deployed Node/SQLite service and authenticated web portal at `https://supachat.net/`. The first walkie build adds raw-PCM voice clips and authenticated live PTT through Hetzner. Both child variants compile; physical two-device audio acceptance remains a release gate.
 
+> **Authentication verification rule:** A created account or server-verified password is not proof that login works. Login may be called functional only after the actual released client completes Authentik authentication, returns through its redirect/deep link, exchanges the authorization result, creates a SupaChat session, maps to the intended identity, and receives the expected rooms. Otherwise, report the narrower verified fact and label end-to-end login unproven.
+
+> **Test-readiness rule:** Do not distribute an APK for user testing until every independently testable authentication stage has passed against the release configuration. The physical-phone test is final acceptance, not the first full integration run. Startup and authentication must also fail with a visible, bounded error instead of spinning indefinitely.
+
 ## What this project is
 
 SupaChat is intended to let a small group of family and friends communicate from dedicated Cardputer ADV handhelds:

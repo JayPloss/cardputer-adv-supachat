@@ -121,7 +121,14 @@ with transaction.atomic():
     )
 
     group, _ = Group.objects.get_or_create(name="SupaChat Users")
-    for username, name in (("papa", "Papa"), ("albie", "Albie"), ("julien", "Julien")):
+    for username, name in (
+        ("papa", "Papa"),
+        ("albie", "Albie"),
+        ("julien", "Julien"),
+        ("josee", "Josée"),
+        ("vero", "Véro"),
+        ("theo", "Théo"),
+    ):
         user, _ = User.objects.get_or_create(
             username=username,
             defaults={"name": name, "type": "internal"},
