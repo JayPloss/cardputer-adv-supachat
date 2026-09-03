@@ -203,7 +203,11 @@ test('group membership grants every room owned by that group', async () => {
   const groupFriendHeaders = {'x-forwarded-host':'supachat.net','x-authentik-uid':'uid-group-friend','x-authentik-username':'group.friend','x-authentik-name':'Group Friend'};
   assert.equal((await fetch(`http://127.0.0.1:${port}/api/session`, {headers:groupFriendHeaders})).status, 200);
   const claimedGroups = await fetch(`http://127.0.0.1:${port}/api/admin/groups`, {headers}).then(response=>response.json());
-  assert.equal(claimedGroups.groups.find(group=>group.id==='north-shore').members.some(member=>member.display_name==='Group Friend'), true);
+  const groupFriend = claimedGroups.groups.find(group=>group.id==='north-shore').members.find(member=>member.display_name==='Group Friend');
+  assert.ok(groupFriend);
+  assert.equal((await fetch(`http://127.0.0.1:${port}/api/admin/groups/north-shore/members/${encodeURIComponent(groupFriend.id)}`, {method:'PATCH',headers,body:JSON.stringify({display_name:'Shore Friend'})})).status, 200);
+  const aliasedGroups = await fetch(`http://127.0.0.1:${port}/api/admin/groups`, {headers}).then(response=>response.json());
+  assert.equal(aliasedGroups.groups.find(group=>group.id==='north-shore').members.find(member=>member.id===groupFriend.id).display_name, 'Shore Friend');
   const sundayPresence = await fetch(`http://127.0.0.1:${port}/api/presence?room=sunday-crew`, {headers:{authorization:`Bearer ${deviceToken}`}}).then(response=>response.json());
   assert.equal(sundayPresence.presence.length, 2);
   assert.equal(new Set(sundayPresence.presence.map(member=>member.color_index)).size, 2);
@@ -359,6 +363,14 @@ test('Wolfpack uses Jay as Papa\'s room-specific display name', async () => {
   const wolfpackMessage = history.messages.find((message) => message.client_id === 'wolfpack-jay-test');
   assert.equal(wolfpackMessage.author_name, 'Jay');
   assert.equal(Number.isInteger(wolfpackMessage.author_color), true);
+  const reply = await fetch(`http://127.0.0.1:${port}/api/messages`, {
+    method:'POST',headers:{cookie,'content-type':'application/json'},body:JSON.stringify({client_id:'wolfpack-reply-test',body:'replying now',room_id:'wolfpack',reply_to_id:wolfpackMessage.id}),
+  });
+  assert.equal(reply.status, 201);
+  const replyMessage = (await reply.json()).message;
+  assert.equal(replyMessage.reply_to.id, wolfpackMessage.id);
+  assert.equal(replyMessage.reply_to.author_name, 'Jay');
+  assert.equal((await fetch(`http://127.0.0.1:${port}/api/messages`, {method:'POST',headers:{cookie,'content-type':'application/json'},body:JSON.stringify({client_id:'bad-cross-room-reply',body:'nope',room_id:'family',reply_to_id:wolfpackMessage.id})})).status, 400);
   const family = await fetch(`http://127.0.0.1:${port}/api/messages?room=family`, { headers: { cookie } }).then((response) => response.json());
   assert.equal(family.messages.find((message) => message.author_id === 'papa').author_name, 'Papa');
 });

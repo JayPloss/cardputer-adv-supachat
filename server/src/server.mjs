@@ -41,6 +41,7 @@ const authentikIdentityMap = new Map([
   ['albie', 'albie'],
   ['julien', 'juju'],
   ['josee', 'josee'],
+  ['maman', 'josee'],
   ['vero', 'mama'],
   ['veronique', 'mama'],
   ['mama', 'mama'],
@@ -197,6 +198,9 @@ try { db.exec("ALTER TABLE conversation_members ADD COLUMN display_name TEXT"); 
   if (!String(error).includes('duplicate column')) throw error;
 }
 try { db.exec("ALTER TABLE conversation_members ADD COLUMN color_index INTEGER CHECK (color_index BETWEEN 0 AND 15)"); } catch (error) {
+  if (!String(error).includes('duplicate column')) throw error;
+}
+try { db.exec("ALTER TABLE messages ADD COLUMN reply_to_id INTEGER REFERENCES messages(id)"); } catch (error) {
   if (!String(error).includes('duplicate column')) throw error;
 }
 for (const statement of [
@@ -519,7 +523,7 @@ function pcmWav(pcm, sampleRate = 8000) {
 function messageRows(roomId, after = 0, limit = 100, viewerId = null) {
   const bounded = Math.min(Math.max(limit, 1), 100);
   const rows = after > 0 ? db.prepare(`
-    SELECT m.id, m.client_id, m.conversation_id, m.author_id, COALESCE(cm.display_name, u.display_name) AS author_name, cm.color_index AS author_color,
+    SELECT m.id, m.client_id, m.conversation_id, m.author_id, COALESCE(cm.display_name, u.display_name) AS author_name, cm.color_index AS author_color, m.reply_to_id,
            u.short_name AS author_short, m.type, m.body, m.created_at
     FROM messages m JOIN users u ON u.id = m.author_id
       LEFT JOIN conversation_members cm ON cm.conversation_id = m.conversation_id AND cm.user_id = m.author_id
@@ -528,7 +532,7 @@ function messageRows(roomId, after = 0, limit = 100, viewerId = null) {
     ORDER BY m.id ASC LIMIT ?
   `).all(roomId, after, viewerId, viewerId, bounded) : db.prepare(`
     SELECT * FROM (
-      SELECT m.id, m.client_id, m.conversation_id, m.author_id, COALESCE(cm.display_name, u.display_name) AS author_name, cm.color_index AS author_color,
+      SELECT m.id, m.client_id, m.conversation_id, m.author_id, COALESCE(cm.display_name, u.display_name) AS author_name, cm.color_index AS author_color, m.reply_to_id,
              u.short_name AS author_short, m.type, m.body, m.created_at
       FROM messages m JOIN users u ON u.id = m.author_id
         LEFT JOIN conversation_members cm ON cm.conversation_id = m.conversation_id AND cm.user_id = m.author_id
@@ -539,6 +543,10 @@ function messageRows(roomId, after = 0, limit = 100, viewerId = null) {
   `).all(roomId, viewerId, viewerId, bounded);
   return rows.map((row) => ({
     ...row, conversation_name: db.prepare('SELECT name FROM conversations WHERE id = ?').get(row.conversation_id)?.name,
+    reply_to: row.reply_to_id ? db.prepare(`SELECT original.id,original.author_id,COALESCE(alias.display_name,author.display_name) AS author_name,
+      original.body,original.type,alias.color_index AS author_color FROM messages original JOIN users author ON author.id=original.author_id
+      LEFT JOIN conversation_members alias ON alias.conversation_id=original.conversation_id AND alias.user_id=original.author_id
+      WHERE original.id=? AND original.conversation_id=?`).get(row.reply_to_id,row.conversation_id) || null : null,
     receipts: db.prepare('SELECT user_id, state, updated_at FROM receipts WHERE message_id = ?').all(row.id),
     voice: row.type === 'voice' ? db.prepare(`
       SELECT mime_type, sample_rate, sample_count, duration_ms, byte_length
@@ -878,8 +886,11 @@ const server = createServer(async (req, res) => {
       if (!admin) return json(res, 403, { error: 'admin_required' });
       const groups = db.prepare(`SELECT g.id, g.name, g.default_language, COUNT(gm.user_id) AS member_count FROM user_groups g
         LEFT JOIN user_group_members gm ON gm.group_id = g.id GROUP BY g.id ORDER BY g.name`).all();
-      const members = db.prepare(`SELECT gm.group_id, u.id, u.display_name, u.short_name, u.kind, u.role FROM user_group_members gm
-        JOIN users u ON u.id = gm.user_id ORDER BY u.display_name`).all();
+      const members = db.prepare(`SELECT gm.group_id, u.id,
+        COALESCE((SELECT cm.display_name FROM conversations c JOIN conversation_members cm ON cm.conversation_id=c.id
+          WHERE c.group_id=gm.group_id AND cm.user_id=u.id AND cm.display_name IS NOT NULL LIMIT 1),u.display_name) AS display_name,
+        u.display_name AS account_name,u.short_name,u.kind,u.role FROM user_group_members gm
+        JOIN users u ON u.id = gm.user_id ORDER BY display_name`).all();
       const users = db.prepare('SELECT id, display_name, short_name, kind, role FROM users WHERE revoked_at IS NULL ORDER BY display_name').all();
       const rooms = db.prepare("SELECT id, name, group_id FROM conversations WHERE kind IN ('shared','room') ORDER BY name").all();
       return json(res, 200, { groups: groups.map((group) => ({ ...group, members: members.filter((member) => member.group_id === group.id), rooms: rooms.filter((room) => room.group_id === group.id) })), users });
@@ -895,7 +906,7 @@ const server = createServer(async (req, res) => {
       return json(res, 201, { group: { id, name, default_language: defaultLanguage, members: [], rooms: [] } });
     }
     const userGroupMemberPath = url.pathname.match(/^\/api\/admin\/(?:groups|user-groups)\/([^/]+)\/members(?:\/([^/]+))?$/);
-    if (userGroupMemberPath && ['POST','DELETE'].includes(req.method)) {
+    if (userGroupMemberPath && ['POST','DELETE','PATCH'].includes(req.method)) {
       if (!admin) return json(res, 403, { error: 'admin_required' });
       if (webUser(req) && !sameOrigin(req)) return json(res, 403, { error: 'origin_rejected' });
       const groupId = decodeURIComponent(userGroupMemberPath[1]);
@@ -906,6 +917,16 @@ const server = createServer(async (req, res) => {
         db.prepare('INSERT OR IGNORE INTO user_group_members(group_id, user_id) VALUES (?, ?)').run(groupId, memberId);
         ensureRoomMembershipMetadata();
         return json(res, 200, { ok: true });
+      }
+      if (req.method === 'PATCH') {
+        const memberId = decodeURIComponent(userGroupMemberPath[2] || '');
+        if (!db.prepare('SELECT 1 FROM user_group_members WHERE group_id=? AND user_id=?').get(groupId, memberId)) return json(res, 404, { error: 'membership_not_found' });
+        const payload = await body(req); const alias = String(payload.display_name || '').trim();
+        if (alias.length > 80) return json(res, 400, { error: 'invalid_alias' });
+        ensureRoomMembershipMetadata();
+        db.prepare(`UPDATE conversation_members SET display_name=? WHERE user_id=? AND conversation_id IN
+          (SELECT id FROM conversations WHERE group_id=?)`).run(alias || null, memberId, groupId);
+        return json(res, 200, { ok: true, display_name: alias || null });
       }
       db.prepare('DELETE FROM user_group_members WHERE group_id = ? AND user_id = ?').run(groupId, decodeURIComponent(userGroupMemberPath[2] || ''));
       return json(res, 200, { ok: true });
@@ -1017,14 +1038,16 @@ const server = createServer(async (req, res) => {
       if (!room) return json(res, 403, { error: 'room_forbidden' });
       const text = typeof payload.body === 'string' ? payload.body.trim() : '';
       const clientId = String(payload.client_id || '').slice(0, 80);
+      const replyToId = payload.reply_to_id == null ? null : Number(payload.reply_to_id);
       if (!text || [...text].length > 140 || !clientId) return json(res, 400, { error: 'invalid_message', max_length: 140 });
-      const existing = db.prepare('SELECT id, conversation_id, body, type FROM messages WHERE author_id = ? AND client_id = ?').get(user, clientId);
-      if (existing && (existing.conversation_id !== room.id || existing.body !== text || existing.type !== 'text')) {
+      if (replyToId !== null && (!Number.isInteger(replyToId) || !db.prepare('SELECT 1 FROM messages WHERE id=? AND conversation_id=?').get(replyToId, room.id))) return json(res, 400, { error: 'invalid_reply' });
+      const existing = db.prepare('SELECT id, conversation_id, body, type, reply_to_id FROM messages WHERE author_id = ? AND client_id = ?').get(user, clientId);
+      if (existing && (existing.conversation_id !== room.id || existing.body !== text || existing.type !== 'text' || existing.reply_to_id !== replyToId)) {
         return json(res, 409, { error: 'client_id_conflict' });
       }
       let result;
       try {
-        result = db.prepare('INSERT INTO messages(conversation_id, author_id, client_id, body, created_at) VALUES (?, ?, ?, ?, ?)').run(room.id, user, clientId, text, Date.now());
+        result = db.prepare('INSERT INTO messages(conversation_id, author_id, client_id, body, created_at, reply_to_id) VALUES (?, ?, ?, ?, ?, ?)').run(room.id, user, clientId, text, Date.now(), replyToId);
       } catch (error) {
         if (!String(error).includes('UNIQUE')) throw error;
       }

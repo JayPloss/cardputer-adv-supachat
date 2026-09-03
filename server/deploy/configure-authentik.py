@@ -126,6 +126,7 @@ with transaction.atomic():
         ("albie", "Albie"),
         ("julien", "Julien"),
         ("josee", "Josée"),
+        ("maman", "Josée"),
         ("vero", "Véro"),
         ("theo", "Théo"),
     ):

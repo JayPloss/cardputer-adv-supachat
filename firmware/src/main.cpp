@@ -176,6 +176,9 @@ struct ChatMessage {
   int64_t createdAt = 0;
   bool queued = false;
   bool voice = false;
+  int64_t replyToId = 0;
+  String replyAuthor;
+  String replyBody;
 };
 
 struct ChatLine {
@@ -184,6 +187,7 @@ struct ChatLine {
   uint32_t colour;
   bool mine;
   bool showSender;
+  bool selected;
 };
 struct ChatRoom { String id; String name; String groupId; String groupName; String defaultLanguage; int64_t latestMessageId; int64_t seenMessageId; };
 void applyEffectiveLanguage();
@@ -201,7 +205,7 @@ uint32_t participantColour(const String &authorId, const String &authorName = ""
   return TFT_WHITE;
 }
 
-enum class ScreenMode { Chat, Menu, Rooms, Volume, Language, Changelog, VoiceMessages, Walkie, Status, Networks, NetworkPassword };
+enum class ScreenMode { Chat, Menu, Rooms, Volume, Language, EmojiRecipes, Changelog, VoiceMessages, Walkie, Status, Networks, NetworkPassword };
 
 Preferences preferences;
 M5Canvas uiCanvas(&M5Cardputer.Display);
@@ -299,6 +303,10 @@ uint32_t clientSequence = 0;
 size_t songPosition = 0;
 size_t messageNotificationPosition = 0;
 size_t historyOffset = 0;
+int emojiRecipeSelection = 0;
+int64_t replyToMessageId = 0;
+String replyToAuthor;
+String replyToBody;
 size_t voiceSampleCount = 0;
 size_t voiceCapturedTotal = 0;
 int16_t voiceCaptureBlock[kVoiceCaptureBlock]{};
@@ -1053,6 +1061,11 @@ void mergeServerMessage(JsonObjectConst object) {
   serverMessage.authorName = String(object["author_name"] | "?"); serverMessage.body = String(object["body"] | "");
   serverMessage.createdAt = object["created_at"] | 0; serverMessage.queued = false; serverMessage.state = "saved";
   serverMessage.voice = String(object["type"] | "text") == "voice";
+  if (!object["reply_to"].isNull()) {
+    serverMessage.replyToId = object["reply_to"]["id"] | 0;
+    serverMessage.replyAuthor = String(object["reply_to"]["author_name"] | "?");
+    serverMessage.replyBody = String(object["reply_to"]["body"] | "");
+  }
   for (JsonObjectConst receipt : object["receipts"].as<JsonArrayConst>()) {
     if (String(receipt["user_id"] | "") == "papa") serverMessage.state = String(receipt["state"] | "saved");
   }
@@ -1066,10 +1079,10 @@ void sendQueuedMessages() {
   for (const auto &message : messages) if (message.queued) queuedIds.push_back(message.clientId);
   xSemaphoreGive(stateMutex);
   for (const auto &clientId : queuedIds) {
-    String text;
+    String text; int64_t replyToId = 0;
     xSemaphoreTake(stateMutex, portMAX_DELAY);
     auto item = std::find_if(messages.begin(), messages.end(), [&](const ChatMessage &message) { return message.clientId == clientId; });
-    if (item != messages.end()) text = item->body;
+    if (item != messages.end()) { text = item->body; replyToId = item->replyToId; }
     xSemaphoreGive(stateMutex);
     if (text.isEmpty()) continue;
     String response; int status = 0;
@@ -1079,7 +1092,7 @@ void sendQueuedMessages() {
     if (item != messages.end()) queuedRoomId = item->roomId;
     xSemaphoreGive(stateMutex);
     if (queuedRoomId != currentRoomId) continue;
-    const String payload = "{\"client_id\":\"" + jsonEscape(clientId) + "\",\"body\":\"" + jsonEscape(text) + "\",\"room_id\":\"" + jsonEscape(queuedRoomId) + "\"}";
+    const String payload = "{\"client_id\":\"" + jsonEscape(clientId) + "\",\"body\":\"" + jsonEscape(text) + "\",\"room_id\":\"" + jsonEscape(queuedRoomId) + "\"" + (replyToId > 0 ? ",\"reply_to_id\":" + String(replyToId) : "") + "}";
     if (!requestJson("/api/messages", "POST", payload, response, status) || (status != 200 && status != 201)) continue;
     JsonDocument document; if (deserializeJson(document, response)) continue;
     xSemaphoreTake(stateMutex, portMAX_DELAY);
@@ -1270,7 +1283,7 @@ void drawChat() {
       String line = text.substring(0, split);
       text = text.substring(split);
       while (text.startsWith(" ")) text.remove(0, 1);
-      lines.push_back({line, sender, colour, mine, firstChunk});
+      lines.push_back({line, sender, colour, mine, firstChunk, historyOffset > 0 && index == end - 1});
       firstChunk = false;
     }
   }
@@ -1288,25 +1301,28 @@ void drawChat() {
     display.setFont(&fonts::Font0); display.setTextSize(1.5f);
     const String prefix = lines[index].showSender ? lines[index].sender + ": " : "";
     const int x = lines[index].mine ? std::max(3, 237 - display.textWidth(prefix + lines[index].text)) : 3;
+    const uint32_t lineBackground = lines[index].selected ? 0x18C3 : TFT_BLACK;
+    if (lines[index].selected) display.fillRoundRect(std::max(1, x - 2), y - 2, std::min(238 - x, display.textWidth(prefix + lines[index].text) + 5), 15, 2, lineBackground);
     display.setCursor(x, y);
     if (lines[index].showSender) {
-      display.setTextColor(lines[index].colour, TFT_BLACK); printFont0Text(lines[index].sender);
-      display.setTextColor(TFT_WHITE, TFT_BLACK); display.print(": ");
-    } else display.setTextColor(TFT_WHITE, TFT_BLACK);
+      display.setTextColor(lines[index].colour, lineBackground); printFont0Text(lines[index].sender);
+      display.setTextColor(TFT_WHITE, lineBackground); display.print(": ");
+    } else display.setTextColor(TFT_WHITE, lineBackground);
     printFont0Text(lines[index].text); y += 17;
   }
   xSemaphoreGive(stateMutex);
   display.setFont(&fonts::Font0);
   display.drawFastHLine(0, 106, 240, TFT_DARKGREY);
   display.setTextSize(1);
-  display.setTextColor(TFT_YELLOW, TFT_BLACK); display.setCursor(3, 112); display.print("> ");
-  display.setTextColor(TFT_WHITE, TFT_BLACK); printFont0Text(utf8Tail(draft, 34));
+  if (replyToMessageId > 0) { display.setTextColor(TFT_CYAN, TFT_BLACK); display.setCursor(3, 109); display.print(uiText("REPLY ", "REPONDRE ")); printFont0Text(replyToAuthor.substring(0, 15)); }
+  display.setTextColor(TFT_YELLOW, TFT_BLACK); display.setCursor(3, replyToMessageId > 0 ? 120 : 112); display.print("> ");
+  display.setTextColor(TFT_WHITE, TFT_BLACK); printFont0Text(utf8Tail(draft, replyToMessageId > 0 ? 27 : 34));
   display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(198, 126); display.printf("%d/140", utf8CharacterCount(draft));
 }
 
-const char *kMenuItemsEn[] = {"BACK TO CHAT", "ROOMS", "SYNC NOW", "VOICE MESSAGES", "WALKIE-TALKIE", "VOLUME", "LANGUAGE", "NETWORKS", "ESP-NOW LOCAL", "STATUS", "CHANGELOG"};
-const char *kMenuItemsFr[] = {"RETOUR CHAT", "SALONS", "SYNCHRO", "MESSAGES VOCAUX", "WALKIE-TALKIE", "VOLUME", "LANGUE", "RESEAUX", "ESP-NOW LOCAL", "ETAT", "CHANGEMENTS"};
-constexpr int kMenuItemCounts[kMenuPageCount] = {6, 5};
+const char *kMenuItemsEn[] = {"BACK TO CHAT", "ROOMS", "SYNC NOW", "VOICE MESSAGES", "WALKIE-TALKIE", "VOLUME", "LANGUAGE", "NETWORKS", "ESP-NOW LOCAL", "STATUS", "CHANGELOG", "EMOJI RECIPES"};
+const char *kMenuItemsFr[] = {"RETOUR CHAT", "SALONS", "SYNCHRO", "MESSAGES VOCAUX", "WALKIE-TALKIE", "VOLUME", "LANGUE", "RESEAUX", "ESP-NOW LOCAL", "ETAT", "CHANGEMENTS", "RECETTES EMOJI"};
+constexpr int kMenuItemCounts[kMenuPageCount] = {6, 6};
 void drawMenu() {
   auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader("MENU");
   display.setTextSize(1); display.setTextColor(TFT_YELLOW, TFT_DARKGREEN); display.setCursor(78, 6); display.printf("%d/%d", menuPage + 1, kMenuPageCount);
@@ -1320,6 +1336,15 @@ void drawMenu() {
   }
   display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 110); display.print(uiText("LEFT/RIGHT PAGE", "GAUCHE/DROITE PAGE"));
   display.setCursor(6, 122); display.print(uiText("UP/DOWN MOVE      ENTER OPEN", "HAUT/BAS BOUGER   ENTER OUVRIR"));
+}
+
+const char *kEmojiRecipes[] = {":)  HAPPY", ":(  SAD", ";)  WINK", ":D  LAUGH", "<3  LOVE", ":P  PLAYFUL", ":O  SURPRISED", ":/  UNSURE"};
+constexpr int kEmojiRecipeCount = sizeof(kEmojiRecipes) / sizeof(kEmojiRecipes[0]);
+void drawEmojiRecipes() {
+  auto &display=uiCanvas; display.fillScreen(TFT_BLACK); drawHeader(uiText("EMOJI", "EMOJIS")); display.setTextSize(1);
+  const int start=std::max(0,emojiRecipeSelection-5);
+  for(int i=start;i<kEmojiRecipeCount && i<start+6;i++){const int y=22+(i-start)*15; const bool selected=i==emojiRecipeSelection; display.fillRoundRect(8,y,224,13,3,selected?TFT_DARKGREEN:TFT_BLACK); display.setTextColor(selected?TFT_YELLOW:TFT_WHITE,selected?TFT_DARKGREEN:TFT_BLACK); display.setCursor(14,y+3); display.print(kEmojiRecipes[i]);}
+  display.setTextColor(TFT_DARKGREY,TFT_BLACK); display.setCursor(7,121); display.print(uiText("UP/DOWN BROWSE  ENTER BACK","HAUT/BAS VOIR  ENTER RETOUR"));
 }
 
 void drawRooms() {
@@ -1431,6 +1456,7 @@ void drawChangelog();
 void render() {
   if (screenMode == ScreenMode::Chat) drawChat(); else if (screenMode == ScreenMode::Menu) drawMenu(); else if (screenMode == ScreenMode::Rooms) drawRooms();
   else if (screenMode == ScreenMode::Volume) drawVolume(); else if (screenMode == ScreenMode::Language) drawLanguage(); else if (screenMode == ScreenMode::Changelog) drawChangelog();
+  else if (screenMode == ScreenMode::EmojiRecipes) drawEmojiRecipes();
   else if (screenMode == ScreenMode::VoiceMessages || screenMode == ScreenMode::Walkie) drawWalkie();
   else if (screenMode == ScreenMode::Status) drawStatus();
   else if (screenMode == ScreenMode::NetworkPassword) drawNetworkPassword(); else drawNetworks();
@@ -1595,6 +1621,7 @@ void sendDraft() {
   draft.trim(); if (draft.isEmpty()) return;
   ChatMessage message; message.roomId = currentRoomId; message.clientId = nextClientId(); message.authorId = kDeviceId; message.authorName = kDeviceName;
   message.body = draft; message.createdAt = time(nullptr) * 1000LL; message.queued = true; message.state = "queued";
+  message.replyToId = replyToMessageId; message.replyAuthor = replyToAuthor; message.replyBody = replyToBody;
   xSemaphoreTake(stateMutex, portMAX_DELAY); messages.push_back(message); trimHistory(); saveHistoryLocked(); xSemaphoreGive(stateMutex);
   if (kEspNowEnabled && meshReady) {
     static const uint8_t broadcast[] = {0xff,0xff,0xff,0xff,0xff,0xff};
@@ -1606,7 +1633,7 @@ void sendDraft() {
     if (encryptMeshPacket(packet, reinterpret_cast<const uint8_t *>(message.body.c_str()), length))
       esp_now_send(broadcast, reinterpret_cast<uint8_t *>(&packet), offsetof(EspNowPacket, payload) + packet.payloadLength);
   }
-  draft = ""; historyOffset = 0; renderDirty = true;
+  draft = ""; historyOffset = 0; replyToMessageId = 0; replyToAuthor = ""; replyToBody = ""; renderDirty = true;
 }
 
 void scanForNetworks() {
@@ -1659,7 +1686,8 @@ void openSelectedMenuItem() {
   else if (selection == 7) { if (!localOnlyMode) { screenMode = ScreenMode::Networks; scanForNetworks(); } }
   else if (selection == 8) setLocalOnlyMode(!localOnlyMode);
   else if (selection == 9) screenMode = ScreenMode::Status;
-  else screenMode = ScreenMode::Changelog;
+  else if (selection == 10) screenMode = ScreenMode::Changelog;
+  else screenMode = ScreenMode::EmojiRecipes;
   renderDirty = true;
 }
 
@@ -1764,6 +1792,12 @@ void handleKeyboard() {
     else if (keys.enter) { screenMode = ScreenMode::Menu; playNextTone(); }
     renderDirty = true; return;
   }
+  if (screenMode == ScreenMode::EmojiRecipes) {
+    if (goUp && emojiRecipeSelection > 0) emojiRecipeSelection--;
+    else if (goDown && emojiRecipeSelection + 1 < kEmojiRecipeCount) emojiRecipeSelection++;
+    else if (goLeft || keys.enter) screenMode = ScreenMode::Menu;
+    playNextTone(); renderDirty=true; return;
+  }
   if (screenMode != ScreenMode::Chat) {
     if (goLeft || keys.enter) { screenMode = ScreenMode::Menu; playNextTone(); renderDirty = true; }
     return;
@@ -1778,7 +1812,14 @@ void handleKeyboard() {
   if (goLeft) { switchRoom(-1); playNextTone(); return; }
   if (goRight) { switchRoom(1); playNextTone(); return; }
   playNextTone();
-  if (keys.enter) { sendDraft(); return; }
+  if (keys.enter) {
+    if (draft.isEmpty() && historyOffset > 0) {
+      xSemaphoreTake(stateMutex, portMAX_DELAY); const int selected=static_cast<int>(messages.size())-static_cast<int>(historyOffset)-1;
+      if(selected>=0){replyToMessageId=messages[selected].id; replyToAuthor=messages[selected].authorName; replyToBody=messages[selected].body; historyOffset=0;}
+      xSemaphoreGive(stateMutex); renderDirty=true; return;
+    }
+    sendDraft(); return;
+  }
   if (keys.del) {
     if (frenchGravePending) frenchGravePending = false;
     else removeLastUtf8Character(draft);

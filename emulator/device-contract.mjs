@@ -4,6 +4,10 @@ import tls from 'node:tls';
 import {interpretRawKeys,navPositions} from './state.mjs';
 
 const firmware = fs.readFileSync(new URL('../firmware/src/main.cpp', import.meta.url), 'utf8');
+assert.match(firmware, /EMOJI RECIPES/);
+assert.match(firmware, /ScreenMode::EmojiRecipes/);
+assert.match(firmware, /reply_to_id/);
+assert.match(firmware, /historyOffset > 0 && index == end - 1/);
 const songHeader = fs.readFileSync(new URL('../firmware/include/keypress_song.h', import.meta.url), 'utf8');
 const installedFonts = fs.readFileSync(new URL('../firmware/.pio/libdeps/emmanuelle/M5GFX/src/lgfx/v1/lgfx_fonts.cpp', import.meta.url), 'utf8');
 const installedGlcdFont = fs.readFileSync(new URL('../firmware/.pio/libdeps/emmanuelle/M5GFX/src/lgfx/Fonts/glcdfont.h', import.meta.url), 'utf8');
