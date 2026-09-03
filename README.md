@@ -190,6 +190,8 @@ Cardputer devices are pre-registered by an operator and keep separate bearer cre
 
 Planned admin feature: edit each member's room/group-specific display alias in the web portal, while preserving one stable account identity across groups.
 
+Planned emoji feature: recognize an initial, documented set of punctuation shortcuts (for example `:)`, `;)`, and `<3`) as canonical emoji while composing messages. Android/web clients will render the corresponding Unicode emoji; Cardputer firmware will use compact built-in bitmap glyphs where practical and preserve a readable punctuation fallback for unknown or unsupported emoji. Keep the shortcut table and wire representation extensible so the supported emoji set can grow over time without breaking older clients.
+
 Public Play-policy pages are served at `/privacy`, `/terms`, and `/delete-account`. Interactive web and Android users must accept the current community standards before posting; managed Cardputer device credentials retain their existing protocol. Message reporting, user blocking, and deletion requests are stored in SQLite and exposed to the administrator safety queue.
 
 Version 1 is expected to use TLS without end-to-end message encryption. A shared group-key design may be added later, but its browser key management and lost-device recovery costs must be resolved first.
