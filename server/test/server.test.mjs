@@ -392,6 +392,17 @@ test('family login identities have the correct room memberships and names', asyn
     wolfpackHistory.messages.find((message) => message.client_id === 'wolfpack-jay-test').author_color);
 });
 
+test('Authentik proxy headers preserve accented display names', async () => {
+  const response = await fetch(`http://127.0.0.1:${port}/api/session`, {headers:{
+    'x-forwarded-host':'supachat.net','x-authentik-uid':'uid-accent-check',
+    'x-authentik-username':'maman','x-authentik-name':'JosÃ©e',
+  }});
+  assert.equal(response.status, 200);
+  const session = await response.json();
+  assert.equal(session.user.id, 'josee');
+  assert.equal(session.user.display_name, 'Josée');
+});
+
 test('messages over 140 characters are rejected', async () => {
   const response = await fetch(`http://127.0.0.1:${port}/api/messages`, {
     method: 'POST', headers: { cookie, 'content-type': 'application/json' },

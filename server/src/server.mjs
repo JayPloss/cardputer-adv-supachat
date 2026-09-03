@@ -333,6 +333,13 @@ function authentikUserId(username, uid) {
     || `web-${createHash('sha256').update(String(uid)).digest('hex').slice(0, 16)}`;
 }
 
+function proxyHeaderText(value) {
+  const text = String(value || '');
+  if (!/[ÃÂ]/.test(text)) return text;
+  const repaired = Buffer.from(text, 'latin1').toString('utf8');
+  return repaired.includes('\uFFFD') ? text : repaired;
+}
+
 function randomPaletteIndex(indices) {
   return indices[randomBytes(4).readUInt32BE(0) % indices.length];
 }
@@ -407,7 +414,7 @@ function webUser(req) {
   if (host === config.portalHost && authentikUid && authentikUsername) {
     const normalizedUsername = authentikUsername.toLowerCase();
     const id = authentikUserId(normalizedUsername, authentikUid);
-    const displayName = String(req.headers['x-authentik-name'] || authentikUsername).trim().slice(0, 80) || authentikUsername.slice(0, 80);
+    const displayName = proxyHeaderText(req.headers['x-authentik-name'] || authentikUsername).trim().slice(0, 80) || authentikUsername.slice(0, 80);
     const shortName = displayName.split(/\s+/)[0].slice(0, 12) || 'Friend';
     db.prepare(`
       INSERT INTO users(id, display_name, short_name, kind) VALUES (?, ?, ?, 'web')
