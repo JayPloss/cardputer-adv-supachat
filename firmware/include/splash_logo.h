@@ -4,6 +4,8 @@
 #include "splash_logo_juju.h"
 #elif defined(SUPACHAT_DEVICE_PAPA)
 #include "splash_logo_papa.h"
+#elif defined(SUPACHAT_DEVICE_MAMA)
+#include "splash_logo_mama.h"
 #elif defined(SUPACHAT_DEVICE_EMMANUELLE)
 #include "splash_logo_emmanuelle.h"
 #elif defined(SUPACHAT_DEVICE_NAOMIE)

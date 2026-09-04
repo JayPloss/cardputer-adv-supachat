@@ -1,5 +1,21 @@
 # SupaChat workspace guardrails
 
+## Device identification
+
+- For every request to identify, look up, inspect, or act on an attached
+  Cardputer, first load and follow
+  `skills/identify-cardputer-device/SKILL.md`.
+- The current repository's
+  `skills/flash-cardputer-safely/scripts/resolve-device.ps1` is the authoritative
+  device identity map. Never substitute the similarly named global skill script,
+  a remembered COM port, another worktree, or an older copied map.
+- Identification is a lightweight read-only operation. Do not run release,
+  emulator, build, provisioning, or flash gates unless the user also requested
+  the corresponding action.
+- Report the resolved name, MAC, PlatformIO environment, and current COM port
+  without ceremony. An unknown device is a lookup failure, not permission to
+  guess.
+
 ## Authentication claims
 
 - Never describe a login issue as fixed, functional, working, or expected to work based only on account existence, password assignment, password-hash verification, server health, route health, unit tests, or a simulated identity header.

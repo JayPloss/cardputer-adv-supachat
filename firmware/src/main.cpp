@@ -4,6 +4,7 @@
 #include <M5Cardputer.h>
 #include <Preferences.h>
 #include "changelog.h"
+#include "fox_finding.h"
 #include <WebSocketsClient.h>
 #include <SD.h>
 #include <SPI.h>
@@ -66,7 +67,8 @@ constexpr uint32_t kBatteryFallStepMs = 90000;
 constexpr uint32_t kBatteryPersistMs = 300000;
 constexpr uint32_t kChargePlotSampleMs = 300000;
 constexpr size_t kChargePlotCapacity = 144;
-constexpr uint8_t kChargeBrightness = 48;
+constexpr uint32_t kChargeScreenTimeoutMs = 20000;
+constexpr uint8_t kChargeBrightness = 24;
 constexpr uint8_t kChargeDimBrightness = 0;
 constexpr int kChargePlotMinMv = 3200;
 constexpr int kChargePlotMaxMv = 4300;
@@ -85,6 +87,7 @@ constexpr uint32_t kPttReleaseDebounceMs = 500;
 constexpr uint32_t kEspNowBeaconMs = 30000;
 constexpr bool kEspNowEnabled = true;
 constexpr uint8_t kEspNowFallbackChannel = 1;
+constexpr uint32_t kFoxPlaceRescanMs = 30000;
 #if defined(SUPACHAT_DEVICE_EMMANUELLE) || defined(SUPACHAT_DEVICE_NAOMIE) || defined(SUPACHAT_DEVICE_ANDREW)
 constexpr char kDefaultRoomId[] = "wolfpack";
 constexpr char kDefaultRoomName[] = "Wolfpack";
@@ -206,6 +209,7 @@ struct ChargePlotPoint {
   ChargeTrend trend = ChargeTrend::Waiting;
 };
 void applyEffectiveLanguage();
+void setLocalOnlyMode(bool enabled);
 
 uint32_t participantColour(const String &authorId, const String &authorName = "") {
   String identity = authorId + " " + authorName; identity.toLowerCase();
@@ -220,7 +224,7 @@ uint32_t participantColour(const String &authorId, const String &authorName = ""
   return TFT_WHITE;
 }
 
-enum class ScreenMode { Chat, Menu, Rooms, Volume, Language, EmojiRecipes, Changelog, VoiceMessages, Walkie, Status, Networks, NetworkPassword, ChargingConfirm, Charging };
+enum class ScreenMode { Chat, Menu, Rooms, Volume, Language, EmojiRecipes, Changelog, VoiceMessages, Walkie, Status, Networks, NetworkPassword, ChargingConfirm, Charging, FoxFinding };
 
 Preferences preferences;
 M5Canvas uiCanvas(&M5Cardputer.Display);
@@ -325,11 +329,58 @@ bool espNowActive = false;
 uint32_t chargeSessionStartedAt = 0;
 uint32_t nextChargePlotAt = 0;
 uint32_t chargeSessionId = 0;
-int chargeStartMv = 0;
 int chargeLastLoggedPercent = -1;
 ChargeTrend chargeTrend = ChargeTrend::Waiting;
 std::array<ChargePlotPoint, kChargePlotCapacity> chargePlot{};
 size_t chargePlotCount = 0;
+
+enum class FoxState : uint8_t { Idle, Selecting, Requesting, Acquiring, Guiding, TargetActive, SignalLost };
+struct FoxPeer {
+  uint8_t mac[6]{};
+  char id[6]{};
+  char name[8]{};
+  volatile int8_t rssi = -127;
+  volatile uint32_t rssiAt = 0;
+  uint32_t seenAt = 0;
+};
+struct __attribute__((packed)) FoxControl {
+  char targetId[6]{};
+  uint32_t sessionId = 0;
+  uint8_t role = 0;
+};
+std::array<FoxPeer, supachat::fox::kMaxPeers> foxPeers{};
+size_t foxPeerCount = 0;
+int foxPeerSelection = 0;
+FoxState foxState = FoxState::Idle;
+uint32_t foxSessionId = 0;
+uint32_t foxStartedAt = 0;
+uint32_t foxLastPacketAt = 0;
+uint32_t foxLastBeaconAt = 0;
+uint32_t foxLastPlaceScanAt = 0;
+char foxTargetId[6]{};
+char foxTargetName[8]{};
+uint8_t foxTargetMac[6]{};
+volatile bool foxScanRequested = false;
+volatile bool foxSendPlaceResult = false;
+volatile bool foxAckRequested = false;
+volatile bool foxEnterLocalOnlyRequested = false;
+volatile bool foxRequestPlaceAfterScan = false;
+volatile bool foxRestoreWifiRequested = false;
+bool foxForcedLocalOnly = false;
+uint32_t foxLastConsumedRssiAt = 0;
+uint32_t foxPackInviteSession = 0;
+uint32_t foxPackInviteAt = 0;
+char foxPackInviteQuarryId[6]{};
+char foxPackInviteQuarryName[8]{};
+char foxPackInviteHunterName[8]{};
+std::array<supachat::fox::PackEvidence, supachat::fox::kMaxPackHunters> foxPackEvidence{};
+size_t foxPackEvidenceCount = 0;
+uint32_t foxLastPackObservationAt = 0;
+uint16_t foxPackSequence = 0;
+bool foxJoinedPack = false;
+supachat::fox::PlacePrint foxLocalPrint{};
+supachat::fox::Match foxPlaceMatch{};
+supachat::fox::RssiTrend foxRssiTrend;
 
 void serviceMessageNotification();
 uint32_t lastToneAt = 0;
@@ -355,7 +406,7 @@ uint32_t nextMessageNotificationAt = 0;
 volatile uint32_t lastNearbyAt = 0;
 
 constexpr uint32_t kEspNowMagic = 0x53555041;
-enum class EspNowType : uint8_t { Beacon = 1, Text = 2, Audio = 3 };
+enum class EspNowType : uint8_t { Beacon = 1, Text = 2, Audio = 3, FoxBeacon = 4, FindStart = 5, FindAck = 6, PlacePrintRequest = 7, PlacePrintResult = 8, FindEnd = 9, PackObservation = 10 };
 struct __attribute__((packed)) EspNowPacket {
   uint32_t magic;
   uint8_t type;
@@ -414,6 +465,120 @@ bool decryptMeshPacket(const EspNowPacket &packet, std::vector<uint8_t> &plain) 
   const int result = mbedtls_gcm_auth_decrypt(&context, packet.payloadLength, packet.nonce, sizeof(packet.nonce),
       reinterpret_cast<const uint8_t *>(&packet), offsetof(EspNowPacket, nonce), packet.tag, sizeof(packet.tag), packet.payload, plain.data());
   mbedtls_gcm_free(&context); return result == 0;
+}
+
+FoxPeer *findFoxPeerByMac(const uint8_t *mac) {
+  for (size_t index = 0; index < foxPeerCount; ++index)
+    if (memcmp(foxPeers[index].mac, mac, 6) == 0) return &foxPeers[index];
+  return nullptr;
+}
+
+FoxPeer *rememberFoxPeer(const uint8_t *mac, const char *id, const char *name) {
+  FoxPeer *peer = findFoxPeerByMac(mac);
+  if (!peer && foxPeerCount < foxPeers.size()) {
+    peer = &foxPeers[foxPeerCount++];
+    memcpy(peer->mac, mac, 6);
+  }
+  if (!peer) return nullptr;
+  memset(peer->id, 0, sizeof(peer->id)); memset(peer->name, 0, sizeof(peer->name));
+  strncpy(peer->id, id, sizeof(peer->id) - 1);
+  strncpy(peer->name, name, sizeof(peer->name) - 1);
+  peer->seenAt = millis();
+  return peer;
+}
+
+void onFoxPromiscuousPacket(void *buffer, wifi_promiscuous_pkt_type_t type) {
+  if (type != WIFI_PKT_MGMT || !buffer) return;
+  const auto *packet = static_cast<const wifi_promiscuous_pkt_t *>(buffer);
+  if (packet->rx_ctrl.sig_len < 24) return;
+  const uint8_t *frame = packet->payload;
+  if ((frame[0] & 0xfc) != 0xd0) return;  // ESP-NOW uses vendor-specific action frames.
+  const uint8_t *source = frame + 10;
+  FoxPeer *peer = findFoxPeerByMac(source);
+  if (!peer) return;
+  peer->rssi = packet->rx_ctrl.rssi;
+  peer->rssiAt = millis();
+}
+
+bool sendFoxPacket(EspNowType type, const void *payload, size_t length) {
+  if (!espNowActive || !meshReady || length > 142) return false;
+  static const uint8_t broadcast[] = {0xff,0xff,0xff,0xff,0xff,0xff};
+  EspNowPacket packet{};
+  packet.magic = kEspNowMagic; packet.type = static_cast<uint8_t>(type); packet.sequence = ++espNowSequence;
+  strncpy(packet.senderId, kDeviceId, sizeof(packet.senderId) - 1);
+  strncpy(packet.senderName, kDeviceName, sizeof(packet.senderName) - 1);
+  strncpy(packet.roomId, currentRoomId.c_str(), sizeof(packet.roomId) - 1);
+  if (!encryptMeshPacket(packet, static_cast<const uint8_t *>(payload), length)) return false;
+  return esp_now_send(broadcast, reinterpret_cast<uint8_t *>(&packet), offsetof(EspNowPacket, payload) + packet.payloadLength) == ESP_OK;
+}
+
+void sendFoxControl(EspNowType type) {
+  FoxControl control{};
+  strncpy(control.targetId, foxTargetId, sizeof(control.targetId) - 1);
+  control.sessionId = foxSessionId;
+  control.role = foxState == FoxState::TargetActive ? 1 : 0;
+  sendFoxPacket(type, &control, sizeof(control));
+}
+
+FoxPeer *findFoxPeerById(const char *id) {
+  for (size_t index = 0; index < foxPeerCount; ++index) if (strncmp(foxPeers[index].id, id, sizeof(foxPeers[index].id)) == 0) return &foxPeers[index];
+  return nullptr;
+}
+
+void recordPackEvidence(const char *hunterId, const supachat::fox::PackObservation &observation) {
+  supachat::fox::PackEvidence *evidence = nullptr;
+  for (size_t index = 0; index < foxPackEvidenceCount; ++index)
+    if (strncmp(foxPackEvidence[index].hunterId, hunterId, sizeof(foxPackEvidence[index].hunterId)) == 0) evidence = &foxPackEvidence[index];
+  if (!evidence && foxPackEvidenceCount < foxPackEvidence.size()) evidence = &foxPackEvidence[foxPackEvidenceCount++];
+  if (!evidence) return;
+  memset(evidence->hunterId, 0, sizeof(evidence->hunterId)); strncpy(evidence->hunterId, hunterId, sizeof(evidence->hunterId) - 1);
+  evidence->directRssi = observation.directRssi; evidence->trendDelta = observation.trendDelta;
+  evidence->placeSimilarity = observation.placeSimilarity; evidence->placeConfidence = observation.placeConfidence; evidence->receivedAt = millis();
+}
+
+void sendPackObservation() {
+  if (foxState != FoxState::Guiding && foxState != FoxState::Acquiring && foxState != FoxState::SignalLost) return;
+  supachat::fox::PackObservation observation{}; observation.sessionId = foxSessionId;
+  strncpy(observation.quarryId, foxTargetId, sizeof(observation.quarryId) - 1);
+  observation.directRssi = static_cast<int8_t>(foxRssiTrend.average()); observation.trendDelta = static_cast<int8_t>(foxRssiTrend.delta());
+  observation.placeSimilarity = foxPlaceMatch.similarity; observation.placeConfidence = foxPlaceMatch.confidence;
+  observation.placeOverlap = foxPlaceMatch.overlap; observation.sequence = ++foxPackSequence;
+  sendFoxPacket(EspNowType::PackObservation, &observation, sizeof(observation));
+  recordPackEvidence(kDeviceId, observation);
+}
+
+void joinPackHunt() {
+  if (!foxPackInviteSession || millis() - foxPackInviteAt > supachat::fox::kPeerFreshMs) return;
+  FoxPeer *quarry = findFoxPeerById(foxPackInviteQuarryId); if (!quarry) return;
+  strncpy(foxTargetId, quarry->id, sizeof(foxTargetId) - 1); strncpy(foxTargetName, quarry->name, sizeof(foxTargetName) - 1);
+  memcpy(foxTargetMac, quarry->mac, 6); foxSessionId = foxPackInviteSession; foxStartedAt = millis(); foxLastPacketAt = millis();
+  foxJoinedPack = true; foxState = FoxState::Acquiring; foxRssiTrend.reset(); foxPackEvidenceCount = 0;
+  if (!localOnlyMode) { foxForcedLocalOnly = true; setLocalOnlyMode(true); }
+  foxScanRequested = true; foxRequestPlaceAfterScan = true; renderDirty = true;
+}
+
+void stopFoxFinding(bool notifyPeer = true) {
+  if (notifyPeer && foxState != FoxState::Idle && foxState != FoxState::Selecting) sendFoxControl(EspNowType::FindEnd);
+  foxState = FoxState::Idle; foxSessionId = 0; foxStartedAt = 0; foxLastPacketAt = 0;
+  foxScanRequested = false; foxSendPlaceResult = false; foxPlaceMatch = {};
+  foxRssiTrend.reset(); foxLastConsumedRssiAt = 0;
+  foxPackEvidenceCount = 0; foxJoinedPack = false;
+  memset(foxTargetId, 0, sizeof(foxTargetId)); memset(foxTargetName, 0, sizeof(foxTargetName));
+  if (foxForcedLocalOnly) { foxForcedLocalOnly = false; foxRestoreWifiRequested = true; }
+}
+
+void beginFoxFinding() {
+  if (!foxPeerCount) { foxState = FoxState::Selecting; renderDirty = true; return; }
+  foxPeerSelection = std::max(0, std::min(foxPeerSelection, static_cast<int>(foxPeerCount) - 1));
+  const FoxPeer &peer = foxPeers[foxPeerSelection];
+  strncpy(foxTargetId, peer.id, sizeof(foxTargetId) - 1);
+  strncpy(foxTargetName, peer.name, sizeof(foxTargetName) - 1);
+  memcpy(foxTargetMac, peer.mac, 6);
+  foxSessionId = esp_random(); foxStartedAt = millis(); foxLastPacketAt = millis(); foxState = FoxState::Requesting;
+  foxRssiTrend.reset(); foxLastConsumedRssiAt = 0;
+  foxPackEvidenceCount = 0; foxJoinedPack = false;
+  if (!localOnlyMode) { foxForcedLocalOnly = true; setLocalOnlyMode(true); }
+  sendFoxControl(EspNowType::FindStart); renderDirty = true;
 }
 
 void drawBootSplash() {
@@ -811,16 +976,71 @@ void onWalkieEvent(WStype_t type, uint8_t *payload, size_t length) {
   }
 }
 
-void onEspNowReceive(const uint8_t *, const uint8_t *data, int length) {
+void onEspNowReceive(const uint8_t *mac, const uint8_t *data, int length) {
   if (chargingModeActive) return;
   if (length < static_cast<int>(offsetof(EspNowPacket, payload))) return;
   const auto *packet = reinterpret_cast<const EspNowPacket *>(data);
   if (packet->magic != kEspNowMagic || packet->payloadLength > sizeof(packet->payload) ||
       static_cast<int>(offsetof(EspNowPacket, payload) + packet->payloadLength) > length ||
       String(packet->senderId) == kDeviceId || String(packet->roomId) != currentRoomId) return;
+  FoxPeer *peer = rememberFoxPeer(mac, packet->senderId, packet->senderName);
   lastNearbyAt = millis();
   if (packet->type == static_cast<uint8_t>(EspNowType::Beacon)) { renderDirty = true; return; }
   std::vector<uint8_t> plain; if (!decryptMeshPacket(*packet, plain) || !acceptMeshNonce(packet->nonce)) return;
+  const EspNowType type = static_cast<EspNowType>(packet->type);
+  if (type >= EspNowType::FoxBeacon && type <= EspNowType::PackObservation) {
+    if (type == EspNowType::PlacePrintResult && plain.size() == sizeof(supachat::fox::PlacePrint) &&
+        foxState != FoxState::Idle && String(packet->senderId) == foxTargetId) {
+      supachat::fox::PlacePrint remote{}; memcpy(&remote, plain.data(), sizeof(remote));
+      remote.count = std::min<uint8_t>(remote.count, supachat::fox::kMaxPlacePrintEntries);
+      foxPlaceMatch = supachat::fox::match(foxLocalPrint, remote); foxState = FoxState::Guiding;
+      foxLastPacketAt = millis(); renderDirty = true; return;
+    }
+    if (type == EspNowType::PackObservation) {
+      if (plain.size() != sizeof(supachat::fox::PackObservation)) return;
+      supachat::fox::PackObservation observation{}; memcpy(&observation, plain.data(), sizeof(observation));
+      if (observation.sessionId == foxSessionId && String(observation.quarryId) == foxTargetId && foxState != FoxState::TargetActive) {
+        recordPackEvidence(packet->senderId, observation); renderDirty = true;
+      }
+      return;
+    }
+    if (plain.size() != sizeof(FoxControl)) return;
+    FoxControl control{}; memcpy(&control, plain.data(), sizeof(control));
+    if (control.sessionId == 0) return;
+    if (type == EspNowType::FoxBeacon && control.role == 0 && String(control.targetId) != kDeviceId &&
+        (foxState == FoxState::Idle || foxState == FoxState::Selecting)) {
+      FoxPeer *quarry = findFoxPeerById(control.targetId);
+      if (quarry) {
+        foxPackInviteSession = control.sessionId; foxPackInviteAt = millis();
+        memset(foxPackInviteQuarryId, 0, sizeof(foxPackInviteQuarryId)); memset(foxPackInviteQuarryName, 0, sizeof(foxPackInviteQuarryName)); memset(foxPackInviteHunterName, 0, sizeof(foxPackInviteHunterName));
+        strncpy(foxPackInviteQuarryId, quarry->id, sizeof(foxPackInviteQuarryId) - 1); strncpy(foxPackInviteQuarryName, quarry->name, sizeof(foxPackInviteQuarryName) - 1);
+        strncpy(foxPackInviteHunterName, packet->senderName, sizeof(foxPackInviteHunterName) - 1); renderDirty = true;
+      }
+      return;
+    }
+    if (type == EspNowType::FindStart && String(control.targetId) == kDeviceId) {
+      if (voiceRecording || audioPlaying) return;
+      strncpy(foxTargetId, packet->senderId, sizeof(foxTargetId) - 1);
+      strncpy(foxTargetName, packet->senderName, sizeof(foxTargetName) - 1);
+      memcpy(foxTargetMac, mac, 6); foxSessionId = control.sessionId; foxStartedAt = millis();
+      foxLastPacketAt = millis(); foxState = FoxState::TargetActive;
+      screenMode = ScreenMode::FoxFinding;
+      foxEnterLocalOnlyRequested = !localOnlyMode; foxAckRequested = true; renderDirty = true; return;
+    }
+    if (type == EspNowType::PlacePrintRequest && foxState == FoxState::TargetActive && control.sessionId == foxSessionId && String(control.targetId) == kDeviceId) {
+      foxScanRequested = true; foxSendPlaceResult = true; foxLastPacketAt = millis(); return;
+    }
+    if (control.sessionId != foxSessionId || String(packet->senderId) != foxTargetId) return;
+    foxLastPacketAt = millis();
+    if (peer && peer->rssiAt && millis() - peer->rssiAt < 2000 && peer->rssiAt != foxLastConsumedRssiAt) { foxLastConsumedRssiAt = peer->rssiAt; foxRssiTrend.add(peer->rssi); }
+    if (type == EspNowType::FoxBeacon && foxState == FoxState::SignalLost) foxState = FoxState::Guiding;
+    if (type == EspNowType::FindAck && foxState == FoxState::Requesting) {
+      foxState = FoxState::Acquiring; foxScanRequested = true; foxRequestPlaceAfterScan = true;
+    } else if (type == EspNowType::PlacePrintRequest && foxState == FoxState::TargetActive) {
+      foxScanRequested = true; foxSendPlaceResult = true;
+    } else if (type == EspNowType::FindEnd) stopFoxFinding(false);
+    renderDirty = true; return;
+  }
   if (packet->type == static_cast<uint8_t>(EspNowType::Audio) && plain.size() % 2 == 0) {
     std::vector<int16_t> samples(plain.size() / 2); memcpy(samples.data(), plain.data(), plain.size());
     if (stateMutex) { xSemaphoreTake(stateMutex, portMAX_DELAY); if (incomingAudio.size() < 12) incomingAudio.push_back(std::move(samples)); xSemaphoreGive(stateMutex); }
@@ -844,9 +1064,62 @@ void initializeEspNow() {
   if (chargingModeActive || espNowActive) return;
   if (esp_now_init() != ESP_OK) return;
   esp_now_register_recv_cb(onEspNowReceive);
+  esp_wifi_set_promiscuous_rx_cb(onFoxPromiscuousPacket);
+  esp_wifi_set_promiscuous(true);
   esp_now_peer_info_t peer{}; memset(peer.peer_addr, 0xff, 6); peer.channel = 0; peer.ifidx = WIFI_IF_STA; peer.encrypt = false;
   if (!esp_now_is_peer_exist(peer.peer_addr)) esp_now_add_peer(&peer);
   espNowActive = true;
+}
+
+void collectFoxPlacePrint() {
+  uint8_t primary = kEspNowFallbackChannel; wifi_second_chan_t secondary = WIFI_SECOND_CHAN_NONE;
+  esp_wifi_get_channel(&primary, &secondary);
+  const uint32_t started = millis();
+  const int count = WiFi.scanNetworks(false, true, false, 120);
+  std::vector<supachat::fox::PlacePrintEntry> entries;
+  entries.reserve(std::max(0, count));
+  for (int index = 0; index < count; ++index) {
+    const uint8_t *bssid = WiFi.BSSID(index); if (!bssid) continue;
+    supachat::fox::PlacePrintEntry entry{}; memcpy(entry.bssid, bssid, 6);
+    entry.rssi = static_cast<int8_t>(std::max(-127, std::min(0, static_cast<int>(WiFi.RSSI(index)))));
+    entry.channel = static_cast<uint8_t>(WiFi.channel(index)); entries.push_back(entry);
+  }
+  WiFi.scanDelete();
+  std::sort(entries.begin(), entries.end(), [](const supachat::fox::PlacePrintEntry &left, const supachat::fox::PlacePrintEntry &right) { return left.rssi > right.rssi; });
+  foxLocalPrint = {}; foxLocalPrint.scanMs = static_cast<uint16_t>(std::min<uint32_t>(65535, millis() - started));
+  foxLocalPrint.truncated = entries.size() > supachat::fox::kMaxPlacePrintEntries;
+  foxLocalPrint.count = static_cast<uint8_t>(std::min(entries.size(), supachat::fox::kMaxPlacePrintEntries));
+  for (uint8_t index = 0; index < foxLocalPrint.count; ++index) foxLocalPrint.entries[index] = entries[index];
+  if (WiFi.status() != WL_CONNECTED) esp_wifi_set_channel(primary, secondary);
+  foxLastPlaceScanAt = millis();
+  if (foxRequestPlaceAfterScan) { foxRequestPlaceAfterScan = false; sendFoxControl(EspNowType::PlacePrintRequest); }
+  if (foxSendPlaceResult) { sendFoxPacket(EspNowType::PlacePrintResult, &foxLocalPrint, sizeof(foxLocalPrint)); foxSendPlaceResult = false; }
+  renderDirty = true;
+}
+
+void serviceFoxFinding() {
+  if (foxEnterLocalOnlyRequested) { foxEnterLocalOnlyRequested = false; foxForcedLocalOnly = true; setLocalOnlyMode(true); }
+  if (foxRestoreWifiRequested) { foxRestoreWifiRequested = false; setLocalOnlyMode(false); }
+  if (foxAckRequested) { foxAckRequested = false; sendFoxControl(EspNowType::FindAck); }
+  if (foxState == FoxState::Idle || foxState == FoxState::Selecting) {
+    for (size_t index = 0; index < foxPeerCount;) {
+      if (millis() - foxPeers[index].seenAt <= supachat::fox::kPeerFreshMs) { ++index; continue; }
+      foxPeers[index] = foxPeers[foxPeerCount - 1]; --foxPeerCount;
+    }
+    foxPeerSelection = std::max(0, std::min(foxPeerSelection, std::max(0, static_cast<int>(foxPeerCount) - 1)));
+    if (foxPackInviteAt && millis() - foxPackInviteAt > supachat::fox::kPeerFreshMs) { foxPackInviteSession = 0; foxPackInviteAt = 0; }
+    return;
+  }
+  const uint32_t now = millis();
+  if (now - foxStartedAt >= supachat::fox::kSessionExpiryMs) { stopFoxFinding(); screenMode = ScreenMode::FoxFinding; renderDirty = true; return; }
+  if (now - foxLastBeaconAt >= supachat::fox::kFoxBeaconMs) { sendFoxControl(EspNowType::FoxBeacon); foxLastBeaconAt = now; }
+  if (foxState != FoxState::TargetActive && now - foxLastPackObservationAt >= supachat::fox::kPackObservationMs) { sendPackObservation(); foxLastPackObservationAt = now; }
+  FoxPeer *peer = findFoxPeerByMac(foxTargetMac);
+  if (peer && peer->rssiAt != foxLastConsumedRssiAt && now - peer->rssiAt < 1500) { foxLastConsumedRssiAt = peer->rssiAt; foxRssiTrend.add(peer->rssi); renderDirty = true; }
+  if (foxLastPacketAt && now - foxLastPacketAt > supachat::fox::kSignalLostMs && foxState != FoxState::TargetActive) foxState = FoxState::SignalLost;
+  if (foxState == FoxState::Guiding && now - foxLastPlaceScanAt >= kFoxPlaceRescanMs) {
+    foxState = FoxState::Acquiring; foxScanRequested = true; foxRequestPlaceAfterScan = true;
+  }
 }
 
 void sendEspNowBeacon() {
@@ -1014,7 +1287,9 @@ void sampleBattery(bool force = false) {
     lastBatteryPersistAt = now;
   }
   if (batteryLevel != previousLevel) renderDirty = true;
-  if (nextVoltage != batteryVoltageMv) renderDirty = true;
+  // A raw reading can move every second. Keep sampling it for the battery
+  // model, but do not repaint the entire charging screen for ADC noise.
+  if (!chargingModeActive && nextVoltage != batteryVoltageMv) renderDirty = true;
   batteryVoltageMv = nextVoltage;
 }
 
@@ -1086,6 +1361,7 @@ void enterChargingMode() {
   chargingModeActive = true;
   inputQuarantined = true;
   chargingDimmed = false;
+  lastUserInputAt = millis();
   messageNotificationPending = false; messageNotificationActive = false;
   if (voiceRecording) stopVoiceRecording();
   stopVoicePlayback();
@@ -1097,7 +1373,6 @@ void enterChargingMode() {
   setCpuFrequencyMhz(80);
   M5Cardputer.Display.setBrightness(kChargeBrightness);
   chargeSessionStartedAt = millis(); chargeSessionId = esp_random();
-  chargeStartMv = static_cast<int>(batteryFilteredMv + 0.5f);
   chargeLastLoggedPercent = batteryLevel;
   chargeTrend = ChargeTrend::Waiting; chargePlotCount = 0;
   nextChargePlotAt = millis() + kChargePlotSampleMs;
@@ -1123,6 +1398,10 @@ void exitChargingMode() {
 void serviceChargingMode() {
   if (!chargingModeActive) return;
   const uint32_t now = millis();
+  if (!chargingDimmed && now - lastUserInputAt >= kChargeScreenTimeoutMs) {
+    chargingDimmed = true;
+    M5Cardputer.Display.setBrightness(kChargeDimBrightness);
+  }
   if (static_cast<int32_t>(now - nextChargePlotAt) >= 0) {
     do { nextChargePlotAt += kChargePlotSampleMs; } while (static_cast<int32_t>(now - nextChargePlotAt) >= 0);
     addChargePlotPoint();
@@ -1366,6 +1645,7 @@ void synchronize() {
 void networkTask(void *) {
   uint32_t nextWifiAttempt = 0;
   for (;;) {
+    if (foxScanRequested) { foxScanRequested = false; collectFoxPlacePrint(); continue; }
     if (chargingModeActive) { vTaskDelay(pdMS_TO_TICKS(1000)); continue; }
     if (manualWifiMode) { vTaskDelay(pdMS_TO_TICKS(100)); continue; }
     if (localOnlyMode) {
@@ -1424,10 +1704,12 @@ void drawHeader(const char *title) {
   if (screenMode != ScreenMode::Charging && screenMode != ScreenMode::ChargingConfirm) {
     display.setCursor(106, 6); display.print(networkStatus.substring(0, 10));
   }
-  const String batteryText = batteryLevel < 0 ? String("?%") : String(batteryLevel) + "%";
-  display.setTextSize(1); display.setTextColor(TFT_WHITE, TFT_DARKGREEN);
-  display.setCursor(237 - static_cast<int>(batteryText.length()) * 6, 6);
-  display.print(batteryText); display.setTextSize(1);
+  if (screenMode != ScreenMode::Charging) {
+    const String batteryText = batteryLevel < 0 ? String("?%") : String(batteryLevel) + "%";
+    display.setTextSize(1); display.setTextColor(TFT_WHITE, TFT_DARKGREEN);
+    display.setCursor(237 - static_cast<int>(batteryText.length()) * 6, 6);
+    display.print(batteryText); display.setTextSize(1);
+  }
   if (externalPowerDetected && screenMode != ScreenMode::Charging && screenMode != ScreenMode::ChargingConfirm) {
     display.fillTriangle(199, 2, 194, 10, 199, 10, TFT_YELLOW);
     display.fillTriangle(197, 8, 203, 8, 196, 18, TFT_YELLOW);
@@ -1504,9 +1786,9 @@ void drawChat() {
   display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(198, 126); display.printf("%d/140", utf8CharacterCount(draft));
 }
 
-const char *kMenuItemsEn[] = {"BACK TO CHAT", "ROOMS", "SYNC NOW", "VOICE MESSAGES", "WALKIE-TALKIE", "VOLUME", "LANGUAGE", "NETWORKS", "ESP-NOW LOCAL", "CHARGING MODE", "STATUS", "CHANGELOG", "EMOJI RECIPES"};
-const char *kMenuItemsFr[] = {"RETOUR CHAT", "SALONS", "SYNCHRO", "MESSAGES VOCAUX", "WALKIE-TALKIE", "VOLUME", "LANGUE", "RESEAUX", "ESP-NOW LOCAL", "MODE CHARGE", "ETAT", "CHANGEMENTS", "RECETTES EMOJI"};
-constexpr int kMenuItemCounts[kMenuPageCount] = {6, 6, 1};
+const char *kMenuItemsEn[] = {"BACK TO CHAT", "ROOMS", "SYNC NOW", "VOICE MESSAGES", "WALKIE-TALKIE", "VOLUME", "LANGUAGE", "NETWORKS", "ESP-NOW LOCAL", "CHARGING MODE", "STATUS", "CHANGELOG", "EMOJI RECIPES", "FOX FINDING"};
+const char *kMenuItemsFr[] = {"RETOUR CHAT", "SALONS", "SYNCHRO", "MESSAGES VOCAUX", "WALKIE-TALKIE", "VOLUME", "LANGUE", "RESEAUX", "ESP-NOW LOCAL", "MODE CHARGE", "ETAT", "CHANGEMENTS", "RECETTES EMOJI", "CHASSE AU RENARD"};
+constexpr int kMenuItemCounts[kMenuPageCount] = {6, 6, 2};
 void drawMenu() {
   auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader("MENU");
   display.setTextSize(1); display.setTextColor(TFT_YELLOW, TFT_DARKGREEN); display.setCursor(78, 6); display.printf("%d/%d", menuPage + 1, kMenuPageCount);
@@ -1662,23 +1944,22 @@ void drawChargingConfirm() {
 
 int chargePlotY(int millivolts) {
   const int clamped = std::max(kChargePlotMinMv, std::min(kChargePlotMaxMv, millivolts));
-  return 105 - (clamped - kChargePlotMinMv) * 54 / (kChargePlotMaxMv - kChargePlotMinMv);
+  return 109 - (clamped - kChargePlotMinMv) * 34 / (kChargePlotMaxMv - kChargePlotMinMv);
 }
 
 void drawCharging() {
   auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader(uiText("CHARGING", "CHARGE"));
   const int filteredMv = static_cast<int>(batteryFilteredMv + 0.5f);
-  const int deltaMv = filteredMv - chargeStartMv;
   const uint32_t elapsedMinutes = (millis() - chargeSessionStartedAt) / 60000;
-  display.setTextSize(1); display.setTextColor(TFT_WHITE, TFT_BLACK); display.setCursor(5, 23);
-  display.printf("%d mV  %d%%  %+d mV", filteredMv, batteryLevel, deltaMv);
-  display.setTextColor(TFT_LIGHTGREY, TFT_BLACK); display.setCursor(187, 23);
-  display.printf("%02lu:%02lu", static_cast<unsigned long>(elapsedMinutes / 60), static_cast<unsigned long>(elapsedMinutes % 60));
+  display.setTextSize(3); display.setTextColor(TFT_YELLOW, TFT_BLACK); display.setCursor(7, 27);
+  display.printf("%d%%", batteryLevel);
+  display.setTextSize(2); display.setTextColor(TFT_WHITE, TFT_BLACK); display.setCursor(132, 29);
+  display.printf("%d mV", filteredMv);
+  display.setTextSize(1); display.setTextColor(TFT_LIGHTGREY, TFT_BLACK); display.setCursor(150, 53);
+  display.printf("%02lu:%02lu elapsed", static_cast<unsigned long>(elapsedMinutes / 60), static_cast<unsigned long>(elapsedMinutes % 60));
 
-  constexpr int plotLeft = 23, plotRight = 237, plotTop = 43, plotBottom = 106;
-  display.drawRect(plotLeft, plotTop, plotRight - plotLeft + 1, plotBottom - plotTop + 1, TFT_DARKGREY);
-  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(0, plotTop); display.print("43");
-  display.setCursor(0, plotBottom - 7); display.print("32");
+  constexpr int plotLeft = 8, plotRight = 232, plotBottom = 110;
+  display.drawFastHLine(plotLeft, plotBottom, plotRight - plotLeft + 1, TFT_DARKGREY);
   if (chargePlotCount == 1) {
     display.fillCircle(plotLeft, chargePlotY(chargePlot[0].filteredMv), 2, TFT_GREEN);
   } else if (chargePlotCount > 1) {
@@ -1688,10 +1969,40 @@ void drawCharging() {
       display.drawLine(x0, chargePlotY(chargePlot[index - 1].filteredMv), x1, chargePlotY(chargePlot[index].filteredMv), TFT_GREEN);
     }
   }
-  display.setTextColor(chargeTrend == ChargeTrend::Falling ? TFT_RED : (chargeTrend == ChargeTrend::Rising ? TFT_GREEN : TFT_YELLOW), TFT_BLACK);
-  display.setCursor(5, 111); display.printf("%-8s %3u PTS  %s", chargeTrendName(chargeTrend), static_cast<unsigned>(chargePlotCount), sdReady ? "SD" : "MEM");
   display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(5, 123);
-  display.print(uiText("LEFT EXIT       ENTER DIM", "GAUCHE SORTIR   ENTER SOMBRE"));
+  display.print(uiText("LEFT EXIT   ENTER SCREEN OFF", "GAUCHE SORTIR  ENTER ECRAN OFF"));
+}
+
+void drawFoxFinding() {
+  auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader(uiText("FOX FINDING", "CHASSE RENARD"));
+  display.setTextSize(1);
+  if (foxState == FoxState::Idle || foxState == FoxState::Selecting) {
+    display.setTextColor(TFT_LIGHTGREY, TFT_BLACK); display.setCursor(6, 24);
+    display.print(uiText("NEARBY PARTICIPANTS", "PARTICIPANTS PROCHES"));
+    const bool packInvite = foxPackInviteSession && millis() - foxPackInviteAt <= supachat::fox::kPeerFreshMs;
+    if (packInvite) { display.setTextColor(TFT_CYAN, TFT_BLACK); display.setCursor(6, 34); display.printf("JOIN PACK: %s + %s", foxPackInviteHunterName, foxPackInviteQuarryName); }
+    if (!foxPeerCount) { display.setTextColor(TFT_YELLOW, TFT_BLACK); display.setCursor(30, 58); display.print(uiText("Waiting for beacons...", "Attente des balises...")); }
+    for (size_t index = 0; index < foxPeerCount && index < 5; ++index) {
+      const int y = (packInvite ? 52 : 39) + static_cast<int>(index) * 14; const bool selected = !packInvite && static_cast<int>(index) == foxPeerSelection;
+      display.fillRoundRect(6, y, 228, 12, 3, selected ? TFT_GREEN : TFT_DARKGREY);
+      display.setTextColor(selected ? TFT_BLACK : TFT_WHITE, selected ? TFT_GREEN : TFT_DARKGREY); display.setCursor(12, y + 3);
+      display.printf("%-12s %4d dBm", foxPeers[index].name, foxPeers[index].rssi);
+    }
+    display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 123); display.print(packInvite ? "LEFT BACK          ENTER JOIN" : uiText("LEFT BACK        ENTER REQUEST", "GAUCHE RETOUR   ENTER DEMANDE")); return;
+  }
+  display.setTextColor(TFT_WHITE, TFT_BLACK); display.setCursor(6, 25); display.printf("%s  %d dBm", foxTargetName, foxRssiTrend.average());
+  const char *phase = foxState == FoxState::Requesting ? "REQUESTING" : foxState == FoxState::Acquiring ? "SCANNING PLACE" : foxState == FoxState::TargetActive ? "HELPING SEEKER" : foxState == FoxState::SignalLost ? "SIGNAL LOST" : foxRssiTrend.guidance();
+  const uint32_t phaseColour = foxState == FoxState::SignalLost ? TFT_RED : strcmp(phase, "WARMER") == 0 ? TFT_GREEN : strcmp(phase, "COLDER") == 0 ? TFT_ORANGE : TFT_YELLOW;
+  display.setTextSize(2); display.setTextColor(phaseColour, TFT_BLACK); display.setCursor(18, 48); display.print(phase);
+  display.setTextSize(1); display.setTextColor(TFT_LIGHTGREY, TFT_BLACK); display.setCursor(6, 80);
+  if (foxPlaceMatch.confidence) display.printf("PLACE %u%%  %u MATCHES  CONF %u", foxPlaceMatch.similarity, foxPlaceMatch.overlap, foxPlaceMatch.confidence);
+  else display.print(uiText("PLACEPRINT NOT READY", "EMPREINTE EN ATTENTE"));
+  size_t freshPack = 0; for (size_t index = 0; index < foxPackEvidenceCount; ++index) if (millis() - foxPackEvidence[index].receivedAt <= supachat::fox::kPackFreshMs) ++freshPack;
+  const int best = supachat::fox::bestEvidence(foxPackEvidence.data(), foxPackEvidenceCount, millis());
+  display.setCursor(6, 96);
+  if (freshPack > 1 && best >= 0) { FoxPeer *leader = findFoxPeerById(foxPackEvidence[best].hunterId); display.printf("PACK %u  LEAD %s", static_cast<unsigned>(freshPack), leader ? leader->name : foxPackEvidence[best].hunterId); }
+  else display.print(uiText("SOLO - NOTES SHARED", "SOLO - NOTES PARTAGEES"));
+  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 123); display.print(uiText("LEFT END        NO METRES/GPS", "GAUCHE FIN     SANS METRES/GPS"));
 }
 
 void drawLanguage();
@@ -1704,7 +2015,8 @@ void render() {
   else if (screenMode == ScreenMode::Status) drawStatus();
   else if (screenMode == ScreenMode::NetworkPassword) drawNetworkPassword();
   else if (screenMode == ScreenMode::ChargingConfirm) drawChargingConfirm();
-  else if (screenMode == ScreenMode::Charging) drawCharging(); else drawNetworks();
+  else if (screenMode == ScreenMode::Charging) drawCharging();
+  else if (screenMode == ScreenMode::FoxFinding) drawFoxFinding(); else drawNetworks();
   if (uiCanvasReady) uiCanvas.pushSprite(0, 0);
   renderDirty = false; lastRenderAt = millis();
 }
@@ -1933,7 +2245,8 @@ void openSelectedMenuItem() {
   else if (selection == 9) screenMode = ScreenMode::ChargingConfirm;
   else if (selection == 10) screenMode = ScreenMode::Status;
   else if (selection == 11) screenMode = ScreenMode::Changelog;
-  else screenMode = ScreenMode::EmojiRecipes;
+  else if (selection == 12) screenMode = ScreenMode::EmojiRecipes;
+  else { screenMode = ScreenMode::FoxFinding; foxState = FoxState::Selecting; foxPeerSelection = 0; }
   renderDirty = true;
 }
 
@@ -1964,6 +2277,12 @@ void handleKeyboard() {
   if (!M5Cardputer.Keyboard.isChange() || !M5Cardputer.Keyboard.isPressed()) return;
   lastUserInputAt = millis();
   const auto keys = M5Cardputer.Keyboard.keysState();
+  if (screenMode == ScreenMode::Charging && chargingDimmed) {
+    chargingDimmed = false;
+    M5Cardputer.Display.setBrightness(kChargeBrightness);
+    renderDirty = true;
+    return;
+  }
   // Shift+/ is '?', Shift+. is '>', etc. Shifted punctuation remains text;
   // only Fn selects the arrow layer while a text field is active.
   // Text-entry screens prioritize punctuation and require Fn for arrows. On
@@ -1994,11 +2313,18 @@ void handleKeyboard() {
   if (screenMode == ScreenMode::Charging) {
     if (goLeft) exitChargingMode();
     else if (keys.enter) {
-      chargingDimmed = !chargingDimmed;
-      M5Cardputer.Display.setBrightness(chargingDimmed ? kChargeDimBrightness : kChargeBrightness);
-      renderDirty = true;
+      chargingDimmed = true;
+      M5Cardputer.Display.setBrightness(kChargeDimBrightness);
     }
     return;
+  }
+  if (screenMode == ScreenMode::FoxFinding) {
+    if (goLeft) { stopFoxFinding(); screenMode = ScreenMode::Menu; playNextTone(); }
+    else if ((foxState == FoxState::Idle || foxState == FoxState::Selecting) && goUp && foxPeerSelection > 0) { foxPeerSelection--; playNextTone(); }
+    else if ((foxState == FoxState::Idle || foxState == FoxState::Selecting) && goDown && foxPeerSelection + 1 < static_cast<int>(foxPeerCount)) { foxPeerSelection++; playNextTone(); }
+    else if ((foxState == FoxState::Idle || foxState == FoxState::Selecting) && keys.enter && foxPackInviteSession && millis() - foxPackInviteAt <= supachat::fox::kPeerFreshMs) { joinPackHunt(); playNextTone(); }
+    else if ((foxState == FoxState::Idle || foxState == FoxState::Selecting) && keys.enter && foxPeerCount) { beginFoxFinding(); playNextTone(); }
+    renderDirty = true; return;
   }
   if (screenMode == ScreenMode::Rooms) {
     if (goUp && roomSelection > 0) roomSelection--;
@@ -2133,11 +2459,18 @@ void setup() {
 void loop() {
   M5Cardputer.update();
   if (M5Cardputer.BtnA.isPressed()) lastUserInputAt = millis();
-  sampleBattery(); handleKeyboard();
+  sampleBattery(); handleKeyboard(); serviceFoxFinding();
   if (chargingModeActive) {
     serviceChargingMode();
-    if (!inputQuarantined && M5Cardputer.BtnA.wasClicked()) exitChargingMode();
-    if (renderDirty && millis() - lastRenderAt >= 1000) render();
+    if (!inputQuarantined && M5Cardputer.BtnA.wasClicked()) {
+      if (chargingDimmed) {
+        chargingDimmed = false;
+        lastUserInputAt = millis();
+        M5Cardputer.Display.setBrightness(kChargeBrightness);
+        renderDirty = true;
+      } else exitChargingMode();
+    }
+    if (!chargingDimmed && renderDirty && millis() - lastRenderAt >= 1000) render();
     delay(20); return;
   }
   serviceClockRender(); captureVoice(); serviceAudioPlayback(); serviceMessageNotification();

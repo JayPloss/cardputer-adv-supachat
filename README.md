@@ -24,6 +24,48 @@ SupaChat is intended to let a small group of family and friends communicate from
 
 The design goal is a whistle that carries farther—not a location-tracking system.
 
+## Planned Fox Finding mode
+
+SupaChat is planning an infrastructure-free person-finding mode for Cardputer
+users at crowded venues. Fox Finding combines encrypted direct
+ESP-NOW signal observations, **place printing** (live comparison of visible Wi-Fi
+access points and their strengths), and short-term IMU motion. It deliberately
+does not use GPS, fixed beacons, venue surveys, relays, a magnetometer, or a
+server. The minimum shippable result is honest warmer/colder guidance; directional
+guidance remains experimental until body-shadow bearing is proven on physical
+Cardputer ADV units.
+
+The complete design constraints, protocol proposal, measurement gates, firmware
+architecture, failure behavior, and staged delivery plan are in
+[`docs/fox-finding-plan.md`](docs/fox-finding-plan.md). Current reported firmware
+issues and their acceptance criteria are tracked in
+[`docs/firmware-fixes-backlog.md`](docs/firmware-fixes-backlog.md).
+
+## Charging mode
+
+SupaChat `v0.49` includes a dedicated low-activity charging mode inside the normal
+Cardputer firmware. While active it pauses chat synchronization, Wi-Fi, ESP-NOW,
+walkie/audio, notifications, and unrelated SD activity; retains only battery
+sampling, a fixed-scale charge-history plot, minimal controls, and optional
+battery-event logging. Exiting restores the paused subsystems and forces a normal
+message reconciliation.
+
+The source, emulator, and exact-resolution UI gates pass. Physical measurement of
+charging-mode current and real-device restoration remains required before calling
+the runtime behavior proven.
+
+This mode shows how voltage and the existing percentage estimate change during a
+charging session without claiming direct cable, current, or completion sensing.
+A separate laboratory-style “Charge Detective” firmware may investigate controlled
+rest/load measurements later, but it is not the current feature. See
+[`docs/charging-mode-plan.md`](docs/charging-mode-plan.md).
+
+The on-device `STATUS` screen now has a second diagnostics page. It retains the
+most recent sync failure type and parser detail together with HTTP status,
+response length, free heap, room, initial/live phase, and error age. Response
+bodies are deliberately neither displayed nor retained, so message content does
+not leak into diagnostics.
+
 ## MVP
 
 The first usable release is one complete, bidirectional path between **Albie Ploss's Cardputer ADV** and the **Hetzner-hosted SupaChat web portal**.

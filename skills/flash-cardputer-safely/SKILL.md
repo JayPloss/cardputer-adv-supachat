@@ -5,6 +5,10 @@ description: Identify, build, provision, and flash M5 Cardputer ADV devices with
 
 # Flash Cardputer Safely
 
+For identification without a build, provision, or flash request, use
+`../identify-cardputer-device/SKILL.md` and stop there. The release and emulator
+gates below apply to firmware mutation, not to a read-only identity lookup.
+
 ## Hard gates
 
 1. Run `$emulate-cardputer-contracts` first.
