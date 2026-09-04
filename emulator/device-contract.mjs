@@ -4,6 +4,7 @@ import tls from 'node:tls';
 import {interpretRawKeys,navPositions} from './state.mjs';
 
 const firmware = fs.readFileSync(new URL('../firmware/src/main.cpp', import.meta.url), 'utf8');
+const serverSource = fs.readFileSync(new URL('../server/src/server.mjs', import.meta.url), 'utf8');
 assert.match(firmware, /EMOJI RECIPES/);
 assert.match(firmware, /ScreenMode::EmojiRecipes/);
 assert.match(firmware, /reply_to_id/);
@@ -146,12 +147,14 @@ const keypressNotes = new Set(keypressSequence);
 assert.equal(notificationNotes.some(note => keypressNotes.has(note)), false,
   'received-message motif must use pitches distinct from the keypress melody');
 const syncFunction = firmware.slice(firmware.indexOf('void synchronize()'), firmware.indexOf('void networkTask'));
-assert.match(syncFunction, /if \(initialSyncComplete && !newlyRead\.empty\(\)\) messageNotificationPending = true/,
+assert.match(syncFunction, /if \(!hydratingHistory && !newlyRead\.empty\(\)\) messageNotificationPending = true/,
   'only a nonempty post-hydration incoming-message batch should request the motif');
-assert.match(syncFunction, /const int64_t syncAfter = initialSyncComplete \? lastServerId : 0/,
-  'boot and room-switch hydration must not trust a stale local cursor');
-assert.match(syncFunction, /const size_t syncLimit = initialSyncComplete \? kSyncBatchLimit : kHistoryLimit/,
-  'initial hydration must request the complete retained history window');
+assert.match(syncFunction, /const bool hydratingHistory = !initialSyncComplete/,
+  'boot and room-switch hydration must enter explicit backward-paging mode');
+assert.match(syncFunction, /hydratingHistory \? "&before=" \+ String\(historyBeforeId\) : ""/,
+  'history hydration must request the page preceding the oldest retained id');
+assert.match(syncFunction, /historyHydratedCount < kHistoryLimit/,
+  'backward hydration must stop at the retained-history budget');
 assert.match(syncFunction, /deserializeJson\(document, &response\[0\], response\.length\(\)\)/,
   'full-history JSON must parse the mutable HTTP buffer without duplicating every string');
 assert.doesNotMatch(syncFunction, /downloadVoiceClip/,
@@ -168,8 +171,29 @@ assert.match(networkFunction, /voiceDownloadRequestedId[\s\S]*downloadVoiceClip\
   'manual voice playback requests must run before the next sync poll');
 assert.equal(Number(firmware.match(/kSyncBatchLimit = (\d+)/)[1]), 20,
   'device sync pages must stay small enough for a no-PSRAM Cardputer');
+assert.equal(Number(firmware.match(/kHistoryPageLimit = (\d+)/)[1]), 20,
+  'initial history pages must stay within the same no-PSRAM budget');
 assert.match(syncFunction, /&limit=" \+ String\(syncLimit\)/,
   'firmware must request the bounded hydration or incremental sync page');
+
+// Reproduce the receipt-amplified response class seen physically on Papa:
+// 83 messages plus five nested receipts and a duplicate top-level receipt page
+// exceed the 30,028 bytes retained before ArduinoJson reported IncompleteInput.
+const receipt = {user_id:'participant',state:'delivered',updated_at:1788500000000};
+const legacyMessages = Array.from({length:83},(_,index)=>({id:index+1,client_id:`legacy-${index}`,conversation_id:'wolfpack',author_id:'emmanuelle',author_name:'Emmanuelle',type:'text',body:'x'.repeat(58),created_at:1788500000000,receipts:Array.from({length:5},()=>receipt)}));
+const legacyPayloadBytes = Buffer.byteLength(JSON.stringify({messages:legacyMessages,receipts:Array.from({length:100},()=>({message_id:1,...receipt})),rooms:[{id:'wolfpack',name:'Wolfpack'}],presence:[]}));
+assert.ok(legacyPayloadBytes > 30_028, `legacy payload did not reproduce truncation risk: ${legacyPayloadBytes}`);
+const compactPage = legacyMessages.slice(-20).map(({receipts,...message})=>({...message,receipt_state:receipts[0].state}));
+const compactPayloadBytes = Buffer.byteLength(JSON.stringify({room_id:'wolfpack',messages:compactPage,receipts:[],history:{has_more:true,next_before:64}}));
+assert.ok(compactPayloadBytes < 30_028, `compact history page exceeds observed cutoff: ${compactPayloadBytes}`);
+assert.match(serverSource, /function messageRowsBefore\(/,
+  'server must implement a descending history cursor independently of live after-sync');
+assert.match(serverSource, /function compactDeviceMessages\(/,
+  'device sync must remove web-only nested receipt, room-list, and presence payloads');
+assert.match(serverSource, /historyMode \? messageRowsBefore/,
+  'the before cursor must route through backward history paging');
+assert.match(serverSource, /room_id: room\.id, messages: compactMessages, receipts, history/,
+  'device endpoint must return the compact protocol shape');
 
 // M5Unified maps Cardputer ADV battery sensing to GPIO10 ADC and exposes no
 // direct VBUS state. Infer charging only from a sustained idle upward trend;

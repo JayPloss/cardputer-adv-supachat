@@ -45,7 +45,7 @@ constexpr bool kBuildFrenchDefault = false;
 bool frenchUi = kBuildFrenchDefault;
 String languageOverride = "auto";
 const char *uiText(const char *english, const char *french) { return frenchUi ? french : english; }
-constexpr char kFirmwareVersion[] = "v0.49";
+constexpr char kFirmwareVersion[] = "v0.52";
 constexpr size_t kMessageLimit = 140;
 constexpr size_t kHistoryLimit = 100;
 constexpr uint32_t kToneIntervalMs = 40;
@@ -75,6 +75,7 @@ constexpr int kChargePlotMaxMv = 4300;
 constexpr int kChargeTrendThresholdMv = 12;
 constexpr char kChargeLogPath[] = "/supachat-charge.csv";
 constexpr int kSyncBatchLimit = 20;
+constexpr int kHistoryPageLimit = 20;
 constexpr uint32_t kTimeWaitMs = 12000;
 constexpr uint32_t kVoiceSampleRate = 8000;
 constexpr size_t kVoiceMaxSamples = 40000;
@@ -262,6 +263,8 @@ bool timeKnown = false;
 bool ntpAttempted = false;
 bool timeSyncedByNtp = false;
 bool initialSyncComplete = false;
+int64_t historyBeforeId = 0;
+size_t historyHydratedCount = 0;
 bool keyboardReady = false;
 bool uiCanvasReady = false;
 bool voiceRecording = false;
@@ -1503,15 +1506,21 @@ void mergeServerMessage(JsonObjectConst object) {
   serverMessage.authorName = String(object["author_name"] | "?"); serverMessage.body = String(object["body"] | "");
   serverMessage.createdAt = object["created_at"] | 0; serverMessage.queued = false; serverMessage.state = "saved";
   serverMessage.voice = String(object["type"] | "text") == "voice";
+  if (!object["receipt_state"].isNull()) serverMessage.state = String(object["receipt_state"] | "saved");
   if (!object["reply_to"].isNull()) {
     serverMessage.replyToId = object["reply_to"]["id"] | 0;
     serverMessage.replyAuthor = String(object["reply_to"]["author_name"] | "?");
     serverMessage.replyBody = String(object["reply_to"]["body"] | "");
   }
   for (JsonObjectConst receipt : object["receipts"].as<JsonArrayConst>()) {
-    if (String(receipt["user_id"] | "") == "papa") serverMessage.state = String(receipt["state"] | "saved");
+    if (String(receipt["user_id"] | "") == kDeviceId) serverMessage.state = String(receipt["state"] | "saved");
   }
-  if (existing == messages.end()) messages.push_back(serverMessage); else *existing = serverMessage;
+  if (existing == messages.end()) {
+    const auto position = std::find_if(messages.begin(), messages.end(), [&](const ChatMessage &message) {
+      return message.id > 0 && message.id > id;
+    });
+    messages.insert(position, serverMessage);
+  } else *existing = serverMessage;
   lastServerId = std::max(lastServerId, id); trimHistory(); renderDirty = true;
 }
 
@@ -1585,13 +1594,16 @@ void synchronize() {
   }
   sendQueuedMessages();
   String response; int status = 0;
-  // Every boot and room switch explicitly hydrates the latest complete room
-  // history. A cursor from SD is only an optimization after hydration; it must
-  // never make an empty or partial local cache look authoritative.
-  const int64_t syncAfter = initialSyncComplete ? lastServerId : 0;
-  const size_t syncLimit = initialSyncComplete ? kSyncBatchLimit : kHistoryLimit;
+  // Initial hydration walks backward from the newest page. Each response is
+  // discarded before the next page so TLS, String, and JSON storage never need
+  // to coexist with an entire 100-message history payload.
+  const bool hydratingHistory = !initialSyncComplete;
+  const String requestedRoomId = currentRoomId;
+  const int64_t syncAfter = hydratingHistory ? 0 : lastServerId;
+  const size_t syncLimit = hydratingHistory ? kHistoryPageLimit : kSyncBatchLimit;
   const String path = "/api/device/sync?after=" + String(syncAfter) + "&receipts_after=" + String(lastReceiptAt)
-      + "&limit=" + String(syncLimit) + "&wait=0&room=" + currentRoomId;
+      + "&limit=" + String(syncLimit) + "&wait=0&room=" + requestedRoomId
+      + (hydratingHistory ? "&before=" + String(historyBeforeId) : "");
   if (!requestJson(path, "GET", "", response, status)) {
     networkStatus = "SYNC IO " + String(status);
     recordSyncError("SYNC IO", String(status), status, response.length(), !initialSyncComplete);
@@ -1602,9 +1614,9 @@ void synchronize() {
     recordSyncError("SYNC HTTP", String(status), status, response.length(), !initialSyncComplete);
     Serial.printf("sync http status=%d bytes=%u heap=%u\n", status, response.length(), lastSyncErrorHeap); return;
   }
+  if (currentRoomId != requestedRoomId) return;
   // ArduinoJson treats String input as read-only and duplicates every parsed
-  // string. The mutable buffer selects zero-copy mode, preserving enough heap
-  // for the complete 100-message retained-history hydration.
+  // string. The mutable buffer selects zero-copy mode within each bounded page.
   JsonDocument document;
   const DeserializationError jsonError = response.isEmpty()
       ? DeserializationError(DeserializationError::EmptyInput)
@@ -1616,8 +1628,12 @@ void synchronize() {
     return;
   }
   std::vector<int64_t> newlyRead;
+  const JsonArrayConst pageMessages = document["messages"].as<JsonArrayConst>();
+  const size_t pageMessageCount = pageMessages.size();
+  const bool historyHasMore = hydratingHistory && (document["history"]["has_more"] | false);
+  const int64_t nextHistoryBefore = hydratingHistory ? (document["history"]["next_before"] | 0) : 0;
   xSemaphoreTake(stateMutex, portMAX_DELAY);
-  for (JsonObjectConst object : document["messages"].as<JsonArrayConst>()) {
+  for (JsonObjectConst object : pageMessages) {
     const bool incoming = String(object["author_id"] | "") != kDeviceId;
     mergeServerMessage(object);
     if (incoming) newlyRead.push_back(object["id"] | 0);
@@ -1626,7 +1642,7 @@ void synchronize() {
     const int64_t messageId = receipt["message_id"] | 0;
     const int64_t updatedAt = receipt["updated_at"] | 0;
     lastReceiptAt = std::max(lastReceiptAt, updatedAt);
-    if (String(receipt["user_id"] | "") == "papa") {
+    if (String(receipt["user_id"] | "") == kDeviceId) {
       auto item = std::find_if(messages.begin(), messages.end(), [&](const ChatMessage &message) { return message.id == messageId; });
       if (item != messages.end()) item->state = String(receipt["state"] | item->state);
     }
@@ -1634,8 +1650,23 @@ void synchronize() {
   saveHistoryLocked(); xSemaphoreGive(stateMutex);
   // Initial history hydration is silent. Only messages arriving after the
   // current room is fully loaded are notifications.
-  if (initialSyncComplete && !newlyRead.empty()) messageNotificationPending = true;
-  for (const int64_t id : newlyRead) if (id > 0) postReadReceipt(id);
+  if (!hydratingHistory && !newlyRead.empty()) messageNotificationPending = true;
+  document.clear(); response = "";
+  // Backfill is historical state, not a stream of newly observed messages.
+  // The server already records delivery; avoid opening up to 100 extra TLS
+  // sessions just to mark old pages read.
+  if (!hydratingHistory) for (const int64_t id : newlyRead) if (id > 0) postReadReceipt(id);
+  if (hydratingHistory) {
+    historyHydratedCount += pageMessageCount;
+    if (historyHasMore && nextHistoryBefore > 0 && pageMessageCount > 0 && historyHydratedCount < kHistoryLimit) {
+      historyBeforeId = nextHistoryBefore;
+      networkStatus = "HISTORY " + String(historyHydratedCount);
+      renderDirty = true;
+      return;
+    }
+    historyBeforeId = 0;
+    historyHydratedCount = 0;
+  }
   networkStatus = "SYNCED"; renderDirty = true;
   initialSyncComplete = true;
   auto activeRoom = std::find_if(rooms.begin(), rooms.end(), [&](const ChatRoom &room) { return room.id == currentRoomId; });
@@ -2264,7 +2295,8 @@ void selectRoom(int next) {
   saveHistoryLocked();
   currentRoomId = rooms[next].id; currentRoomName = rooms[next].name; roomSelection = next;
   applyEffectiveLanguage();
-  messages.clear(); lastServerId = 0; lastReceiptAt = 0; historyOffset = 0; initialSyncComplete = false; syncOverride = true;
+  messages.clear(); lastServerId = 0; lastReceiptAt = 0; historyOffset = 0; initialSyncComplete = false;
+  historyBeforeId = 0; historyHydratedCount = 0; syncOverride = true;
   loadHistory();
   xSemaphoreGive(stateMutex);
   walkieSocket.disconnect(); walkieInitialized = false; networkStatus = "SWITCHING"; renderDirty = true;

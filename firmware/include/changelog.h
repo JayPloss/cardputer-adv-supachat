@@ -9,6 +9,9 @@ struct SupaChatChangelogEntry {
 // Canonical on-device release notes. The emulator reads this file directly so
 // its Changelog screen cannot silently drift from the firmware.
 constexpr SupaChatChangelogEntry kSupaChatChangelog[] = {
+  {"v0.52", {"Newest-first history pages", "Compact device sync payload", "Large-room JSON fix"}, 3},
+  {"v0.51", {"Simpler charging screen", "20-second screen timeout", "Reduced charging redraws"}, 3},
+  {"v0.50", {"Papa custom boot art", "Mama build + boot art"}, 2},
   {"v0.49", {"Low-power charging mode", "Charge history plot", "Battery event logging", "Boot key quarantine", "Verbose sync diagnostics"}, 5},
   {"v0.48", {"Scrollable build changes", "Working language controls", "Reliable room switching", "Zero-copy history sync", "Fixed cable detection", "Clean battery digits", "Voice / walkie split"}, 7},
   {"v0.47", {"Paged menus", "Build changelog", "ESP-NOW local only", "Language menu fix"}, 4},

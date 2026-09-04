@@ -432,6 +432,55 @@ test('device sync honors bounded message and receipt pages', async () => {
   assert.ok(sync.receipts.length <= 1);
 });
 
+test('device history hydrates newest-first in compact backward pages', async () => {
+  const createdIds = [];
+  for (let index = 0; index < 45; index++) {
+    const response = await fetch(`http://127.0.0.1:${port}/api/messages`, {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ client_id: `history-page-${index}`, body: `history payload ${index} ${'x'.repeat(90)}`, room_id: 'family' }),
+    });
+    assert.equal(response.status, 201);
+    createdIds.push((await response.json()).message.id);
+  }
+
+  // Accumulate viewer receipts so this reproduces the shape that pushed the
+  // former one-shot response beyond Papa's observed 30,028-byte cutoff.
+  for (const token of [deviceToken, jujuToken, papaDeviceToken]) {
+    const response = await fetch(`http://127.0.0.1:${port}/api/device/sync?room=family&after=0&limit=100&wait=0`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    assert.equal(response.status, 200);
+  }
+
+  const headers = { authorization: `Bearer ${deviceToken}` };
+  const firstResponse = await fetch(`http://127.0.0.1:${port}/api/device/sync?room=family&before=0&limit=20&wait=0`, { headers });
+  const firstText = await firstResponse.text();
+  const first = JSON.parse(firstText);
+  assert.equal(first.messages.length, 20);
+  assert.equal(first.receipts.length, 0);
+  assert.equal(first.history.has_more, true);
+  assert.equal(first.history.next_before, first.messages[0].id);
+  assert.equal(first.messages.at(-1).id, createdIds.at(-1));
+  assert.ok(Buffer.byteLength(firstText) < 30_028, `history page too large: ${Buffer.byteLength(firstText)} bytes`);
+  assert.ok(first.messages.every((message) => typeof message.receipt_state === 'string'));
+  assert.ok(first.messages.every((message) => !('receipts' in message) && !('author_short' in message) && !('author_color' in message)));
+  assert.ok(first.messages.every((message, index, messages) => index === 0 || messages[index - 1].id < message.id));
+  assert.equal('rooms' in first, false);
+  assert.equal('presence' in first, false);
+
+  const secondResponse = await fetch(`http://127.0.0.1:${port}/api/device/sync?room=family&before=${first.history.next_before}&limit=20&wait=0`, { headers });
+  const secondText = await secondResponse.text();
+  const second = JSON.parse(secondText);
+  assert.equal(second.messages.length, 20);
+  assert.ok(second.messages.at(-1).id < first.messages[0].id);
+  assert.ok(Buffer.byteLength(secondText) < 30_028, `history page too large: ${Buffer.byteLength(secondText)} bytes`);
+
+  const incremental = await fetch(`http://127.0.0.1:${port}/api/device/sync?room=family&after=${first.messages.at(-1).id}&receipts_after=0&limit=20&wait=0`, { headers }).then((response) => response.json());
+  assert.equal('history' in incremental, false);
+  assert.ok(Array.isArray(incremental.receipts));
+});
+
 test('device sync can disable long polling for responsive voice controls', async () => {
   const headers = { authorization: `Bearer ${deviceToken}` };
   const started = Date.now();

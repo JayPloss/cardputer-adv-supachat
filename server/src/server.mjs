@@ -527,6 +527,21 @@ function pcmWav(pcm, sampleRate = 8000) {
   return Buffer.concat([header, pcm]);
 }
 
+function decorateMessageRows(rows) {
+  return rows.map((row) => ({
+    ...row, conversation_name: db.prepare('SELECT name FROM conversations WHERE id = ?').get(row.conversation_id)?.name,
+    reply_to: row.reply_to_id ? db.prepare(`SELECT original.id,original.author_id,COALESCE(alias.display_name,author.display_name) AS author_name,
+      original.body,original.type,alias.color_index AS author_color FROM messages original JOIN users author ON author.id=original.author_id
+      LEFT JOIN conversation_members alias ON alias.conversation_id=original.conversation_id AND alias.user_id=original.author_id
+      WHERE original.id=? AND original.conversation_id=?`).get(row.reply_to_id,row.conversation_id) || null : null,
+    receipts: db.prepare('SELECT user_id, state, updated_at FROM receipts WHERE message_id = ?').all(row.id),
+    voice: row.type === 'voice' ? db.prepare(`
+      SELECT mime_type, sample_rate, sample_count, duration_ms, byte_length
+      FROM voice_clips WHERE message_id = ?
+    `).get(row.id) : undefined,
+  }));
+}
+
 function messageRows(roomId, after = 0, limit = 100, viewerId = null) {
   const bounded = Math.min(Math.max(limit, 1), 100);
   const rows = after > 0 ? db.prepare(`
@@ -548,18 +563,56 @@ function messageRows(roomId, after = 0, limit = 100, viewerId = null) {
       ORDER BY m.id DESC LIMIT ?
     ) ORDER BY id ASC
   `).all(roomId, viewerId, viewerId, bounded);
-  return rows.map((row) => ({
-    ...row, conversation_name: db.prepare('SELECT name FROM conversations WHERE id = ?').get(row.conversation_id)?.name,
-    reply_to: row.reply_to_id ? db.prepare(`SELECT original.id,original.author_id,COALESCE(alias.display_name,author.display_name) AS author_name,
-      original.body,original.type,alias.color_index AS author_color FROM messages original JOIN users author ON author.id=original.author_id
-      LEFT JOIN conversation_members alias ON alias.conversation_id=original.conversation_id AND alias.user_id=original.author_id
-      WHERE original.id=? AND original.conversation_id=?`).get(row.reply_to_id,row.conversation_id) || null : null,
-    receipts: db.prepare('SELECT user_id, state, updated_at FROM receipts WHERE message_id = ?').all(row.id),
-    voice: row.type === 'voice' ? db.prepare(`
-      SELECT mime_type, sample_rate, sample_count, duration_ms, byte_length
-      FROM voice_clips WHERE message_id = ?
-    `).get(row.id) : undefined,
-  }));
+  return decorateMessageRows(rows);
+}
+
+function messageRowsBefore(roomId, before = 0, limit = 20, viewerId = null) {
+  const bounded = Math.min(Math.max(limit, 1), 20);
+  const cursor = before > 0 ? before : Number.MAX_SAFE_INTEGER;
+  const rows = db.prepare(`
+    SELECT * FROM (
+      SELECT m.id, m.client_id, m.conversation_id, m.author_id, COALESCE(cm.display_name, u.display_name) AS author_name, cm.color_index AS author_color, m.reply_to_id,
+             u.short_name AS author_short, m.type, m.body, m.created_at
+      FROM messages m JOIN users u ON u.id = m.author_id
+        LEFT JOIN conversation_members cm ON cm.conversation_id = m.conversation_id AND cm.user_id = m.author_id
+      WHERE m.conversation_id = ? AND m.id < ?
+        AND (? IS NULL OR NOT EXISTS (SELECT 1 FROM user_blocks b WHERE b.blocker_id = ? AND b.blocked_user_id = m.author_id))
+      ORDER BY m.id DESC LIMIT ?
+    ) ORDER BY id ASC
+  `).all(roomId, cursor, viewerId, viewerId, bounded);
+  return decorateMessageRows(rows);
+}
+
+function hasMessageBefore(roomId, before, viewerId = null) {
+  if (!(before > 0)) return false;
+  return Boolean(db.prepare(`
+    SELECT 1 FROM messages m WHERE m.conversation_id = ? AND m.id < ?
+      AND (? IS NULL OR NOT EXISTS (SELECT 1 FROM user_blocks b WHERE b.blocker_id = ? AND b.blocked_user_id = m.author_id))
+    LIMIT 1
+  `).get(roomId, before, viewerId, viewerId));
+}
+
+function compactDeviceMessages(messages, viewerId) {
+  return messages.map((message) => {
+    const viewerReceipt = message.receipts.find((receipt) => receipt.user_id === viewerId);
+    const reply = message.reply_to ? {
+      id: message.reply_to.id,
+      author_name: message.reply_to.author_name,
+      body: message.reply_to.body,
+    } : null;
+    return {
+      id: message.id,
+      client_id: message.client_id,
+      conversation_id: message.conversation_id,
+      author_id: message.author_id,
+      author_name: message.author_name,
+      type: message.type,
+      body: message.body,
+      created_at: message.created_at,
+      reply_to: reply,
+      receipt_state: viewerReceipt?.state || 'saved',
+    };
+  });
 }
 
 function presenceRows(roomId) {
@@ -1148,11 +1201,13 @@ const server = createServer(async (req, res) => {
       const room = authorizedRoom(user, url.searchParams.get('room'));
       if (!room) return json(res, 403, { error: 'room_forbidden' });
       const after = Number(url.searchParams.get('after') || 0);
+      const historyMode = url.searchParams.has('before');
+      const before = Number(url.searchParams.get('before') || 0);
       const receiptsAfter = Number(url.searchParams.get('receipts_after') || 0);
-      const limit = Math.min(Math.max(Number(url.searchParams.get('limit') || 100), 1), 100);
-      const shouldWait = url.searchParams.get('wait') !== '0';
-      let messages = messageRows(room.id, after, limit, user);
-      let receipts = receiptRows(room.id, receiptsAfter, limit);
+      const limit = Math.min(Math.max(Number(url.searchParams.get('limit') || 20), 1), historyMode ? 20 : 100);
+      const shouldWait = !historyMode && url.searchParams.get('wait') !== '0';
+      let messages = historyMode ? messageRowsBefore(room.id, before, limit, user) : messageRows(room.id, after, limit, user);
+      let receipts = historyMode ? [] : receiptRows(room.id, receiptsAfter, limit);
       if (shouldWait && !messages.length && !receipts.length) {
         await new Promise((resolve) => {
           const timer = setTimeout(() => { longPolls.delete(wake); resolve(); }, 25_000);
@@ -1160,15 +1215,21 @@ const server = createServer(async (req, res) => {
           longPolls.add(wake);
           res.on('close', () => { clearTimeout(timer); longPolls.delete(wake); resolve(); });
         });
-        messages = messageRows(room.id, after, limit, user);
-        receipts = receiptRows(room.id, receiptsAfter, limit);
+        messages = historyMode ? messageRowsBefore(room.id, before, limit, user) : messageRows(room.id, after, limit, user);
+        receipts = historyMode ? [] : receiptRows(room.id, receiptsAfter, limit);
       }
       for (const message of messages) {
         if (message.author_id !== user && setReceipt(message.id, user, 'delivered')) {
           publish('receipt', { message_id: message.id, user_id: user, state: 'delivered', updated_at: Date.now() });
         }
       }
-      return json(res, 200, { server_time: Date.now(), room, rooms: roomsFor(user), messages, receipts, presence: presenceRows(room.id) });
+      const compactMessages = compactDeviceMessages(messages, user);
+      const oldestId = compactMessages[0]?.id || 0;
+      const history = historyMode ? {
+        has_more: hasMessageBefore(room.id, oldestId, user),
+        next_before: oldestId,
+      } : undefined;
+      return json(res, 200, { server_time: Date.now(), room_id: room.id, messages: compactMessages, receipts, history });
     }
     return json(res, 404, { error: 'not_found' });
   } catch (error) {

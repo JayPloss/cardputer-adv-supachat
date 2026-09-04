@@ -38,9 +38,9 @@ assert.match(firmware,/wifiResumeRequested = true/);assert.match(firmware,/wifiR
 const changelogHeader=fs.readFileSync(new URL('../firmware/include/changelog.h',import.meta.url),'utf8');for(const entry of changelog){assert.match(changelogHeader,new RegExp(entry.version.replace('.','\\.')));for(const line of entry.lines)assert.ok(changelogHeader.includes(line))}
 assert.match(firmware,/kDefaultRoomId\[\] = "wolfpack"/);assert.match(firmware,/String currentRoomId = kDefaultRoomId/);
 assert.match(firmware,/char roomId\[9\]/);assert.match(firmware,/String\(packet->roomId\) != currentRoomId/);
-assert.match(firmware,/const int64_t syncAfter = initialSyncComplete \? lastServerId : 0/);
-assert.match(firmware,/const size_t syncLimit = initialSyncComplete \? kSyncBatchLimit : kHistoryLimit/);assert.match(firmware,/deserializeJson\(document, &response\[0\], response\.length\(\)\)/);assert.doesNotMatch(firmware,/syncOverride\) \{ syncOverride = false; WiFi\.disconnect/);
-assert.match(firmware,/initialSyncComplete = false; syncOverride = true/);
+assert.match(firmware,/const bool hydratingHistory = !initialSyncComplete/);
+assert.match(firmware,/kHistoryPageLimit = 20/);assert.match(firmware,/"&before=" \+ String\(historyBeforeId\)/);assert.match(firmware,/deserializeJson\(document, &response\[0\], response\.length\(\)\)/);assert.doesNotMatch(firmware,/syncOverride\) \{ syncOverride = false; WiFi\.disconnect/);
+assert.match(firmware,/initialSyncComplete = false;\s*historyBeforeId = 0; historyHydratedCount = 0; syncOverride = true/);
 assert.match(firmware,/void recordSyncError/);assert.match(firmware,/lastSyncDetail = detail/);assert.match(firmware,/lastSyncResponseBytes = responseBytes/);assert.match(firmware,/lastSyncErrorHeap = ESP\.getFreeHeap\(\)/);assert.match(firmware,/if \(screenMode == ScreenMode::Status\)/);assert.doesNotMatch(firmware,/sync json error=.*prefix=/);assert.doesNotMatch(firmware,/sync http status=.*body=/);
 assert.doesNotMatch(firmware,/Power\.isCharging\(\)/);assert.match(firmware,/now - lastUserInputAt < kPowerIdleAfterInputMs/);assert.match(firmware,/powerTrendVoltages\.back\(\) - powerTrendVoltages\.front\(\) >= kPowerTrendMinimumRiseMv/);const headerSource=firmware.slice(firmware.indexOf('void drawHeader'),firmware.indexOf('void drawChat'));assert.doesNotMatch(headerSource,/setTextSize\(1\.5f\)/);assert.match(headerSource,/fillTriangle/);
 assert.match(firmware,/voiceLiveMode && walkieGranted/);assert.match(firmware,/retainCurrentVoice = !voiceLiveMode/);
