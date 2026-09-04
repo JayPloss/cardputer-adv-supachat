@@ -44,7 +44,7 @@ constexpr bool kBuildFrenchDefault = false;
 bool frenchUi = kBuildFrenchDefault;
 String languageOverride = "auto";
 const char *uiText(const char *english, const char *french) { return frenchUi ? french : english; }
-constexpr char kFirmwareVersion[] = "v0.48";
+constexpr char kFirmwareVersion[] = "v0.49";
 constexpr size_t kMessageLimit = 140;
 constexpr size_t kHistoryLimit = 100;
 constexpr uint32_t kToneIntervalMs = 40;
@@ -64,6 +64,14 @@ constexpr int kPowerTrendMinimumRiseMv = 15;
 constexpr int kPowerTrendNoiseToleranceMv = 3;
 constexpr uint32_t kBatteryFallStepMs = 90000;
 constexpr uint32_t kBatteryPersistMs = 300000;
+constexpr uint32_t kChargePlotSampleMs = 300000;
+constexpr size_t kChargePlotCapacity = 144;
+constexpr uint8_t kChargeBrightness = 48;
+constexpr uint8_t kChargeDimBrightness = 0;
+constexpr int kChargePlotMinMv = 3200;
+constexpr int kChargePlotMaxMv = 4300;
+constexpr int kChargeTrendThresholdMv = 12;
+constexpr char kChargeLogPath[] = "/supachat-charge.csv";
 constexpr int kSyncBatchLimit = 20;
 constexpr uint32_t kTimeWaitMs = 12000;
 constexpr uint32_t kVoiceSampleRate = 8000;
@@ -190,6 +198,13 @@ struct ChatLine {
   bool selected;
 };
 struct ChatRoom { String id; String name; String groupId; String groupName; String defaultLanguage; int64_t latestMessageId; int64_t seenMessageId; };
+enum class ChargeTrend : uint8_t { Waiting, Rising, Flat, Falling, Unstable };
+struct ChargePlotPoint {
+  uint32_t elapsedSeconds = 0;
+  uint16_t filteredMv = 0;
+  uint8_t estimatedPercent = 0;
+  ChargeTrend trend = ChargeTrend::Waiting;
+};
 void applyEffectiveLanguage();
 
 uint32_t participantColour(const String &authorId, const String &authorName = "") {
@@ -205,7 +220,7 @@ uint32_t participantColour(const String &authorId, const String &authorName = ""
   return TFT_WHITE;
 }
 
-enum class ScreenMode { Chat, Menu, Rooms, Volume, Language, EmojiRecipes, Changelog, VoiceMessages, Walkie, Status, Networks, NetworkPassword };
+enum class ScreenMode { Chat, Menu, Rooms, Volume, Language, EmojiRecipes, Changelog, VoiceMessages, Walkie, Status, Networks, NetworkPassword, ChargingConfirm, Charging };
 
 Preferences preferences;
 M5Canvas uiCanvas(&M5Cardputer.Display);
@@ -267,12 +282,13 @@ volatile bool voicePlaybackCancelled = false;
 volatile bool voiceDownloadActive = false;
 int64_t voicePlayingMessageId = 0;
 int voiceInboxSelection = 0;
-constexpr int kMenuPageCount = 2;
+constexpr int kMenuPageCount = 3;
 constexpr int kMenuItemsPerPage = 6;
 int menuPage = 0;
-int menuSelections[kMenuPageCount] = {0, 0};
+int menuSelections[kMenuPageCount] = {0, 0, 0};
 int changelogSelection = 0;
 int changelogLineOffset = 0;
+int statusPage = 0;
 volatile bool localOnlyMode = false;
 volatile bool wifiResumeRequested = false;
 int roomSelection = 0;
@@ -281,6 +297,14 @@ uint8_t volumeLevel = kDefaultVolumeLevel;
 int64_t lastServerId = 0;
 int64_t lastReceiptAt = 0;
 int lastHttpStatus = 0;
+String lastSyncError = "NONE";
+String lastSyncDetail;
+String lastSyncErrorRoom;
+int lastSyncErrorHttpStatus = 0;
+size_t lastSyncResponseBytes = 0;
+uint32_t lastSyncErrorHeap = 0;
+uint32_t lastSyncErrorAt = 0;
+bool lastSyncErrorInitial = false;
 int batteryLevel = -1;
 int batteryVoltageMv = 0;
 float batteryFilteredMv = 0.0f;
@@ -294,6 +318,18 @@ uint32_t lastUserInputAt = 0;
 std::array<int, kPowerTrendSamples> powerTrendVoltages{};
 size_t powerTrendCount = 0;
 bool externalPowerDetected = false;
+volatile bool chargingModeActive = false;
+bool chargingDimmed = false;
+bool inputQuarantined = false;
+bool espNowActive = false;
+uint32_t chargeSessionStartedAt = 0;
+uint32_t nextChargePlotAt = 0;
+uint32_t chargeSessionId = 0;
+int chargeStartMv = 0;
+int chargeLastLoggedPercent = -1;
+ChargeTrend chargeTrend = ChargeTrend::Waiting;
+std::array<ChargePlotPoint, kChargePlotCapacity> chargePlot{};
+size_t chargePlotCount = 0;
 
 void serviceMessageNotification();
 uint32_t lastToneAt = 0;
@@ -545,7 +581,7 @@ bool localBlackout() {
 }
 
 void playNextTone() {
-  if (voiceRecording || audioPlaying || messageNotificationActive) return;
+  if (chargingModeActive || voiceRecording || audioPlaying || messageNotificationActive) return;
   const uint32_t now = millis();
   if (now - lastToneAt < kToneIntervalMs || kKeypressSongLength == 0) return;
   lastToneAt = now;
@@ -555,6 +591,7 @@ void playNextTone() {
 }
 
 void serviceMessageNotification() {
+  if (chargingModeActive) { messageNotificationPending = false; messageNotificationActive = false; return; }
   if (volumeLevel == 0) { messageNotificationPending = false; messageNotificationActive = false; return; }
   if (voiceRecording || audioPlaying) return;
   const uint32_t now = millis();
@@ -577,6 +614,7 @@ void serviceMessageNotification() {
 String nextClientId();
 void sendEspNowAudio(const int16_t *samples, size_t count);
 void processVoiceBlock(const int16_t *samples) {
+  if (chargingModeActive) return;
   if (retainCurrentVoice && voiceSampleCount + kVoiceCaptureBlock <= kVoiceMaxSamples) {
     if (voiceUsesSd && voiceCaptureFile) {
       xSemaphoreTake(stateMutex, portMAX_DELAY);
@@ -595,7 +633,7 @@ void processVoiceBlock(const int16_t *samples) {
 }
 
 void startVoiceRecording() {
-  if (voiceRecording || audioPlaying) return;
+  if (chargingModeActive || voiceRecording || audioPlaying) return;
   voiceLiveMode = screenMode == ScreenMode::Walkie;
   retainCurrentVoice = !voiceLiveMode && !voiceUploadPending;
   if (retainCurrentVoice) {
@@ -680,7 +718,7 @@ void captureVoice() {
 }
 
 bool queuePlaybackSamples(std::vector<int16_t> samples) {
-  if (samples.empty() || voiceRecording || volumeLevel == 0 || M5Cardputer.Speaker.isPlaying(0) >= 2) return false;
+  if (chargingModeActive || samples.empty() || voiceRecording || volumeLevel == 0 || M5Cardputer.Speaker.isPlaying(0) >= 2) return false;
   M5Cardputer.Mic.end(); M5Cardputer.Speaker.begin(); M5Cardputer.Speaker.setVolume(kVolumeValues[volumeLevel]);
   auto &buffer = playbackBuffers[playbackBufferIndex]; buffer = std::move(samples);
   const bool queued = M5Cardputer.Speaker.playRaw(buffer.data(), buffer.size(), kVoiceSampleRate, false, 1, 0, false);
@@ -694,6 +732,7 @@ void playSamples(const int16_t *samples, size_t count) {
 }
 
 void serviceAudioPlayback() {
+  if (chargingModeActive) return;
   audioPlaying = M5Cardputer.Speaker.isPlaying(0) > 0;
   if (voiceRecording) return;
   while (M5Cardputer.Speaker.isPlaying(0) < 2 && !incomingAudio.empty()) {
@@ -751,6 +790,7 @@ void startLocalReplay() {
 }
 
 void onWalkieEvent(WStype_t type, uint8_t *payload, size_t length) {
+  if (chargingModeActive) return;
   if (type == WStype_CONNECTED) { walkieConnected = true; walkieStatus = "READY"; renderDirty = true; return; }
   if (type == WStype_DISCONNECTED) { walkieConnected = false; walkieGranted = false; walkieStatus = "RECONNECTING"; renderDirty = true; return; }
   if (type == WStype_ERROR) {
@@ -772,6 +812,7 @@ void onWalkieEvent(WStype_t type, uint8_t *payload, size_t length) {
 }
 
 void onEspNowReceive(const uint8_t *, const uint8_t *data, int length) {
+  if (chargingModeActive) return;
   if (length < static_cast<int>(offsetof(EspNowPacket, payload))) return;
   const auto *packet = reinterpret_cast<const EspNowPacket *>(data);
   if (packet->magic != kEspNowMagic || packet->payloadLength > sizeof(packet->payload) ||
@@ -800,13 +841,16 @@ void onEspNowReceive(const uint8_t *, const uint8_t *data, int length) {
 }
 
 void initializeEspNow() {
+  if (chargingModeActive || espNowActive) return;
   if (esp_now_init() != ESP_OK) return;
   esp_now_register_recv_cb(onEspNowReceive);
   esp_now_peer_info_t peer{}; memset(peer.peer_addr, 0xff, 6); peer.channel = 0; peer.ifidx = WIFI_IF_STA; peer.encrypt = false;
   if (!esp_now_is_peer_exist(peer.peer_addr)) esp_now_add_peer(&peer);
+  espNowActive = true;
 }
 
 void sendEspNowBeacon() {
+  if (chargingModeActive || !espNowActive) return;
   static const uint8_t broadcast[] = {0xff,0xff,0xff,0xff,0xff,0xff};
   EspNowPacket packet{}; packet.magic = kEspNowMagic; packet.type = static_cast<uint8_t>(EspNowType::Beacon); packet.sequence = ++espNowSequence;
   strncpy(packet.senderId, kDeviceId, sizeof(packet.senderId) - 1); strncpy(packet.senderName, kDeviceName, sizeof(packet.senderName) - 1);
@@ -815,6 +859,7 @@ void sendEspNowBeacon() {
 }
 
 bool connectKnownWifi() {
+  if (chargingModeActive) return false;
   if (WiFi.status() == WL_CONNECTED) return true;
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(true);
@@ -827,14 +872,17 @@ bool connectKnownWifi() {
     }
   }
   WiFi.scanDelete();
+  if (chargingModeActive) return false;
   if (bestProfile < 0) {
     if (kEspNowEnabled) esp_wifi_set_channel(kEspNowFallbackChannel, WIFI_SECOND_CHAN_NONE);
     networkStatus = "ESPNOW ONLY"; return false;
   }
   networkStatus = "JOINING"; renderDirty = true;
+  if (chargingModeActive) return false;
   WiFi.begin(wifiProfiles[bestProfile].ssid.c_str(), wifiProfiles[bestProfile].password.c_str());
   const uint32_t started = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - started < 12000) vTaskDelay(pdMS_TO_TICKS(100));
+  while (!chargingModeActive && WiFi.status() != WL_CONNECTED && millis() - started < 12000) vTaskDelay(pdMS_TO_TICKS(100));
+  if (chargingModeActive) { WiFi.disconnect(false, false); return false; }
   if (WiFi.status() != WL_CONNECTED) { WiFi.disconnect(false, false); networkStatus = "JOIN FAILED"; return false; }
   currentSsid = WiFi.SSID(); networkStatus = "ONLINE"; renderDirty = true;
   return true;
@@ -970,7 +1018,122 @@ void sampleBattery(bool force = false) {
   batteryVoltageMv = nextVoltage;
 }
 
+const char *chargeTrendName(ChargeTrend trend) {
+  switch (trend) {
+    case ChargeTrend::Rising: return "RISING";
+    case ChargeTrend::Flat: return "FLAT";
+    case ChargeTrend::Falling: return "FALLING";
+    case ChargeTrend::Unstable: return "UNSTABLE";
+    default: return "WAITING";
+  }
+}
+
+void appendChargeLog(const char *event, const char *detail = "") {
+  if (!sdReady) return;
+  const bool writeHeader = !SD.exists(kChargeLogPath);
+  File file = SD.open(kChargeLogPath, FILE_APPEND);
+  if (!file) return;
+  if (writeHeader) file.println("schema_version,device_id,firmware_version,session_id,elapsed_s,event,raw_mv,filtered_mv,estimated_pct,trend,detail");
+  const uint32_t elapsed = chargingModeActive ? (millis() - chargeSessionStartedAt) / 1000 : 0;
+  file.printf("1,%s,%s,%08lx,%lu,%s,%d,%d,%d,%s,%s\n", kDeviceId, kFirmwareVersion,
+              static_cast<unsigned long>(chargeSessionId), static_cast<unsigned long>(elapsed), event,
+              batteryVoltageMv, static_cast<int>(batteryFilteredMv + 0.5f), batteryLevel,
+              chargeTrendName(chargeTrend), detail);
+  file.close();
+}
+
+ChargeTrend classifyChargeTrend(int nextMv) {
+  constexpr size_t kWindow = 6;
+  int values[kWindow]{};
+  size_t count = 0;
+  const size_t previous = std::min(chargePlotCount, kWindow - 1);
+  const size_t start = chargePlotCount - previous;
+  for (size_t index = start; index < chargePlotCount; index++) values[count++] = chargePlot[index].filteredMv;
+  values[count++] = nextMv;
+  if (count < 3) return ChargeTrend::Waiting;
+  int minimum = values[0], maximum = values[0];
+  for (size_t index = 1; index < count; index++) { minimum = std::min(minimum, values[index]); maximum = std::max(maximum, values[index]); }
+  const int delta = values[count - 1] - values[0];
+  if (delta >= kChargeTrendThresholdMv) return ChargeTrend::Rising;
+  if (delta <= -kChargeTrendThresholdMv) return ChargeTrend::Falling;
+  if (maximum - minimum <= kChargeTrendThresholdMv) return ChargeTrend::Flat;
+  return ChargeTrend::Unstable;
+}
+
+void addChargePlotPoint(bool logSample = true) {
+  if (!chargingModeActive || batteryFilteredMv <= 0) return;
+  const int filteredMv = static_cast<int>(batteryFilteredMv + 0.5f);
+  const ChargeTrend previousTrend = chargeTrend;
+  chargeTrend = classifyChargeTrend(filteredMv);
+  if (chargePlotCount == chargePlot.size()) {
+    std::move(chargePlot.begin() + 1, chargePlot.end(), chargePlot.begin());
+    chargePlotCount--;
+  }
+  ChargePlotPoint point;
+  point.elapsedSeconds = (millis() - chargeSessionStartedAt) / 1000;
+  point.filteredMv = static_cast<uint16_t>(std::max(0, filteredMv));
+  point.estimatedPercent = static_cast<uint8_t>(std::max(0, batteryLevel));
+  point.trend = chargeTrend;
+  chargePlot[chargePlotCount++] = point;
+  if (logSample) appendChargeLog("SAMPLE");
+  if (chargeTrend != previousTrend && chargeTrend != ChargeTrend::Waiting)
+    appendChargeLog((String("TREND_") + chargeTrendName(chargeTrend)).c_str());
+  renderDirty = true;
+}
+
+void enterChargingMode() {
+  if (chargingModeActive) return;
+  chargingModeActive = true;
+  inputQuarantined = true;
+  chargingDimmed = false;
+  messageNotificationPending = false; messageNotificationActive = false;
+  if (voiceRecording) stopVoiceRecording();
+  stopVoicePlayback();
+  M5Cardputer.Mic.end(); M5Cardputer.Speaker.stop(); M5Cardputer.Speaker.end();
+  walkieSocket.disconnect(); walkieConnected = false; walkieInitialized = false; walkieGranted = false;
+  if (espNowActive) { esp_now_deinit(); espNowActive = false; }
+  WiFi.disconnect(false, false); WiFi.mode(WIFI_OFF);
+  currentSsid = ""; networkStatus = "CHARGE MODE";
+  setCpuFrequencyMhz(80);
+  M5Cardputer.Display.setBrightness(kChargeBrightness);
+  chargeSessionStartedAt = millis(); chargeSessionId = esp_random();
+  chargeStartMv = static_cast<int>(batteryFilteredMv + 0.5f);
+  chargeLastLoggedPercent = batteryLevel;
+  chargeTrend = ChargeTrend::Waiting; chargePlotCount = 0;
+  nextChargePlotAt = millis() + kChargePlotSampleMs;
+  screenMode = ScreenMode::Charging;
+  appendChargeLog("MODE_ENTER"); addChargePlotPoint();
+  renderDirty = true;
+}
+
+void exitChargingMode() {
+  if (!chargingModeActive) return;
+  appendChargeLog("MODE_EXIT");
+  chargingModeActive = false;
+  inputQuarantined = true;
+  setCpuFrequencyMhz(240);
+  M5Cardputer.Display.setBrightness(255);
+  M5Cardputer.Speaker.begin(); M5Cardputer.Speaker.setVolume(kVolumeValues[volumeLevel]);
+  WiFi.mode(WIFI_STA); WiFi.setAutoReconnect(false); WiFi.persistent(false); WiFi.disconnect(false, false);
+  if (kEspNowEnabled) initializeEspNow();
+  wifiResumeRequested = true; syncOverride = true; networkStatus = "RESUMING";
+  screenMode = ScreenMode::Menu; renderDirty = true;
+}
+
+void serviceChargingMode() {
+  if (!chargingModeActive) return;
+  const uint32_t now = millis();
+  if (static_cast<int32_t>(now - nextChargePlotAt) >= 0) {
+    do { nextChargePlotAt += kChargePlotSampleMs; } while (static_cast<int32_t>(now - nextChargePlotAt) >= 0);
+    addChargePlotPoint();
+  }
+  if (batteryLevel != chargeLastLoggedPercent) {
+    chargeLastLoggedPercent = batteryLevel; appendChargeLog("PERCENT_CHANGE"); renderDirty = true;
+  }
+}
+
 bool requestJson(const String &path, const char *method, const String &requestBody, String &responseBody, int &status) {
+  if (chargingModeActive) { status = HTTPC_ERROR_CONNECTION_REFUSED; return false; }
   WiFiClientSecure client; client.setInsecure(); client.setTimeout(35); client.setHandshakeTimeout(20);
   if (!client.connect(kApiHost, 443)) { status = HTTPC_ERROR_CONNECTION_REFUSED; return false; }
   if (!client.verify(kTlsFingerprint, kApiHost)) { client.stop(); status = HTTPC_ERROR_CONNECTION_LOST; return false; }
@@ -1106,11 +1269,24 @@ void postReadReceipt(int64_t messageId) {
   requestJson("/api/receipts", "POST", "{\"message_id\":" + String(messageId) + ",\"state\":\"read\"}", response, status);
 }
 
+void recordSyncError(const char *kind, const String &detail, int status, size_t responseBytes, bool initial) {
+  lastSyncError = kind;
+  lastSyncDetail = detail;
+  lastSyncErrorRoom = currentRoomId;
+  lastSyncErrorHttpStatus = status;
+  lastSyncResponseBytes = responseBytes;
+  lastSyncErrorHeap = ESP.getFreeHeap();
+  lastSyncErrorAt = millis();
+  lastSyncErrorInitial = initial;
+  renderDirty = true;
+}
+
 void synchronize() {
   String roomsResponse; int roomsStatus = 0;
   if (requestJson("/api/rooms", "GET", "", roomsResponse, roomsStatus) && roomsStatus == 200) {
     JsonDocument roomDocument;
-    if (!deserializeJson(roomDocument, roomsResponse)) {
+    const DeserializationError roomJsonError = deserializeJson(roomDocument, roomsResponse);
+    if (!roomJsonError) {
       std::vector<ChatRoom> nextRooms;
       for (JsonObjectConst object : roomDocument["rooms"].as<JsonArrayConst>()) {
         const String id = String(object["id"] | ""); const int64_t latest = object["latest_message_id"] | 0;
@@ -1124,6 +1300,8 @@ void synchronize() {
       if (active == rooms.end() && !rooms.empty()) { currentRoomId = rooms[0].id; currentRoomName = rooms[0].name; }
       else if (active != rooms.end()) currentRoomName = active->name;
       applyEffectiveLanguage();
+    } else {
+      recordSyncError("ROOM JSON", roomJsonError.c_str(), roomsStatus, roomsResponse.length(), !initialSyncComplete);
     }
   }
   sendQueuedMessages();
@@ -1137,11 +1315,13 @@ void synchronize() {
       + "&limit=" + String(syncLimit) + "&wait=0&room=" + currentRoomId;
   if (!requestJson(path, "GET", "", response, status)) {
     networkStatus = "SYNC IO " + String(status);
-    Serial.printf("sync transport error=%d heap=%u\n", status, ESP.getFreeHeap()); renderDirty = true; return;
+    recordSyncError("SYNC IO", String(status), status, response.length(), !initialSyncComplete);
+    Serial.printf("sync transport error=%d bytes=%u heap=%u\n", status, response.length(), lastSyncErrorHeap); return;
   }
   if (status != 200) {
     networkStatus = "SYNC HTTP " + String(status);
-    Serial.printf("sync http status=%d body=%s\n", status, response.substring(0, 80).c_str()); renderDirty = true; return;
+    recordSyncError("SYNC HTTP", String(status), status, response.length(), !initialSyncComplete);
+    Serial.printf("sync http status=%d bytes=%u heap=%u\n", status, response.length(), lastSyncErrorHeap); return;
   }
   // ArduinoJson treats String input as read-only and duplicates every parsed
   // string. The mutable buffer selects zero-copy mode, preserving enough heap
@@ -1152,9 +1332,9 @@ void synchronize() {
       : deserializeJson(document, &response[0], response.length());
   if (jsonError) {
     networkStatus = jsonError == DeserializationError::NoMemory ? "JSON MEMORY" : "BAD JSON";
-    Serial.printf("sync json error=%s bytes=%u heap=%u prefix=%s\n", jsonError.c_str(), response.length(),
-                  ESP.getFreeHeap(), response.substring(0, 48).c_str());
-    renderDirty = true; return;
+    recordSyncError(networkStatus.c_str(), jsonError.c_str(), status, response.length(), !initialSyncComplete);
+    Serial.printf("sync json error=%s bytes=%u heap=%u\n", jsonError.c_str(), response.length(), lastSyncErrorHeap);
+    return;
   }
   std::vector<int64_t> newlyRead;
   xSemaphoreTake(stateMutex, portMAX_DELAY);
@@ -1186,6 +1366,7 @@ void synchronize() {
 void networkTask(void *) {
   uint32_t nextWifiAttempt = 0;
   for (;;) {
+    if (chargingModeActive) { vTaskDelay(pdMS_TO_TICKS(1000)); continue; }
     if (manualWifiMode) { vTaskDelay(pdMS_TO_TICKS(100)); continue; }
     if (localOnlyMode) {
       if (WiFi.status() == WL_CONNECTED) WiFi.disconnect(false, false);
@@ -1220,6 +1401,7 @@ void networkTask(void *) {
 
 void walkieTask(void *) {
   for (;;) {
+    if (chargingModeActive) { vTaskDelay(pdMS_TO_TICKS(1000)); continue; }
     if (WiFi.status() == WL_CONNECTED && timeKnown && initialSyncComplete) {
       if (!walkieInitialized) {
         walkieHeaders = "Authorization: Bearer " + deviceToken + "\r\n";
@@ -1239,12 +1421,14 @@ void drawHeader(const char *title) {
   display.setTextColor(TFT_WHITE, TFT_DARKGREEN); display.setTextSize(1); display.setCursor(5, 6); display.print(title);
   if (strcmp(title, "FAMLY") == 0) { display.setCursor(40, 6); display.print(easternClockText()); }
   if (!keyboardReady) { display.setTextColor(TFT_RED, TFT_DARKGREEN); display.setCursor(88, 6); display.print("K!"); }
-  display.setCursor(106, 6); display.print(networkStatus.substring(0, 10));
+  if (screenMode != ScreenMode::Charging && screenMode != ScreenMode::ChargingConfirm) {
+    display.setCursor(106, 6); display.print(networkStatus.substring(0, 10));
+  }
   const String batteryText = batteryLevel < 0 ? String("?%") : String(batteryLevel) + "%";
   display.setTextSize(1); display.setTextColor(TFT_WHITE, TFT_DARKGREEN);
   display.setCursor(237 - static_cast<int>(batteryText.length()) * 6, 6);
   display.print(batteryText); display.setTextSize(1);
-  if (externalPowerDetected) {
+  if (externalPowerDetected && screenMode != ScreenMode::Charging && screenMode != ScreenMode::ChargingConfirm) {
     display.fillTriangle(199, 2, 194, 10, 199, 10, TFT_YELLOW);
     display.fillTriangle(197, 8, 203, 8, 196, 18, TFT_YELLOW);
   }
@@ -1320,9 +1504,9 @@ void drawChat() {
   display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(198, 126); display.printf("%d/140", utf8CharacterCount(draft));
 }
 
-const char *kMenuItemsEn[] = {"BACK TO CHAT", "ROOMS", "SYNC NOW", "VOICE MESSAGES", "WALKIE-TALKIE", "VOLUME", "LANGUAGE", "NETWORKS", "ESP-NOW LOCAL", "STATUS", "CHANGELOG", "EMOJI RECIPES"};
-const char *kMenuItemsFr[] = {"RETOUR CHAT", "SALONS", "SYNCHRO", "MESSAGES VOCAUX", "WALKIE-TALKIE", "VOLUME", "LANGUE", "RESEAUX", "ESP-NOW LOCAL", "ETAT", "CHANGEMENTS", "RECETTES EMOJI"};
-constexpr int kMenuItemCounts[kMenuPageCount] = {6, 6};
+const char *kMenuItemsEn[] = {"BACK TO CHAT", "ROOMS", "SYNC NOW", "VOICE MESSAGES", "WALKIE-TALKIE", "VOLUME", "LANGUAGE", "NETWORKS", "ESP-NOW LOCAL", "CHARGING MODE", "STATUS", "CHANGELOG", "EMOJI RECIPES"};
+const char *kMenuItemsFr[] = {"RETOUR CHAT", "SALONS", "SYNCHRO", "MESSAGES VOCAUX", "WALKIE-TALKIE", "VOLUME", "LANGUE", "RESEAUX", "ESP-NOW LOCAL", "MODE CHARGE", "ETAT", "CHANGEMENTS", "RECETTES EMOJI"};
+constexpr int kMenuItemCounts[kMenuPageCount] = {6, 6, 1};
 void drawMenu() {
   auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader("MENU");
   display.setTextSize(1); display.setTextColor(TFT_YELLOW, TFT_DARKGREEN); display.setCursor(78, 6); display.printf("%d/%d", menuPage + 1, kMenuPageCount);
@@ -1413,14 +1597,28 @@ void drawVolume() {
 
 void drawStatus() {
   auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader(uiText("STATUS", "ETAT")); display.setTextSize(1);
-  display.setTextColor(TFT_WHITE, TFT_BLACK); display.setCursor(6, 29); display.printf(frenchUi ? "APPAREIL  %s\n" : "NODE      %s\n", kDeviceName);
-  display.printf("WIFI      %s\n", currentSsid.isEmpty() ? "offline" : currentSsid.c_str());
-  display.printf(frenchUi ? "ETAT      %s\n" : "STATE     %s\n", networkStatus.c_str()); display.printf(frenchUi ? "HEURE     %s\n" : "TIME      %s\n", timeKnown ? uiText("known", "connue") : uiText("unknown", "inconnue"));
-  display.printf(frenchUi ? "BATTERIE  %d%%  %d mV\n" : "BATTERY   %d%%  %d mV\n", batteryLevel, batteryVoltageMv);
-  display.printf(frenchUi ? "ALIM.     %s\n" : "POWER     %s\n", externalPowerDetected ? uiText("cable detected", "cable detecte") : uiText("not detected", "non detecte"));
-  display.printf("SD/KEY    %s / %s\n", sdReady ? "ready" : "missing", keyboardReady ? "ready" : "fault");
-  display.printf("HTTP/HEAP %d / %u\n", lastHttpStatus, ESP.getFreeHeap());
-  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 123); display.print(uiText("LEFT / OK  BACK", "GAUCHE / OK RETOUR"));
+  display.setTextColor(TFT_YELLOW, TFT_DARKGREEN); display.setCursor(78, 6); display.printf("%d/2", statusPage + 1);
+  display.setTextColor(TFT_WHITE, TFT_BLACK); display.setCursor(6, 29);
+  if (statusPage == 0) {
+    display.printf(frenchUi ? "APPAREIL  %s\n" : "NODE      %s\n", kDeviceName);
+    display.printf("WIFI      %s\n", currentSsid.isEmpty() ? "offline" : currentSsid.c_str());
+    display.printf(frenchUi ? "ETAT      %s\n" : "STATE     %s\n", networkStatus.c_str()); display.printf(frenchUi ? "HEURE     %s\n" : "TIME      %s\n", timeKnown ? uiText("known", "connue") : uiText("unknown", "inconnue"));
+    display.printf(frenchUi ? "BATTERIE  %d%%  %d mV\n" : "BATTERY   %d%%  %d mV\n", batteryLevel, batteryVoltageMv);
+    display.printf(frenchUi ? "ALIM.     %s\n" : "POWER     %s\n", externalPowerDetected ? uiText("cable detected", "cable detecte") : uiText("not detected", "non detecte"));
+    display.printf("SD/KEY    %s / %s\n", sdReady ? "ready" : "missing", keyboardReady ? "ready" : "fault");
+    display.printf("HTTP/HEAP %d / %u\n", lastHttpStatus, ESP.getFreeHeap());
+  } else {
+    const bool hasError = lastSyncError != "NONE";
+    const uint32_t errorAgeSeconds = hasError ? (millis() - lastSyncErrorAt) / 1000 : 0;
+    display.printf("ERROR     %s\n", lastSyncError.substring(0, 25).c_str());
+    display.printf("DETAIL    %s\n", hasError ? lastSyncDetail.substring(0, 25).c_str() : "no sync failures");
+    display.printf("HTTP/BYTES %d / %u\n", lastSyncErrorHttpStatus, lastSyncResponseBytes);
+    display.printf("HEAP      %u\n", lastSyncErrorHeap);
+    display.printf("ROOM      %s\n", hasError ? lastSyncErrorRoom.substring(0, 25).c_str() : "-");
+    display.printf("PHASE     %s\n", hasError ? (lastSyncErrorInitial ? "INITIAL" : "LIVE") : "-");
+    display.printf("AGE       %us\n", errorAgeSeconds);
+  }
+  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 123); display.print(uiText("LEFT/RIGHT PAGE  OK BACK", "GAUCHE/DROITE PAGE OK RETOUR"));
 }
 
 void drawNetworks() {
@@ -1451,6 +1649,51 @@ void drawNetworkPassword() {
   display.setCursor(6, 121); display.print(uiText("TYPE  ENTER JOIN  LEFT CANCEL", "TAPER ENTER JOINDRE GAUCHE ANNULER"));
 }
 
+void drawChargingConfirm() {
+  auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader(uiText("CHARGE MODE", "MODE CHARGE"));
+  display.setTextSize(2); display.setTextColor(TFT_YELLOW, TFT_BLACK); display.setCursor(45, 30);
+  display.print(uiText("CHARGING", "CHARGE"));
+  display.setTextSize(1); display.setTextColor(TFT_WHITE, TFT_BLACK); display.setCursor(24, 64);
+  display.print(uiText("PAUSES CHAT + RADIO", "PAUSE CHAT + RADIO"));
+  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 110);
+  display.print(uiText("LOW-POWER BATTERY HISTORY", "HISTORIQUE BATTERIE"));
+  display.setCursor(6, 123); display.print(uiText("LEFT CANCEL       ENTER START", "GAUCHE ANNULER    ENTER DEMARRER"));
+}
+
+int chargePlotY(int millivolts) {
+  const int clamped = std::max(kChargePlotMinMv, std::min(kChargePlotMaxMv, millivolts));
+  return 105 - (clamped - kChargePlotMinMv) * 54 / (kChargePlotMaxMv - kChargePlotMinMv);
+}
+
+void drawCharging() {
+  auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader(uiText("CHARGING", "CHARGE"));
+  const int filteredMv = static_cast<int>(batteryFilteredMv + 0.5f);
+  const int deltaMv = filteredMv - chargeStartMv;
+  const uint32_t elapsedMinutes = (millis() - chargeSessionStartedAt) / 60000;
+  display.setTextSize(1); display.setTextColor(TFT_WHITE, TFT_BLACK); display.setCursor(5, 23);
+  display.printf("%d mV  %d%%  %+d mV", filteredMv, batteryLevel, deltaMv);
+  display.setTextColor(TFT_LIGHTGREY, TFT_BLACK); display.setCursor(187, 23);
+  display.printf("%02lu:%02lu", static_cast<unsigned long>(elapsedMinutes / 60), static_cast<unsigned long>(elapsedMinutes % 60));
+
+  constexpr int plotLeft = 23, plotRight = 237, plotTop = 43, plotBottom = 106;
+  display.drawRect(plotLeft, plotTop, plotRight - plotLeft + 1, plotBottom - plotTop + 1, TFT_DARKGREY);
+  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(0, plotTop); display.print("43");
+  display.setCursor(0, plotBottom - 7); display.print("32");
+  if (chargePlotCount == 1) {
+    display.fillCircle(plotLeft, chargePlotY(chargePlot[0].filteredMv), 2, TFT_GREEN);
+  } else if (chargePlotCount > 1) {
+    for (size_t index = 1; index < chargePlotCount; index++) {
+      const int x0 = plotLeft + static_cast<int>((index - 1) * (plotRight - plotLeft) / (chargePlotCount - 1));
+      const int x1 = plotLeft + static_cast<int>(index * (plotRight - plotLeft) / (chargePlotCount - 1));
+      display.drawLine(x0, chargePlotY(chargePlot[index - 1].filteredMv), x1, chargePlotY(chargePlot[index].filteredMv), TFT_GREEN);
+    }
+  }
+  display.setTextColor(chargeTrend == ChargeTrend::Falling ? TFT_RED : (chargeTrend == ChargeTrend::Rising ? TFT_GREEN : TFT_YELLOW), TFT_BLACK);
+  display.setCursor(5, 111); display.printf("%-8s %3u PTS  %s", chargeTrendName(chargeTrend), static_cast<unsigned>(chargePlotCount), sdReady ? "SD" : "MEM");
+  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(5, 123);
+  display.print(uiText("LEFT EXIT       ENTER DIM", "GAUCHE SORTIR   ENTER SOMBRE"));
+}
+
 void drawLanguage();
 void drawChangelog();
 void render() {
@@ -1459,7 +1702,9 @@ void render() {
   else if (screenMode == ScreenMode::EmojiRecipes) drawEmojiRecipes();
   else if (screenMode == ScreenMode::VoiceMessages || screenMode == ScreenMode::Walkie) drawWalkie();
   else if (screenMode == ScreenMode::Status) drawStatus();
-  else if (screenMode == ScreenMode::NetworkPassword) drawNetworkPassword(); else drawNetworks();
+  else if (screenMode == ScreenMode::NetworkPassword) drawNetworkPassword();
+  else if (screenMode == ScreenMode::ChargingConfirm) drawChargingConfirm();
+  else if (screenMode == ScreenMode::Charging) drawCharging(); else drawNetworks();
   if (uiCanvasReady) uiCanvas.pushSprite(0, 0);
   renderDirty = false; lastRenderAt = millis();
 }
@@ -1685,8 +1930,9 @@ void openSelectedMenuItem() {
   else if (selection == 6) screenMode = ScreenMode::Language;
   else if (selection == 7) { if (!localOnlyMode) { screenMode = ScreenMode::Networks; scanForNetworks(); } }
   else if (selection == 8) setLocalOnlyMode(!localOnlyMode);
-  else if (selection == 9) screenMode = ScreenMode::Status;
-  else if (selection == 10) screenMode = ScreenMode::Changelog;
+  else if (selection == 9) screenMode = ScreenMode::ChargingConfirm;
+  else if (selection == 10) screenMode = ScreenMode::Status;
+  else if (selection == 11) screenMode = ScreenMode::Changelog;
   else screenMode = ScreenMode::EmojiRecipes;
   renderDirty = true;
 }
@@ -1710,6 +1956,11 @@ void switchRoom(int direction) {
 }
 
 void handleKeyboard() {
+  if (inputQuarantined) {
+    if (!M5Cardputer.Keyboard.isPressed() && !M5Cardputer.Keyboard.isChange() &&
+        !M5Cardputer.BtnA.isPressed() && !M5Cardputer.BtnA.wasClicked()) inputQuarantined = false;
+    return;
+  }
   if (!M5Cardputer.Keyboard.isChange() || !M5Cardputer.Keyboard.isPressed()) return;
   lastUserInputAt = millis();
   const auto keys = M5Cardputer.Keyboard.keysState();
@@ -1734,6 +1985,20 @@ void handleKeyboard() {
     else if (goRight) { menuPage = (menuPage + 1) % kMenuPageCount; playNextTone(); }
     else if (keys.enter) { openSelectedMenuItem(); playNextTone(); }
     renderDirty = true; return;
+  }
+  if (screenMode == ScreenMode::ChargingConfirm) {
+    if (goLeft) { screenMode = ScreenMode::Menu; playNextTone(); }
+    else if (keys.enter) enterChargingMode();
+    renderDirty = true; return;
+  }
+  if (screenMode == ScreenMode::Charging) {
+    if (goLeft) exitChargingMode();
+    else if (keys.enter) {
+      chargingDimmed = !chargingDimmed;
+      M5Cardputer.Display.setBrightness(chargingDimmed ? kChargeDimBrightness : kChargeBrightness);
+      renderDirty = true;
+    }
+    return;
   }
   if (screenMode == ScreenMode::Rooms) {
     if (goUp && roomSelection > 0) roomSelection--;
@@ -1781,6 +2046,11 @@ void handleKeyboard() {
       else languageOverride = goRight ? "auto" : "en";
       saveLanguageOverride(); playNextTone();
     } else if (keys.enter) { screenMode = ScreenMode::Menu; playNextTone(); }
+    renderDirty = true; return;
+  }
+  if (screenMode == ScreenMode::Status) {
+    if (goLeft || goRight) { statusPage = 1 - statusPage; playNextTone(); }
+    else if (keys.enter) { statusPage = 0; screenMode = ScreenMode::Menu; playNextTone(); }
     renderDirty = true; return;
   }
   if (screenMode == ScreenMode::Changelog) {
@@ -1854,6 +2124,7 @@ void setup() {
   xTaskCreatePinnedToCore(networkTask, "supachat-net", 16384, nullptr, 1, nullptr, 0);
   xTaskCreatePinnedToCore(walkieTask, "supachat-ws", 12288, nullptr, 1, nullptr, 1);
   showBootSplash();
+  inputQuarantined = true;
   render();
   Serial.printf("SUPACHAT ready node=%s wifi_profiles=%u sd=%d keyboard=%d board=%d\n", kDeviceId,
                 wifiProfiles.size(), sdReady, keyboardReady, static_cast<int>(M5.getBoard()));
@@ -1862,7 +2133,14 @@ void setup() {
 void loop() {
   M5Cardputer.update();
   if (M5Cardputer.BtnA.isPressed()) lastUserInputAt = millis();
-  sampleBattery(); serviceClockRender(); handleKeyboard(); captureVoice(); serviceAudioPlayback(); serviceMessageNotification();
+  sampleBattery(); handleKeyboard();
+  if (chargingModeActive) {
+    serviceChargingMode();
+    if (!inputQuarantined && M5Cardputer.BtnA.wasClicked()) exitChargingMode();
+    if (renderDirty && millis() - lastRenderAt >= 1000) render();
+    delay(20); return;
+  }
+  serviceClockRender(); captureVoice(); serviceAudioPlayback(); serviceMessageNotification();
   if (screenMode == ScreenMode::VoiceMessages || screenMode == ScreenMode::Walkie) {
     const bool spacePressed = M5Cardputer.Keyboard.isPressed() && M5Cardputer.Keyboard.keysState().space;
     if (spacePressed) {
@@ -1876,11 +2154,12 @@ void loop() {
       }
     }
     if (M5Cardputer.BtnA.wasClicked()) { screenMode = ScreenMode::Menu; renderDirty = true; }
-  } else if (M5Cardputer.BtnA.wasClicked()) {
+  } else if (!inputQuarantined && M5Cardputer.BtnA.wasClicked()) {
     playNextTone(); screenMode = screenMode == ScreenMode::Menu ? ScreenMode::Chat : ScreenMode::Menu; renderDirty = true;
   }
   if (screenMode != ScreenMode::VoiceMessages && screenMode != ScreenMode::Walkie && spacePttHeld) { spacePttHeld = false; spaceReleaseStartedAt = 0; stopVoiceRecording(); }
   if (kEspNowEnabled && millis() - lastEspNowBeaconAt >= kEspNowBeaconMs) sendEspNowBeacon();
+  if (screenMode == ScreenMode::Status && statusPage == 1 && lastSyncError != "NONE" && millis() - lastRenderAt >= 1000) renderDirty = true;
   if (renderDirty && millis() - lastRenderAt >= kRenderIntervalMs) render();
   delay(2);
 }
