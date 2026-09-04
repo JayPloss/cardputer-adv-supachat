@@ -5,6 +5,10 @@ export const menuPages = [
 ];
 export const menuItems = menuPages.flat();
 export const changelog = [
+  {version:'v0.53',lines:['Reliable Fox peer discovery','Shared ESP-NOW hunt channel','Newest-first history pages','Compact device sync payload','Unified feature release']},
+  {version:'v0.52',lines:['Newest-first history pages','Compact device sync payload','Large-room JSON fix']},
+  {version:'v0.51',lines:['Simpler charging screen','20-second screen timeout','Reduced charging redraws']},
+  {version:'v0.50',lines:['Papa custom boot art','Mama build + boot art']},
   {version:'v0.49',lines:['Low-power charging mode','Charge history plot','Battery event logging','Boot key quarantine','Verbose sync diagnostics']},
   {version:'v0.48',lines:['Scrollable build changes','Working language controls','Reliable room switching','Zero-copy history sync','Fixed cable detection','Clean battery digits','Voice / walkie split']},
   {version:'v0.47',lines:['Paged menus','Build changelog','ESP-NOW local only','Language menu fix']},

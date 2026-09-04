@@ -45,7 +45,7 @@ constexpr bool kBuildFrenchDefault = false;
 bool frenchUi = kBuildFrenchDefault;
 String languageOverride = "auto";
 const char *uiText(const char *english, const char *french) { return frenchUi ? french : english; }
-constexpr char kFirmwareVersion[] = "v0.52";
+constexpr char kFirmwareVersion[] = "v0.53";
 constexpr size_t kMessageLimit = 140;
 constexpr size_t kHistoryLimit = 100;
 constexpr uint32_t kToneIntervalMs = 40;
