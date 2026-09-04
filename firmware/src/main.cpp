@@ -2246,7 +2246,15 @@ void openSelectedMenuItem() {
   else if (selection == 10) screenMode = ScreenMode::Status;
   else if (selection == 11) screenMode = ScreenMode::Changelog;
   else if (selection == 12) screenMode = ScreenMode::EmojiRecipes;
-  else { screenMode = ScreenMode::FoxFinding; foxState = FoxState::Selecting; foxPeerSelection = 0; }
+  else {
+    screenMode = ScreenMode::FoxFinding; foxState = FoxState::Selecting; foxPeerSelection = 0;
+    // Discovery cannot begin while participants remain on unrelated Wi-Fi
+    // channels. Enter the shared ESP-NOW channel before waiting for peers.
+    if (!localOnlyMode) {
+      foxForcedLocalOnly = true; foxPeerCount = 0; setLocalOnlyMode(true);
+    }
+    sendEspNowBeacon();
+  }
   renderDirty = true;
 }
 
