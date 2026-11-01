@@ -77,6 +77,31 @@ String apiUrl(const char *method) {
          "&v=1.16.1&c=cardputer&f=json";
 }
 
+// What ArduinoJson reads the socket through. Stream's own timed read spins without yielding,
+// and on a slow server that starves core 0's idle task until the watchdog restarts the device.
+struct YieldingReader {
+  WiFiClient &client;
+  int read() {
+    const uint32_t started = millis();
+    while (millis() - started < kTimeoutMs) {
+      const int value = client.read();
+      if (value >= 0) return value;
+      if (!client.connected()) return -1;
+      vTaskDelay(pdMS_TO_TICKS(2));
+    }
+    return -1;
+  }
+  size_t readBytes(char *buffer, size_t length) {
+    size_t count = 0;
+    while (count < length) {
+      const int value = read();
+      if (value < 0) break;
+      buffer[count++] = static_cast<char>(value);
+    }
+    return count;
+  }
+};
+
 // Fetches a Subsonic call with only the filtered fields kept in RAM. HTTP/1.0
 // keeps the server from chunking, so the JSON parser can read the socket directly.
 bool fetch(const String &url, JsonDocument &filter, JsonDocument &document) {
@@ -89,9 +114,9 @@ bool fetch(const String &url, JsonDocument &filter, JsonDocument &document) {
   http.begin(url);
   const int code = http.GET();
   if (code != HTTP_CODE_OK) { failureText = code < 0 ? "NO SERVER" : "SERVER ERROR"; http.end(); return false; }
-  http.getStream().setTimeout(kTimeoutMs / 1000);  // A busy server can pause longer than Stream's 1 s default.
   filter["subsonic-response"]["status"] = true;
-  const DeserializationError error = deserializeJson(document, http.getStream(), DeserializationOption::Filter(filter));
+  YieldingReader reader{http.getStream()};
+  const DeserializationError error = deserializeJson(document, reader, DeserializationOption::Filter(filter));
   http.end();
   if (error) { failureText = "BAD REPLY"; return false; }
   if (strcmp(document["subsonic-response"]["status"] | "", "ok") != 0) { failureText = "LOGIN REFUSED"; return false; }
