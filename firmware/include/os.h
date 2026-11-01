@@ -3,23 +3,31 @@
 #include <Arduino.h>
 
 // A small operating layer over the firmware's tasks, because RAM is the one thing they all
-// compete for. It doesn't touch allocations: replacing malloc with a wrapper that prefixes each
-// block crashed the real device at boot, because libc's own free bypasses the wrapper. What it does
-// is decide when heavy work may start, from the free heap as reported, and stop an app, not
-// the device, when one runs out.
+// compete for. Allocations are charged to the app that owns the task making them, through hooks that
+// never change a pointer, and an app over its budget gets a failed allocation. A secure
+// connection starts only when the free heap has room, and an app that runs out is stopped, not the device.
 namespace os {
 
-// Names for faults and the SYSTEM screen.
+// Who a task's allocations are charged to. Ui has no budget, and it alone may use the floor.
 enum class Owner : uint8_t { System, Ui, Chat, Music, Books, Count };
 enum class AppState : uint8_t { Stopped, Starting, Foreground, Background };
 
-// Heavy work starts only above these. Not measured on a device yet; SYSTEM's numbers are how to check.
-// Set too high, chat just waits; set too low, an allocation fails and is contained.
+// Sized from the emulator's figures, not yet from a device; the SYSTEM screen shows the real numbers.
+constexpr uint32_t kFloorBytes = 16 * 1024;
+constexpr uint32_t kChatBudget = 44 * 1024;
+constexpr uint32_t kMediaBudget = 72 * 1024;
+// TLS allocates outside the ledger, through mbedTLS's own calls, so the broker admits by free heap.
 constexpr uint32_t kSecureAdmitFree = 80 * 1024;
 constexpr uint32_t kSecureAdmitLargest = 20 * 1024;
-constexpr uint32_t kPlayerAdmitFree = 60 * 1024;
 
 void begin();
+void bindTask(Owner owner);
+uint32_t used(Owner owner);
+uint32_t peak(Owner owner);
+uint32_t budget(Owner owner);
+uint32_t uncountedBlocks();
+uint32_t refusedAllocations();
+void reconcile(Owner owner);
 void setMediaOwner(Owner owner);
 Owner mediaOwner();
 

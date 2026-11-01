@@ -23,9 +23,16 @@ What follows from those: one secure connection fits at rest but not beside a med
 
 ## What is enforced, and what isn't
 
-Nothing limits an individual app's allocations. An earlier version charged every `malloc` to its app through a linker `--wrap` with a prefix on each block. That boot-looped the real device: libc's own `free` reached the real heap directly, past the wrapper, with a prefixed pointer. So there are no per-app budgets, and the upload check refuses any `--wrap` of the allocator.
+Budgets: chat 44 K, each media app 72 K, and a 16 K floor no app can eat (the UI can). An app over budget gets a failed allocation, before the real call.
 
-What remains acts before heavy work starts, from the free heap as reported: a secure connection needs 80 KB free and a 20 KB block; the player waits if too little is free. The 16 KB floor for the screen and keyboard no longer exists as a limit. mbedTLS's allocator is left alone.
+Tracking is a fixed table of block to owner, 8 KB of static memory, filled by `--wrap` hooks on `malloc`, `calloc`, `realloc`, `free` and libc's `_free_r`. The hooks return exactly the pointer the real allocator gave and never touch the block. An earlier version prefixed each block and boot-looped the real device, because libc's own `free` reached the heap past the hook with a shifted pointer. Calls before the scheduler runs, in an interrupt or on an unbound task pass straight through.
+
+Error bounds, honestly:
+
+- A free past the hooks (ROM code) leaves a stale entry, overstating its owner until an allocation lands on that address again.
+- `reconcile` clears an owner's entries: a media app's when it stops, chat's every 5 minutes. Live blocks stop counting too, so just after a reconcile chat's figure is low, by at most its RAM (about 15 K).
+- A full table leaves new blocks uncounted but working; SYSTEM shows how many, and how many allocations were refused.
+- Anything calling `heap_caps_malloc` directly isn't seen: the Wi-Fi driver, lwIP's pools, M5GFX's buffers, and mbedTLS. TLS is held back by the broker instead, which needs 80 KB free and a 20 KB block.
 
 ## Containment
 

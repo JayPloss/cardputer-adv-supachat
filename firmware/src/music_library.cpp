@@ -223,7 +223,7 @@ bool runCardTracks(const Job &job) {
   File root = SD.open(job.text);
   if (!root || !root.isDirectory()) { failureText = "NOT ON CARD"; return false; }
   std::vector<Item> items;
-  items.reserve(100);
+  items.reserve(32);
   for (File entry = root.openNextFile(); entry && items.size() < kCardTrackLimit; entry = root.openNextFile()) {
     const String name = baseName(entry.name());
     if (!entry.isDirectory() && isMp3(name)) {
@@ -368,6 +368,7 @@ bool runTracks(const Job &job) {
 }
 
 void workerTask(void *) {
+  os::bindTask(os::Owner::Music);
   for (;;) {
     if (endRequested) { endRequested = false; taskHandle = nullptr; vTaskDelete(nullptr); }
     xSemaphoreTake(mutex, portMAX_DELAY);
@@ -451,7 +452,7 @@ void saveBookmark(const String &trackId, uint32_t positionMs) { enqueue({JobKind
 void deleteBookmark(const String &trackId) { enqueue({JobKind::DeleteBookmark, trackId, 0, Collection::Books}, false); }
 void setLiked(const String &trackId, bool liked) { enqueue({liked ? JobKind::Like : JobKind::Unlike, trackId, 0, Collection::Music}, false); }
 
-void forget() { wantedGeneration = wantedGeneration + 1; if (currentStatus == Status::Loading) currentStatus = Status::Idle; }
+void forget() { wantedGeneration = wantedGeneration + 1; if (currentStatus == Status::Loading || currentStatus == Status::Failed) currentStatus = Status::Idle; }
 
 Status status() { return currentStatus; }
 const char *failure() { return failureText; }

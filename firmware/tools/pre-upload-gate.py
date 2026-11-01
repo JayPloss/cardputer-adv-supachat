@@ -16,6 +16,8 @@ def run_device_contract_gate(source, target, env):
     runtime = os.path.abspath(os.path.join(repo, "..", "cardputer-emulator"))
     if os.path.isdir(runtime) and env["PIOENV"] != "power-lab":
         checks.append(["python3", os.path.join(runtime, "tools", "check.py")])
+        # The real binary in QEMU: the tier that sees ESP-IDF startup, the real heap and newlib.
+        checks.append(["bash", os.path.join(runtime, "qemu", "boot-check.sh"), env["PROJECT_DIR"]])
     for command in checks:
         completed = subprocess.run(command, cwd=repo, check=False)
         if completed.returncode:

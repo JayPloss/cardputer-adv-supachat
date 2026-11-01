@@ -93,6 +93,7 @@ constexpr uint32_t kSecureConnectTimeoutMs = 8000;
 constexpr uint32_t kSyncBackoffMaxMs = 300000;
 constexpr uint32_t kWifiRetryMaxMs = 300000;
 constexpr size_t kScanListLimit = 24;
+constexpr uint32_t kChatReconcileMs = 300000;
 constexpr int kSyncBatchLimit = 20;
 constexpr int kHistoryPageLimit = 20;
 constexpr uint32_t kTimeWaitMs = 12000;
@@ -105,7 +106,12 @@ constexpr char kVoiceClipPath[] = "/supachat-voice-last.pcm";
 constexpr uint32_t kWalkieMaxMs = 30000;
 constexpr uint32_t kPttReleaseDebounceMs = 500;
 constexpr uint32_t kEspNowBeaconMs = 30000;
+#ifdef SUPACHAT_NO_RADIO
+// QEMU has no radio, and WiFi.mode() never returns there. Everything else runs as on the device.
+constexpr bool kEspNowEnabled = false;
+#else
 constexpr bool kEspNowEnabled = true;
+#endif
 constexpr uint8_t kEspNowFallbackChannel = 1;
 constexpr uint32_t kFoxPlaceRescanMs = 30000;
 #if defined(SUPACHAT_DEVICE_EMMANUELLE) || defined(SUPACHAT_DEVICE_NAOMIE) || defined(SUPACHAT_DEVICE_ANDREW)
@@ -1771,9 +1777,15 @@ void synchronize() {
 }
 
 void networkTask(void *) {
+  os::bindTask(os::Owner::Chat);
+  uint32_t lastReconcileAt = millis();
   uint32_t nextWifiAttempt = 0, wifiRetryMs = 0, syncBackoffMs = 0;
   for (;;) {
     try {
+#ifdef SUPACHAT_NO_RADIO
+    if (!os::bootSettled()) os::setBoot(os::Boot::NoNetwork);
+    vTaskDelay(pdMS_TO_TICKS(1000)); continue;
+#endif
     if (foxScanRequested) { foxScanRequested = false; collectFoxPlacePrint(); continue; }
     if (chatShrunk && !mediaOwnsRadio()) {
       xSemaphoreTake(stateMutex, portMAX_DELAY);
@@ -1830,6 +1842,8 @@ void networkTask(void *) {
     os::setState(os::Owner::Chat, screenMode == ScreenMode::Chat ? os::AppState::Foreground : os::AppState::Background);
     if (voiceUploadPending && !localReplayActive) uploadVoiceClip();
     if (syncOverride) syncOverride = false;
+    // Blocks freed past the ledger's hooks (libc's own frees) would otherwise count against chat for good.
+    if (millis() - lastReconcileAt > kChatReconcileMs) { lastReconcileAt = millis(); os::reconcile(os::Owner::Chat); }
     vTaskDelay(pdMS_TO_TICKS(kSyncPollMs));
     // A network that won't reach the server (a captive portal, no internet) isn't hammered.
     if (networkStatus.startsWith("SYNC ") && !networkStatus.startsWith("SYNCED") || networkStatus.startsWith("ROOM ")) {
@@ -1849,9 +1863,13 @@ void networkTask(void *) {
 }
 
 void walkieTask(void *) {
+  os::bindTask(os::Owner::Chat);
   bool holdsLease = false;
   for (;;) {
     try {
+#ifdef SUPACHAT_NO_RADIO
+    vTaskDelay(pdMS_TO_TICKS(1000)); continue;
+#endif
     if (chargingModeActive) { vTaskDelay(pdMS_TO_TICKS(1000)); continue; }
     // The socket and its secure slot exist only while the walkie screen is on.
     if (mediaOwnsRadio() || screenMode != ScreenMode::Walkie) {
@@ -2329,7 +2347,9 @@ void drawSystem() {
   int y = 24;
   for (const os::Owner owner : {os::Owner::Ui, os::Owner::Chat, os::Owner::Music, os::Owner::Books}) {
     display.setTextColor(TFT_WHITE, TFT_BLACK); display.setCursor(6, y); display.print(os::name(owner));
-    display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(80, y); display.print(os::stateName(os::state(owner)));
+    display.setTextColor(TFT_YELLOW, TFT_BLACK); display.setCursor(66, y); display.print(os::used(owner) / 1024); display.print("K");
+    if (os::budget(owner)) { display.print(" / "); display.print(os::budget(owner) / 1024); display.print("K"); }
+    display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(180, y); display.print(os::stateName(os::state(owner)));
     y += 12;
   }
   display.setTextColor(TFT_WHITE, TFT_BLACK);
@@ -2338,6 +2358,10 @@ void drawSystem() {
   display.setCursor(6, y + 26);
   if (os::faultCount()) { display.setTextColor(TFT_RED, TFT_BLACK); display.print(String(os::lastFault()).substring(0, 38)); }
   else { display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.print(uiText("NO FAULTS", "AUCUNE ERREUR")); }
+  if (os::uncountedBlocks() || os::refusedAllocations()) {
+    display.setTextColor(TFT_YELLOW, TFT_BLACK); display.setCursor(6, y + 38);
+    display.print("UNCOUNTED "); display.print(os::uncountedBlocks()); display.print(" REFUSED "); display.print(os::refusedAllocations());
+  }
   display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 123); display.print(uiText("LEFT BACK", "GAUCHE RETOUR"));
 }
 
@@ -2836,6 +2860,7 @@ void serviceApps() {
   // And with nothing playing, the tasks too: their stacks are chat's room for a connection.
   if (front != os::mediaOwner() && !media::active() && !mediaStarting) {
     media::end(); library::end(); mediaTasksWanted = false; os::holdSecure(false);
+    os::reconcile(os::Owner::Music); os::reconcile(os::Owner::Books);
   } else if (mediaTasksWanted && !os::secureHeld()) {
     if (!library::begin() || !media::begin()) os::recordFault(os::mediaOwner(), "no RAM to start");
     mediaTasksWanted = false;
@@ -3129,6 +3154,7 @@ void handleKeyboard() {
 void setup() {
   Serial.begin(115200);
   sharedListsMutex = xSemaphoreCreateMutex();
+  os::bindTask(os::Owner::Ui);
   auto config = M5.config(); config.output_power = true;
   M5Cardputer.begin(config, true); M5Cardputer.Display.setRotation(1); M5Cardputer.Display.setTextWrap(false);
   loadConfiguration();
@@ -3149,17 +3175,24 @@ void setup() {
   // keyboard interrupt. Default ESP32-S3 SPI pins would disable all keys.
   SPI.begin(kSdSckPin, kSdMisoPin, kSdMosiPin, kSdCsPin);
   sdReady = SD.begin(kSdCsPin, SPI, 25000000); loadHistory();
+  Serial.println("setup: card done");
   keyboardReady = M5Cardputer.In_I2C.scanID(0x34, 400000);
+  Serial.println("setup: keyboard done");
+#ifndef SUPACHAT_NO_RADIO
   WiFi.mode(WIFI_STA); WiFi.setAutoReconnect(false); WiFi.persistent(false); WiFi.disconnect(false, false);
+#endif
+  Serial.println("setup: wifi done");
   if (kEspNowEnabled) initializeEspNow();
+  Serial.println("setup: esp-now done");
   xTaskCreatePinnedToCore(networkTask, "supachat-net", 16384, nullptr, 1, nullptr, 0);
   xTaskCreatePinnedToCore(walkieTask, "supachat-ws", 12288, nullptr, 1, nullptr, 1);
+  // Everything is up; the splash now waits for chat's first sync.
+  Serial.printf("SUPACHAT ready node=%s wifi_profiles=%u sd=%d keyboard=%d board=%d\n", kDeviceId,
+                wifiProfiles.size(), sdReady, keyboardReady, static_cast<int>(M5.getBoard()));
   showBootSplash();
   Serial.printf("BOOT %s at %u ms\n", os::bootText(os::boot()), millis());
   inputQuarantined = true;
   render();
-  Serial.printf("SUPACHAT ready node=%s wifi_profiles=%u sd=%d keyboard=%d board=%d\n", kDeviceId,
-                wifiProfiles.size(), sdReady, keyboardReady, static_cast<int>(M5.getBoard()));
 }
 
 static void loopBody();
