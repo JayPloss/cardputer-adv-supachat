@@ -203,7 +203,7 @@ bool runAlbums(const Job &job) {
   const bool hasCardItems = !items.empty();
   if (!configured() || WiFi.status() != WL_CONNECTED) {
     if (hasCardItems) { publish(std::move(items)); return true; }
-    failureText = configured() ? "NO WIFI" : (job.collection == Collection::Books ? "NO BOOKS ON CARD" : "NO MUSIC ON CARD");
+    failureText = job.collection == Collection::Books ? "NO BOOKS ON CARD OR SERVER" : "NO MUSIC ON CARD OR SERVER";
     return false;
   }
   lookUpFolders();

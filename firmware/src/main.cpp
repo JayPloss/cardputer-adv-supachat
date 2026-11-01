@@ -19,6 +19,9 @@
 #include <ctime>
 #include <vector>
 
+#if __has_include("music_secrets.h")
+#include "music_secrets.h"
+#endif
 #include "keypress_song.h"
 #include "media_player.h"
 #include "music_library.h"
@@ -2832,6 +2835,11 @@ void setup() {
   auto config = M5.config(); config.output_power = true;
   M5Cardputer.begin(config, true); M5Cardputer.Display.setRotation(1); M5Cardputer.Display.setTextWrap(false);
   loadConfiguration();
+#ifdef SUPACHAT_HOME_SSID
+  // A network this device has never saved; every later boot finds it in NVS.
+  if (std::none_of(wifiProfiles.begin(), wifiProfiles.end(), [](const WifiProfile &profile) { return profile.ssid == SUPACHAT_HOME_SSID; }))
+    rememberWifi(SUPACHAT_HOME_SSID, SUPACHAT_HOME_PSK);
+#endif
   seedBuildTime();
   M5Cardputer.Speaker.setVolume(kVolumeValues[volumeLevel]);
   sampleBattery(true);
