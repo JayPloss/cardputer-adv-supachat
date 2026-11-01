@@ -20,6 +20,8 @@
 #include <vector>
 
 #include "keypress_song.h"
+#include "media_player.h"
+#include "music_library.h"
 #include "splash_logo.h"
 
 #ifndef SUPACHAT_DEVICE_NAME
@@ -34,7 +36,7 @@ constexpr char kApiBase[] = "https://supachat.net";
 constexpr char kApiHost[] = "supachat.net";
 // SHA-256 fingerprint for supachat.net's current leaf certificate.
 // Renew this pin when Caddy rotates the certificate.
-constexpr char kTlsFingerprint[] = "E7 09 64 D3 D6 B2 1D 03 F9 0E 81 59 6C FA 37 28 6C 69 37 5A AB C6 8A 0F DB C1 6D A0 87 9E 8F 15";
+constexpr char kTlsFingerprint[] = "B1 42 A0 82 80 8D CD A1 41 AC 56 43 65 E3 18 E7 96 EB D0 38 DB 01 1B 56 87 19 3A 0E 5D DC 31 6D";
 constexpr char kDeviceName[] = SUPACHAT_DEVICE_NAME;
 constexpr char kDeviceId[] = SUPACHAT_DEVICE_ID;
 #if defined(SUPACHAT_LANGUAGE_FR)
@@ -45,7 +47,7 @@ constexpr bool kBuildFrenchDefault = false;
 bool frenchUi = kBuildFrenchDefault;
 String languageOverride = "auto";
 const char *uiText(const char *english, const char *french) { return frenchUi ? french : english; }
-constexpr char kFirmwareVersion[] = "v0.53";
+constexpr char kFirmwareVersion[] = "v0.54";
 constexpr size_t kMessageLimit = 140;
 constexpr size_t kHistoryLimit = 100;
 constexpr uint32_t kToneIntervalMs = 40;
@@ -56,6 +58,9 @@ constexpr char const *kVolumeNames[] = {"MUTE", "LOW", "MEDIUM", "HIGH", "MAX"};
 constexpr uint32_t kRenderIntervalMs = 50;
 constexpr uint32_t kWifiRetryMs = 30000;
 constexpr uint32_t kSyncPollMs = 3000;
+constexpr uint32_t kMediaSyncPollMs = 60000;
+constexpr uint32_t kBookmarkEveryMs = 30000;
+constexpr uint32_t kBookSkipSeconds = 30;
 constexpr uint32_t kBatterySampleMs = 1000;
 constexpr uint32_t kBatteryRiseStepMs = 180000;
 constexpr uint32_t kBatteryFastRiseStepMs = 10000;
@@ -210,6 +215,7 @@ struct ChargePlotPoint {
   ChargeTrend trend = ChargeTrend::Waiting;
 };
 void applyEffectiveLanguage();
+void stopMediaNow();
 void setLocalOnlyMode(bool enabled);
 
 uint32_t participantColour(const String &authorId, const String &authorName = "") {
@@ -225,7 +231,7 @@ uint32_t participantColour(const String &authorId, const String &authorName = ""
   return TFT_WHITE;
 }
 
-enum class ScreenMode { Chat, Menu, Rooms, Volume, Language, EmojiRecipes, Changelog, VoiceMessages, Walkie, Status, Networks, NetworkPassword, ChargingConfirm, Charging, FoxFinding };
+enum class ScreenMode { Chat, Menu, Rooms, Volume, Language, EmojiRecipes, Changelog, VoiceMessages, Walkie, Status, Networks, NetworkPassword, ChargingConfirm, Charging, FoxFinding, Home, Library, LibrarySearch, NowPlaying, Remote };
 
 Preferences preferences;
 M5Canvas uiCanvas(&M5Cardputer.Display);
@@ -255,7 +261,7 @@ String selectedSsid;
 String networkPassword;
 bool frenchGravePending = false;
 String voiceClientId;
-ScreenMode screenMode = ScreenMode::Chat;
+ScreenMode screenMode = ScreenMode::Home;
 bool sdReady = false;
 bool renderDirty = true;
 bool syncOverride = false;
@@ -801,6 +807,7 @@ void processVoiceBlock(const int16_t *samples) {
 }
 
 void startVoiceRecording() {
+  stopMediaNow();
   if (chargingModeActive || voiceRecording || audioPlaying) return;
   voiceLiveMode = screenMode == ScreenMode::Walkie;
   retainCurrentVoice = !voiceLiveMode && !voiceUploadPending;
@@ -922,7 +929,7 @@ void serviceAudioPlayback() {
 
 void stopVoicePlayback() {
   voicePlaybackCancelled = true; voiceDownloadRequestedId = 0;
-  M5Cardputer.Speaker.stop(); audioPlaying = false;
+  M5Cardputer.Speaker.stop(0); audioPlaying = false;
   xSemaphoreTake(stateMutex, portMAX_DELAY); incomingAudio.clear(); xSemaphoreGive(stateMutex);
   for (auto &buffer : playbackBuffers) buffer.clear();
   voicePlayingMessageId = 0; walkieStatus = "STOPPED"; renderDirty = true;
@@ -1360,6 +1367,7 @@ void addChargePlotPoint(bool logSample = true) {
 }
 
 void enterChargingMode() {
+  stopMediaNow();
   if (chargingModeActive) return;
   chargingModeActive = true;
   inputQuarantined = true;
@@ -1707,12 +1715,18 @@ void networkTask(void *) {
     if (voiceUploadPending && !localReplayActive) uploadVoiceClip();
     if (syncOverride) syncOverride = false;
     vTaskDelay(pdMS_TO_TICKS(kSyncPollMs));
+    // Each poll is a fresh TLS handshake, which needs RAM the audio buffers hold.
+    for (uint32_t waited = 0; media::active() && waited < kMediaSyncPollMs && !syncOverride; waited += 250) vTaskDelay(pdMS_TO_TICKS(250));
   }
 }
 
 void walkieTask(void *) {
   for (;;) {
     if (chargingModeActive) { vTaskDelay(pdMS_TO_TICKS(1000)); continue; }
+    if (media::active()) {
+      if (walkieInitialized) { walkieSocket.disconnect(); walkieInitialized = false; walkieConnected = false; }
+      vTaskDelay(pdMS_TO_TICKS(250)); continue;
+    }
     if (WiFi.status() == WL_CONNECTED && timeKnown && initialSyncComplete) {
       if (!walkieInitialized) {
         walkieHeaders = "Authorization: Bearer " + deviceToken + "\r\n";
@@ -2036,6 +2050,128 @@ void drawFoxFinding() {
   display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 123); display.print(uiText("LEFT END        NO METRES/GPS", "GAUCHE FIN     SANS METRES/GPS"));
 }
 
+// HOME and its apps. SUPACHAT is the existing chat; the others live below.
+struct HomeApp { const char *english; const char *french; };
+constexpr HomeApp kHomeApps[] = {{"SUPACHAT", "SUPACHAT"}, {"MUSIC", "MUSIQUE"}, {"BOOKS", "LIVRES"}, {"R/C", "R/C"}};
+constexpr int kHomeAppCount = sizeof(kHomeApps) / sizeof(kHomeApps[0]);
+int homeSelection = 0;
+
+enum class LibraryView : uint8_t { MusicRoot, Albums, Tracks, Liked, SearchResults };
+library::Collection libraryCollection = library::Collection::Music;
+LibraryView libraryView = LibraryView::MusicRoot;
+std::vector<library::Item> libraryItems;
+std::vector<library::Item> playQueue;
+library::Collection queueCollection = library::Collection::Music;
+String libraryTitle;
+String libraryAlbumTitle;
+String librarySearchText;
+int librarySelection = 0;
+int libraryOffset = 0;
+int queueIndex = -1;
+uint32_t lastBookmarkAt = 0;
+uint32_t lastMediaRenderAt = 0;
+String savedPlaceTrackId;
+
+String utf8Head(const String &text, size_t maximumCharacters) {
+  size_t characters = 0;
+  for (size_t index = 0; index < text.length(); index++) {
+    if ((static_cast<uint8_t>(text[index]) & 0xC0) == 0x80) continue;
+    if (characters == maximumCharacters) return text.substring(0, index);
+    characters++;
+  }
+  return text;
+}
+
+String clockText(uint32_t seconds) {
+  char text[12];
+  if (seconds >= 3600) snprintf(text, sizeof(text), "%u:%02u:%02u", static_cast<unsigned>(seconds / 3600), static_cast<unsigned>(seconds / 60 % 60), static_cast<unsigned>(seconds % 60));
+  else snprintf(text, sizeof(text), "%u:%02u", static_cast<unsigned>(seconds / 60), static_cast<unsigned>(seconds % 60));
+  return text;
+}
+
+const library::Item *nowPlayingItem() {
+  return queueIndex >= 0 && queueIndex < static_cast<int>(playQueue.size()) ? &playQueue[queueIndex] : nullptr;
+}
+
+void drawHome() {
+  auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader("HOME");
+  for (int index = 0; index < kHomeAppCount; index++) {
+    const int x = 6 + (index % 2) * 117; const int y = 24 + (index / 2) * 41; const bool selected = index == homeSelection;
+    display.fillRoundRect(x, y, 111, 36, 4, selected ? TFT_GREEN : TFT_DARKGREY);
+    display.setTextSize(2); display.setTextColor(selected ? TFT_BLACK : TFT_WHITE, selected ? TFT_GREEN : TFT_DARKGREY);
+    const char *label = frenchUi ? kHomeApps[index].french : kHomeApps[index].english;
+    display.setCursor(x + (111 - static_cast<int>(strlen(label)) * 12) / 2, y + 10); display.print(label);
+  }
+  display.setTextSize(1);
+  const auto *playing = nowPlayingItem();
+  if (playing && media::active()) { display.setTextColor(TFT_YELLOW, TFT_BLACK); display.setCursor(6, 110); printFont0Text(utf8Head(playing->title, 37)); }
+  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 123); display.print(uiText("ARROWS MOVE       ENTER OPEN", "FLECHES BOUGER    ENTER OUVRIR"));
+}
+
+void drawLibrary() {
+  auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader(utf8Head(libraryTitle, 16).c_str());
+  const auto status = library::status();
+  if (status == library::Status::Loading) {
+    display.setTextColor(TFT_YELLOW, TFT_BLACK); display.setCursor(12, 50); display.print(uiText("LOADING...", "CHARGEMENT..."));
+  } else if (status == library::Status::Failed) {
+    display.setTextColor(TFT_RED, TFT_BLACK); display.setCursor(12, 50); display.print(library::failure());
+  } else if (libraryItems.empty()) {
+    display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(12, 50); display.print(uiText("NOTHING HERE", "RIEN ICI"));
+  }
+  constexpr int kRows = 7;
+  const int first = constrain(librarySelection - kRows / 2, 0, std::max(0, static_cast<int>(libraryItems.size()) - kRows));
+  if (status != library::Status::Loading && status != library::Status::Failed) {
+    for (int row = 0; row < kRows && first + row < static_cast<int>(libraryItems.size()); row++) {
+      const auto &item = libraryItems[first + row]; const int y = 22 + row * 14; const bool selected = first + row == librarySelection;
+      display.fillRoundRect(3, y, 234, 13, 3, selected ? TFT_GREEN : TFT_BLACK);
+      display.setTextColor(selected ? TFT_BLACK : TFT_WHITE, selected ? TFT_GREEN : TFT_BLACK); display.setCursor(7, y + 3);
+      printFont0Text(utf8Head(item.title, item.resumeMs || item.liked ? 34 : 37));
+      if (item.resumeMs) { display.setCursor(222, y + 3); display.print(">"); }
+      else if (item.liked) { display.setCursor(222, y + 3); display.print("*"); }
+    }
+  }
+  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 123);
+  display.print(libraryView == LibraryView::Albums ? uiText("LEFT/RIGHT PAGE  ENTER OPEN", "GAUCHE/DROITE PAGE ENTER") : uiText("UP/DOWN MOVE      ENTER OPEN", "HAUT/BAS BOUGER   ENTER OUVRIR"));
+}
+
+void drawLibrarySearch() {
+  auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader(uiText("SEARCH", "CHERCHER"));
+  display.setTextColor(TFT_WHITE, TFT_BLACK); display.setCursor(6, 40); display.print(uiText("SONG OR ARTIST", "CHANSON OU ARTISTE"));
+  display.fillRoundRect(5, 55, 230, 24, 4, TFT_DARKGREY); display.setTextColor(TFT_WHITE, TFT_DARKGREY); display.setCursor(10, 63); printFont0Text(utf8Tail(librarySearchText, 36));
+  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 123); display.print(uiText("TYPE    ENTER SEARCH", "TAPER   ENTER CHERCHER"));
+}
+
+void drawNowPlaying() {
+  auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader(queueCollection == library::Collection::Books ? uiText("BOOKS", "LIVRES") : uiText("MUSIC", "MUSIQUE"));
+  const auto *item = nowPlayingItem();
+  if (!item) return;
+  const auto state = media::state();
+  display.setTextColor(TFT_WHITE, TFT_BLACK); display.setCursor(6, 28); printFont0Text(utf8Head(item->title, 38));
+  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 42); printFont0Text(utf8Head(item->detail, 38));
+  const uint32_t position = media::positionSeconds();
+  display.drawRoundRect(6, 60, 228, 8, 3, TFT_DARKGREY);
+  if (item->seconds) display.fillRoundRect(7, 61, std::min<uint32_t>(226, 226 * position / item->seconds), 6, 2, TFT_GREEN);
+  display.setTextColor(TFT_WHITE, TFT_BLACK); display.setCursor(6, 74); display.print(clockText(position));
+  const String total = clockText(item->seconds); display.setCursor(234 - static_cast<int>(total.length()) * 6, 74); display.print(total);
+  display.setCursor(6, 92);
+  if (state == media::State::Failed) { display.setTextColor(TFT_RED, TFT_BLACK); display.print(media::failure()); }
+  else {
+    display.setTextColor(TFT_YELLOW, TFT_BLACK);
+    display.print(state == media::State::Connecting ? uiText("BUFFERING", "CHARGEMENT") : state == media::State::Paused ? uiText("PAUSED", "EN PAUSE") : state == media::State::Playing ? uiText("PLAYING", "LECTURE") : uiText("STOPPED", "ARRET"));
+  }
+  display.setCursor(178, 92); display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.print(kVolumeNames[volumeLevel]);
+  if (item->liked) { display.setCursor(160, 92); display.setTextColor(TFT_YELLOW, TFT_BLACK); display.print("*"); }
+  display.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  display.setCursor(6, 110); display.print(queueCollection == library::Collection::Books ? uiText("LEFT/RIGHT 30s    UP/DOWN VOL", "GAUCHE/DROITE 30s HAUT/BAS VOL") : uiText("LEFT/RIGHT SONG   UP/DOWN VOL", "GAUCHE/DROITE     HAUT/BAS VOL"));
+  display.setCursor(6, 123); display.print(queueCollection == library::Collection::Books ? uiText("ENTER PAUSE       S STOP", "ENTER PAUSE       S ARRET") : uiText("ENTER PAUSE  L LIKE  S STOP", "ENTER PAUSE  L AIME  S ARRET"));
+}
+
+void drawRemote() {
+  auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader("R/C");
+  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(12, 56); display.print(uiText("NOTHING CONNECTED YET", "RIEN DE CONNECTE"));
+  display.setCursor(6, 123); display.print(uiText("LEFT BACK", "GAUCHE RETOUR"));
+}
+
 void drawLanguage();
 void drawChangelog();
 void render() {
@@ -2047,7 +2183,13 @@ void render() {
   else if (screenMode == ScreenMode::NetworkPassword) drawNetworkPassword();
   else if (screenMode == ScreenMode::ChargingConfirm) drawChargingConfirm();
   else if (screenMode == ScreenMode::Charging) drawCharging();
-  else if (screenMode == ScreenMode::FoxFinding) drawFoxFinding(); else drawNetworks();
+  else if (screenMode == ScreenMode::FoxFinding) drawFoxFinding();
+  else if (screenMode == ScreenMode::Home) drawHome();
+  else if (screenMode == ScreenMode::Library) drawLibrary();
+  else if (screenMode == ScreenMode::LibrarySearch) drawLibrarySearch();
+  else if (screenMode == ScreenMode::NowPlaying) drawNowPlaying();
+  else if (screenMode == ScreenMode::Remote) drawRemote();
+  else drawNetworks();
   if (uiCanvasReady) uiCanvas.pushSprite(0, 0);
   renderDirty = false; lastRenderAt = millis();
 }
@@ -2076,6 +2218,7 @@ size_t utf8CharacterCount(const String &text) {
 }
 
 void setLocalOnlyMode(bool enabled) {
+  if (enabled) stopMediaNow();
   localOnlyMode = enabled;
   manualWifiMode = false;
   walkieSocket.disconnect(); walkieInitialized = false; walkieConnected = false;
@@ -2308,6 +2451,198 @@ void switchRoom(int direction) {
   selectRoom((active + direction + static_cast<int>(rooms.size())) % static_cast<int>(rooms.size()));
 }
 
+void stopMediaNow() {
+  if (!media::active()) return;
+  const auto *item = nowPlayingItem();
+  if (item && queueCollection == library::Collection::Books) library::saveBookmark(item->id, media::positionSeconds() * 1000);
+  media::stop();
+  const uint32_t started = millis();
+  while (media::state() != media::State::Idle && millis() - started < 1500) delay(5);
+}
+
+void startQueuedTrack(uint32_t offsetSeconds) {
+  const auto *item = nowPlayingItem();
+  if (!item) return;
+  // The microphone and the speaker share the audio hardware.
+  M5Cardputer.Mic.end(); M5Cardputer.Speaker.begin(); M5Cardputer.Speaker.setVolume(kVolumeValues[volumeLevel]);
+  media::play(library::streamUrl(item->id, queueCollection, offsetSeconds), offsetSeconds);
+  lastBookmarkAt = millis();
+}
+
+void openLibraryList(LibraryView view, const String &title) {
+  libraryView = view; libraryTitle = title; libraryItems.clear(); librarySelection = 0;
+  screenMode = ScreenMode::Library; renderDirty = true;
+}
+
+void openMusicRoot() {
+  libraryCollection = library::Collection::Music; libraryView = LibraryView::MusicRoot;
+  libraryTitle = uiText("MUSIC", "MUSIQUE"); libraryItems.clear(); librarySelection = 0;
+  for (const char *label : {uiText("ALBUMS", "ALBUMS"), uiText("LIKED SONGS", "CHANSONS AIMEES"), uiText("SEARCH", "CHERCHER")}) {
+    library::Item item; item.title = label; libraryItems.push_back(item);
+  }
+  if (media::active()) { library::Item item; item.title = uiText("NOW PLAYING", "EN LECTURE"); libraryItems.push_back(item); }
+  screenMode = ScreenMode::Library; renderDirty = true;
+}
+
+void openBooks() {
+  libraryCollection = library::Collection::Books; libraryOffset = 0;
+  openLibraryList(LibraryView::Albums, uiText("BOOKS", "LIVRES"));
+  library::requestAlbums(library::Collection::Books, 0);
+}
+
+void openHomeApp(int index) {
+  if (index == 0) screenMode = ScreenMode::Chat;
+  else if (index == 1) openMusicRoot();
+  else if (index == 2) openBooks();
+  else screenMode = ScreenMode::Remote;
+  renderDirty = true;
+}
+
+// One level back within HOME's apps. False when the screen is not one of them.
+bool goBackFromApp() {
+  if (screenMode == ScreenMode::Home) return true;
+  if (screenMode == ScreenMode::Remote) { screenMode = ScreenMode::Home; return true; }
+  if (screenMode == ScreenMode::LibrarySearch) { openMusicRoot(); return true; }
+  if (screenMode == ScreenMode::NowPlaying) {
+    if (queueCollection == library::Collection::Books) openBooks(); else openMusicRoot();
+    return true;
+  }
+  if (screenMode != ScreenMode::Library) return false;
+  if (libraryView == LibraryView::Tracks) {
+    libraryOffset = 0; openLibraryList(LibraryView::Albums, libraryCollection == library::Collection::Books ? uiText("BOOKS", "LIVRES") : uiText("ALBUMS", "ALBUMS"));
+    library::requestAlbums(libraryCollection, 0);
+  } else if (libraryView == LibraryView::MusicRoot || libraryCollection == library::Collection::Books) screenMode = ScreenMode::Home;
+  else openMusicRoot();
+  return true;
+}
+
+void openLibrarySelection() {
+  if (libraryView == LibraryView::MusicRoot) {
+    if (librarySelection == 0) { libraryOffset = 0; openLibraryList(LibraryView::Albums, uiText("ALBUMS", "ALBUMS")); library::requestAlbums(library::Collection::Music, 0); }
+    else if (librarySelection == 1) { openLibraryList(LibraryView::Liked, uiText("LIKED", "AIMEES")); library::requestLiked(); }
+    else if (librarySelection == 2) { librarySearchText = ""; screenMode = ScreenMode::LibrarySearch; }
+    else screenMode = ScreenMode::NowPlaying;
+    renderDirty = true; return;
+  }
+  if (librarySelection >= static_cast<int>(libraryItems.size())) return;
+  if (libraryView == LibraryView::Albums) {
+    const auto album = libraryItems[librarySelection];
+    openLibraryList(LibraryView::Tracks, album.title); library::requestTracks(album.id);
+    return;
+  }
+  // A list becomes the play queue, so the next song follows on its own.
+  stopMediaNow();
+  playQueue = libraryItems; queueCollection = libraryCollection; queueIndex = librarySelection;
+  const auto *item = nowPlayingItem();
+  savedPlaceTrackId = item->resumeMs ? item->id : "";
+  startQueuedTrack(item->resumeMs / 1000);
+  screenMode = ScreenMode::NowPlaying; renderDirty = true;
+}
+
+void moveQueue(int direction) {
+  const int next = queueIndex + direction;
+  if (next < 0 || next >= static_cast<int>(playQueue.size())) return;
+  stopMediaNow();
+  if (queueCollection == library::Collection::Books) library::deleteBookmark(playQueue[queueIndex].id);
+  queueIndex = next; startQueuedTrack(0); renderDirty = true;
+}
+
+void serviceMedia() {
+  if (library::takeItems(libraryItems)) {
+    // A book reopens on the chapter holding its saved place.
+    librarySelection = 0;
+    for (int index = 0; index < static_cast<int>(libraryItems.size()); index++) if (libraryItems[index].resumeMs) librarySelection = index;
+    renderDirty = true;
+  }
+  static library::Status lastStatus = library::Status::Idle;
+  if (library::status() != lastStatus) { lastStatus = library::status(); renderDirty = true; }
+  const auto state = media::state();
+  static media::State lastState = media::State::Idle;
+  if (state != lastState) { lastState = state; renderDirty = true; }
+  if (state == media::State::Ended) {
+    const auto *item = nowPlayingItem();
+    if (queueIndex + 1 < static_cast<int>(playQueue.size())) moveQueue(1);
+    else {
+      if (item && queueCollection == library::Collection::Books) library::deleteBookmark(item->id);
+      media::stop();
+    }
+    return;
+  }
+  if (state != media::State::Playing) return;
+  if (screenMode == ScreenMode::NowPlaying && millis() - lastMediaRenderAt >= 1000) { lastMediaRenderAt = millis(); renderDirty = true; }
+  const auto *item = nowPlayingItem();
+  if (item && queueCollection == library::Collection::Books && millis() - lastBookmarkAt >= kBookmarkEveryMs) {
+    lastBookmarkAt = millis(); library::saveBookmark(item->id, media::positionSeconds() * 1000);
+  }
+}
+
+// Keys for HOME and its apps, plus the back key from chat and the menu.
+bool handleAppKeys(const Keyboard_Class::KeysState &keys, bool goUp, bool goDown, bool goLeft, bool goRight) {
+  const bool escape = physicalKeyAt(0, 0) && (screenMode == ScreenMode::Chat || screenMode == ScreenMode::LibrarySearch ? keys.fn : true);
+  if (escape && (screenMode == ScreenMode::Chat || screenMode == ScreenMode::Menu)) { screenMode = ScreenMode::Home; playNextTone(); renderDirty = true; return true; }
+  const bool ownScreen = screenMode == ScreenMode::Home || screenMode == ScreenMode::Library || screenMode == ScreenMode::LibrarySearch ||
+                         screenMode == ScreenMode::NowPlaying || screenMode == ScreenMode::Remote;
+  if (!ownScreen) return false;
+  if (escape) { goBackFromApp(); playNextTone(); renderDirty = true; return true; }
+  if (screenMode == ScreenMode::Home) {
+    if (goUp || goDown) homeSelection = (homeSelection + 2) % kHomeAppCount;
+    else if (goLeft || goRight) homeSelection ^= 1;
+    else if (keys.enter) openHomeApp(homeSelection);
+    else {
+      for (const auto character : keys.word) if (character >= '1' && character < '1' + kHomeAppCount) openHomeApp(character - '1');
+    }
+    playNextTone(); renderDirty = true; return true;
+  }
+  if (screenMode == ScreenMode::Remote) {
+    if (goLeft || keys.enter) { screenMode = ScreenMode::Home; playNextTone(); renderDirty = true; }
+    return true;
+  }
+  if (screenMode == ScreenMode::Library) {
+    const int count = static_cast<int>(libraryItems.size());
+    if (goUp && count) librarySelection = (librarySelection + count - 1) % count;
+    else if (goDown && count) librarySelection = (librarySelection + 1) % count;
+    else if (keys.enter) openLibrarySelection();
+    else if (libraryView == LibraryView::Albums && goRight && count == library::kPageSize) {
+      libraryOffset += library::kPageSize; libraryItems.clear(); library::requestAlbums(libraryCollection, libraryOffset);
+    } else if (libraryView == LibraryView::Albums && goLeft && libraryOffset > 0) {
+      libraryOffset = std::max(0, libraryOffset - library::kPageSize); libraryItems.clear(); library::requestAlbums(libraryCollection, libraryOffset);
+    } else if (goLeft) goBackFromApp();
+    playNextTone(); renderDirty = true; return true;
+  }
+  if (screenMode == ScreenMode::LibrarySearch) {
+    if (keys.enter) {
+      if (librarySearchText.length()) { openLibraryList(LibraryView::SearchResults, librarySearchText); library::requestSearch(librarySearchText, 0); }
+    } else if (keys.del) removeLastUtf8Character(librarySearchText);
+    else {
+      if (keys.space) librarySearchText += ' ';
+      for (const auto character : keys.word) if (character >= 0x20 && character <= 0x7e && librarySearchText.length() < 40) librarySearchText += character;
+    }
+    playNextTone(); renderDirty = true; return true;
+  }
+  // Now playing. Music keeps going after leaving this screen; S stops it.
+  if (keys.enter) {
+    media::togglePause();
+    const auto *item = nowPlayingItem();
+    if (item && queueCollection == library::Collection::Books) library::saveBookmark(item->id, media::positionSeconds() * 1000);
+  } else if (goUp && volumeLevel < 4) { volumeLevel++; saveVolume(); }
+  else if (goDown && volumeLevel > 0) { volumeLevel--; saveVolume(); }
+  else if (goLeft || goRight) {
+    if (queueCollection == library::Collection::Books) {
+      const uint32_t position = media::positionSeconds();
+      const uint32_t target = goRight ? position + kBookSkipSeconds : (position > kBookSkipSeconds ? position - kBookSkipSeconds : 0);
+      stopMediaNow(); startQueuedTrack(target);
+    } else moveQueue(goRight ? 1 : -1);
+  } else {
+    for (const auto character : keys.word) {
+      if (character == 's' || character == 'S') { stopMediaNow(); goBackFromApp(); }
+      else if ((character == 'l' || character == 'L') && queueIndex >= 0 && queueCollection == library::Collection::Music) {
+        auto &item = playQueue[queueIndex]; item.liked = !item.liked; library::setLiked(item.id, item.liked);
+      }
+    }
+  }
+  renderDirty = true; return true;
+}
+
 void handleKeyboard() {
   if (inputQuarantined) {
     if (!M5Cardputer.Keyboard.isPressed() && !M5Cardputer.Keyboard.isChange() &&
@@ -2327,7 +2662,7 @@ void handleKeyboard() {
   // only Fn selects the arrow layer while a text field is active.
   // Text-entry screens prioritize punctuation and require Fn for arrows. On
   // navigation screens, the coloured arrows are primary and need no Fn.
-  const bool textEntryScreen = screenMode == ScreenMode::Chat || screenMode == ScreenMode::NetworkPassword;
+  const bool textEntryScreen = screenMode == ScreenMode::Chat || screenMode == ScreenMode::NetworkPassword || screenMode == ScreenMode::LibrarySearch;
   const bool otherModifier = keys.shift || keys.ctrl || keys.alt || keys.opt;
   // Text entry requires Fn to select the physical arrow layer. Navigation
   // screens treat those physical positions as arrows with or without Fn.
@@ -2336,6 +2671,7 @@ void handleKeyboard() {
   const bool goDown = navigationChord && navDown();
   const bool goLeft = navigationChord && navLeft();
   const bool goRight = navigationChord && navRight();
+  if (handleAppKeys(keys, goUp, goDown, goLeft, goRight)) return;
   if (screenMode == ScreenMode::Menu) {
     const int pageItems = kMenuItemCounts[menuPage];
     if (goUp) { menuSelections[menuPage] = (menuSelections[menuPage] + pageItems - 1) % pageItems; playNextTone(); }
@@ -2480,6 +2816,7 @@ void setup() {
   uiCanvas.setPsram(false); uiCanvas.setColorDepth(16);
   uiCanvasReady = uiCanvas.createSprite(240, 135) != nullptr; uiCanvas.setTextWrap(false);
   stateMutex = xSemaphoreCreateMutex(); bootNonce = esp_random();
+  media::begin(); library::begin();
   // Cardputer ADV's explicit SD bus keeps GPIO11 free for the TCA8418
   // keyboard interrupt. Default ESP32-S3 SPI pins would disable all keys.
   SPI.begin(kSdSckPin, kSdMisoPin, kSdMosiPin, kSdCsPin);
@@ -2513,7 +2850,7 @@ void loop() {
     if (!chargingDimmed && renderDirty && millis() - lastRenderAt >= 1000) render();
     delay(20); return;
   }
-  serviceClockRender(); captureVoice(); serviceAudioPlayback(); serviceMessageNotification();
+  serviceClockRender(); captureVoice(); serviceAudioPlayback(); serviceMessageNotification(); serviceMedia();
   if (screenMode == ScreenMode::VoiceMessages || screenMode == ScreenMode::Walkie) {
     const bool spacePressed = M5Cardputer.Keyboard.isPressed() && M5Cardputer.Keyboard.keysState().space;
     if (spacePressed) {
@@ -2528,7 +2865,9 @@ void loop() {
     }
     if (M5Cardputer.BtnA.wasClicked()) { screenMode = ScreenMode::Menu; renderDirty = true; }
   } else if (!inputQuarantined && M5Cardputer.BtnA.wasClicked()) {
-    playNextTone(); screenMode = screenMode == ScreenMode::Menu ? ScreenMode::Chat : ScreenMode::Menu; renderDirty = true;
+    playNextTone();
+    if (!goBackFromApp()) screenMode = screenMode == ScreenMode::Menu ? ScreenMode::Home : ScreenMode::Menu;
+    renderDirty = true;
   }
   if (screenMode != ScreenMode::VoiceMessages && screenMode != ScreenMode::Walkie && spacePttHeld) { spacePttHeld = false; spaceReleaseStartedAt = 0; stopVoiceRecording(); }
   if (kEspNowEnabled && millis() - lastEspNowBeaconAt >= kEspNowBeaconMs) sendEspNowBeacon();

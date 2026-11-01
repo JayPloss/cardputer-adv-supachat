@@ -41,6 +41,16 @@ architecture, failure behavior, and staged delivery plan are in
 issues and their acceptance criteria are tracked in
 [`docs/firmware-fixes-backlog.md`](docs/firmware-fixes-backlog.md).
 
+## HOME screen and apps
+
+The device boots through the SupaChat splash to a HOME screen with four apps: SUPACHAT, MUSIC, BOOKS and R/C. Arrows and Enter (or keys 1-4) open one. The rear button goes back one level; the top-left key does too (Fn + that key while typing).
+
+MUSIC and BOOKS stream from Navidrome on the home LAN over the Subsonic API: plain HTTP, MP3 only, decoded with libhelix on a dedicated task (`firmware/src/media_player.cpp`, `firmware/src/music_library.cpp`). The Cardputer ADV has no PSRAM, so all audio buffers live in internal RAM and are released when playback stops. While media plays, the walkie socket closes and chat polls once a minute. Starting a walkie recording, charging mode or ESP-NOW local mode stops playback first.
+
+BOOKS is the Navidrome library named `Books`. Its place is saved on the server as a Subsonic bookmark every 30 seconds and on pause, and a book reopens on the chapter holding its bookmark.
+
+Server address and login come from `firmware/include/music_secrets.h` (gitignored; see the `.example.h`). Without it, both apps show NOT SET UP and everything else works.
+
 ## Charging mode
 
 SupaChat `v0.49` includes a dedicated low-activity charging mode inside the normal

@@ -1,0 +1,264 @@
+#include "music_library.h"
+
+#include <ArduinoJson.h>
+#include <HTTPClient.h>
+#include <WiFi.h>
+#include <esp_random.h>
+#include <mbedtls/md5.h>
+
+#include <deque>
+
+#if __has_include("music_secrets.h")
+#include "music_secrets.h"
+#endif
+#ifndef SUPACHAT_MUSIC_HOST
+#define SUPACHAT_MUSIC_HOST ""
+#define SUPACHAT_MUSIC_USER ""
+#define SUPACHAT_MUSIC_PASSWORD ""
+#endif
+
+namespace library {
+namespace {
+constexpr char kHost[] = SUPACHAT_MUSIC_HOST;
+constexpr char kUser[] = SUPACHAT_MUSIC_USER;
+constexpr char kPassword[] = SUPACHAT_MUSIC_PASSWORD;
+constexpr char kBooksFolderName[] = "Books";
+// Low enough that the server re-encodes, which is also what makes timeOffset work.
+constexpr int kMusicKbps = 96;
+constexpr int kBooksKbps = 48;
+constexpr uint32_t kTimeoutMs = 10000;
+
+enum class JobKind : uint8_t { Albums, Liked, Search, Tracks, SaveBookmark, DeleteBookmark, Like, Unlike };
+struct Job { JobKind kind; String text; int number; Collection collection; };
+
+SemaphoreHandle_t mutex = nullptr;
+TaskHandle_t taskHandle = nullptr;
+std::deque<Job> jobs;
+std::vector<Item> finished;
+bool itemsFresh = false;
+volatile Status currentStatus = Status::Idle;
+const char *volatile failureText = "";
+// getMusicFolders answers once; -1 means not looked up yet, 0 means no such library.
+int musicFolderId = -1;
+int booksFolderId = -1;
+
+String urlEncode(const String &value) {
+  static const char hex[] = "0123456789ABCDEF";
+  String out;
+  out.reserve(value.length() + 8);
+  for (size_t i = 0; i < value.length(); i++) {
+    const uint8_t c = value[i];
+    if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') out += static_cast<char>(c);
+    else { out += '%'; out += hex[c >> 4]; out += hex[c & 15]; }
+  }
+  return out;
+}
+
+String apiUrl(const char *method) {
+  char salt[13];
+  snprintf(salt, sizeof(salt), "%08x%04x", static_cast<unsigned>(esp_random()), static_cast<unsigned>(esp_random() & 0xffff));
+  const String seed = String(kPassword) + salt;
+  uint8_t digest[16];
+  mbedtls_md5_ret(reinterpret_cast<const uint8_t *>(seed.c_str()), seed.length(), digest);
+  char token[33];
+  for (int i = 0; i < 16; i++) sprintf(token + i * 2, "%02x", digest[i]);
+  return String("http://") + kHost + "/rest/" + method + "?u=" + urlEncode(kUser) + "&t=" + token + "&s=" + salt +
+         "&v=1.16.1&c=cardputer&f=json";
+}
+
+// Fetches a Subsonic call with only the filtered fields kept in RAM. HTTP/1.0
+// keeps the server from chunking, so the JSON parser can read the socket directly.
+bool fetch(const String &url, JsonDocument &filter, JsonDocument &document) {
+  if (WiFi.status() != WL_CONNECTED) { failureText = "NO WIFI"; return false; }
+  HTTPClient http;
+  http.useHTTP10(true);
+  http.setConnectTimeout(kTimeoutMs);
+  http.setTimeout(kTimeoutMs);
+  http.begin(url);
+  const int code = http.GET();
+  if (code != HTTP_CODE_OK) { failureText = code < 0 ? "NO SERVER" : "SERVER ERROR"; http.end(); return false; }
+  filter["subsonic-response"]["status"] = true;
+  const DeserializationError error = deserializeJson(document, http.getStream(), DeserializationOption::Filter(filter));
+  http.end();
+  if (error) { failureText = "BAD REPLY"; return false; }
+  if (strcmp(document["subsonic-response"]["status"] | "", "ok") != 0) { failureText = "LOGIN REFUSED"; return false; }
+  return true;
+}
+
+void call(const String &url) {
+  JsonDocument filter, document;
+  fetch(url, filter, document);
+}
+
+void lookUpFolders() {
+  if (musicFolderId >= 0) return;
+  JsonDocument filter, document;
+  filter["subsonic-response"]["musicFolders"]["musicFolder"][0]["id"] = true;
+  filter["subsonic-response"]["musicFolders"]["musicFolder"][0]["name"] = true;
+  if (!fetch(apiUrl("getMusicFolders"), filter, document)) return;
+  int music = 0, books = 0;
+  for (JsonObjectConst folder : document["subsonic-response"]["musicFolders"]["musicFolder"].as<JsonArrayConst>()) {
+    if (strcmp(folder["name"] | "", kBooksFolderName) == 0) books = folder["id"] | 0;
+    else if (!music) music = folder["id"] | 0;
+  }
+  musicFolderId = music;
+  booksFolderId = books;
+}
+
+void publish(std::vector<Item> &&items) {
+  xSemaphoreTake(mutex, portMAX_DELAY);
+  finished = std::move(items);
+  itemsFresh = true;
+  xSemaphoreGive(mutex);
+  currentStatus = Status::Ready;
+}
+
+void addAlbum(std::vector<Item> &items, JsonObjectConst album) {
+  Item item;
+  item.id = String(album["id"] | "");
+  item.title = String(album["name"] | "?");
+  item.detail = String(album["artist"] | "");
+  item.seconds = album["duration"] | 0;
+  items.push_back(std::move(item));
+}
+
+void addTrack(std::vector<Item> &items, JsonObjectConst track) {
+  Item item;
+  item.id = String(track["id"] | "");
+  item.title = String(track["title"] | "?");
+  item.detail = String(track["artist"] | "");
+  item.seconds = track["duration"] | 0;
+  item.liked = !track["starred"].isNull();
+  items.push_back(std::move(item));
+}
+
+bool runAlbums(const Job &job) {
+  lookUpFolders();
+  if (musicFolderId < 0) return false;
+  const int folder = job.collection == Collection::Books ? booksFolderId : musicFolderId;
+  if (job.collection == Collection::Books && folder == 0) { failureText = "NO BOOKS YET"; return false; }
+  JsonDocument filter, document;
+  JsonObject album = filter["subsonic-response"]["albumList2"]["album"][0].to<JsonObject>();
+  album["id"] = true; album["name"] = true; album["artist"] = true; album["duration"] = true;
+  String url = apiUrl("getAlbumList2") + "&type=alphabeticalByName&size=" + kPageSize + "&offset=" + job.number;
+  if (folder) url += String("&musicFolderId=") + folder;
+  if (!fetch(url, filter, document)) return false;
+  std::vector<Item> items;
+  for (JsonObjectConst value : document["subsonic-response"]["albumList2"]["album"].as<JsonArrayConst>()) addAlbum(items, value);
+  publish(std::move(items));
+  return true;
+}
+
+bool runLiked() {
+  JsonDocument filter, document;
+  JsonObject song = filter["subsonic-response"]["starred2"]["song"][0].to<JsonObject>();
+  song["id"] = true; song["title"] = true; song["artist"] = true; song["duration"] = true; song["starred"] = true;
+  if (!fetch(apiUrl("getStarred2"), filter, document)) return false;
+  std::vector<Item> items;
+  for (JsonObjectConst value : document["subsonic-response"]["starred2"]["song"].as<JsonArrayConst>()) addTrack(items, value);
+  publish(std::move(items));
+  return true;
+}
+
+bool runSearch(const Job &job) {
+  JsonDocument filter, document;
+  JsonObject song = filter["subsonic-response"]["searchResult3"]["song"][0].to<JsonObject>();
+  song["id"] = true; song["title"] = true; song["artist"] = true; song["duration"] = true; song["starred"] = true;
+  String url = apiUrl("search3") + "&query=" + urlEncode(job.text) + "&artistCount=0&albumCount=0&songCount=" + kPageSize + "&songOffset=" + job.number;
+  if (!fetch(url, filter, document)) return false;
+  std::vector<Item> items;
+  for (JsonObjectConst value : document["subsonic-response"]["searchResult3"]["song"].as<JsonArrayConst>()) addTrack(items, value);
+  publish(std::move(items));
+  return true;
+}
+
+bool runTracks(const Job &job) {
+  JsonDocument filter, document;
+  JsonObject song = filter["subsonic-response"]["album"]["song"][0].to<JsonObject>();
+  song["id"] = true; song["title"] = true; song["artist"] = true; song["duration"] = true; song["starred"] = true;
+  if (!fetch(apiUrl("getAlbum") + "&id=" + urlEncode(job.text), filter, document)) return false;
+  std::vector<Item> items;
+  for (JsonObjectConst value : document["subsonic-response"]["album"]["song"].as<JsonArrayConst>()) addTrack(items, value);
+
+  JsonDocument marksFilter, marks;
+  JsonObject mark = marksFilter["subsonic-response"]["bookmarks"]["bookmark"][0].to<JsonObject>();
+  mark["position"] = true; mark["entry"]["id"] = true;
+  if (fetch(apiUrl("getBookmarks"), marksFilter, marks)) {
+    for (JsonObjectConst value : marks["subsonic-response"]["bookmarks"]["bookmark"].as<JsonArrayConst>()) {
+      const char *trackId = value["entry"]["id"] | "";
+      for (Item &item : items) if (item.id == trackId) item.resumeMs = value["position"] | 0;
+    }
+  }
+  publish(std::move(items));
+  return true;
+}
+
+void workerTask(void *) {
+  for (;;) {
+    xSemaphoreTake(mutex, portMAX_DELAY);
+    const bool empty = jobs.empty();
+    Job job{};
+    if (!empty) { job = jobs.front(); jobs.pop_front(); }
+    xSemaphoreGive(mutex);
+    if (empty) { vTaskDelay(pdMS_TO_TICKS(50)); continue; }
+    bool ok = true;
+    switch (job.kind) {
+      case JobKind::Albums: ok = runAlbums(job); break;
+      case JobKind::Liked: ok = runLiked(); break;
+      case JobKind::Search: ok = runSearch(job); break;
+      case JobKind::Tracks: ok = runTracks(job); break;
+      case JobKind::SaveBookmark: call(apiUrl("createBookmark") + "&id=" + urlEncode(job.text) + "&position=" + job.number); break;
+      case JobKind::DeleteBookmark: call(apiUrl("deleteBookmark") + "&id=" + urlEncode(job.text)); break;
+      case JobKind::Like: call(apiUrl("star") + "&id=" + urlEncode(job.text)); break;
+      case JobKind::Unlike: call(apiUrl("unstar") + "&id=" + urlEncode(job.text)); break;
+    }
+    if (!ok) currentStatus = Status::Failed;
+  }
+}
+
+void enqueue(Job job, bool loadsList) {
+  if (loadsList) {
+    if (!configured()) { failureText = "NOT SET UP"; currentStatus = Status::Failed; return; }
+    currentStatus = Status::Loading;
+  }
+  if (!configured()) return;
+  xSemaphoreTake(mutex, portMAX_DELAY);
+  jobs.push_back(std::move(job));
+  xSemaphoreGive(mutex);
+}
+}  // namespace
+
+void begin() {
+  if (taskHandle) return;
+  mutex = xSemaphoreCreateMutex();
+  xTaskCreatePinnedToCore(workerTask, "library", 12288, nullptr, 1, &taskHandle, 0);
+}
+
+bool configured() { return kHost[0] != 0; }
+
+void requestAlbums(Collection collection, int offset) { enqueue({JobKind::Albums, "", offset, collection}, true); }
+void requestLiked() { enqueue({JobKind::Liked, "", 0, Collection::Music}, true); }
+void requestSearch(const String &query, int offset) { enqueue({JobKind::Search, query, offset, Collection::Music}, true); }
+void requestTracks(const String &albumId) { enqueue({JobKind::Tracks, albumId, 0, Collection::Music}, true); }
+void saveBookmark(const String &trackId, uint32_t positionMs) { enqueue({JobKind::SaveBookmark, trackId, static_cast<int>(positionMs), Collection::Books}, false); }
+void deleteBookmark(const String &trackId) { enqueue({JobKind::DeleteBookmark, trackId, 0, Collection::Books}, false); }
+void setLiked(const String &trackId, bool liked) { enqueue({liked ? JobKind::Like : JobKind::Unlike, trackId, 0, Collection::Music}, false); }
+
+Status status() { return currentStatus; }
+const char *failure() { return failureText; }
+
+bool takeItems(std::vector<Item> &items) {
+  xSemaphoreTake(mutex, portMAX_DELAY);
+  const bool fresh = itemsFresh;
+  if (fresh) { items = std::move(finished); finished.clear(); itemsFresh = false; }
+  xSemaphoreGive(mutex);
+  return fresh;
+}
+
+String streamUrl(const String &trackId, Collection collection, uint32_t offsetSeconds) {
+  String url = apiUrl("stream") + "&id=" + urlEncode(trackId) + "&format=mp3&maxBitRate=" + (collection == Collection::Books ? kBooksKbps : kMusicKbps);
+  if (offsetSeconds) url += String("&timeOffset=") + offsetSeconds;
+  return url;
+}
+
+}  // namespace library
