@@ -26,6 +26,7 @@
 #include "media_player.h"
 #include "music_library.h"
 #include "os.h"
+#include "shared_text.h"
 #include <new>
 #include "splash_logo.h"
 
@@ -50,7 +51,7 @@ constexpr bool kBuildFrenchDefault = true;
 constexpr bool kBuildFrenchDefault = false;
 #endif
 bool frenchUi = kBuildFrenchDefault;
-String languageOverride = "auto";
+SharedText<8> languageOverride{"auto"};
 const char *uiText(const char *english, const char *french) { return frenchUi ? french : english; }
 constexpr char kFirmwareVersion[] = "v0.54";
 constexpr size_t kMessageLimit = 140;
@@ -86,6 +87,12 @@ constexpr int kChargePlotMinMv = 3200;
 constexpr int kChargePlotMaxMv = 4300;
 constexpr int kChargeTrendThresholdMv = 12;
 constexpr char kChargeLogPath[] = "/supachat-charge.csv";
+constexpr char kChargeLogOldPath[] = "/supachat-charge-old.csv";
+constexpr size_t kChargeLogMaxBytes = 256 * 1024;
+constexpr uint32_t kSecureConnectTimeoutMs = 8000;
+constexpr uint32_t kSyncBackoffMaxMs = 300000;
+constexpr uint32_t kWifiRetryMaxMs = 300000;
+constexpr size_t kScanListLimit = 24;
 constexpr int kSyncBatchLimit = 20;
 constexpr int kHistoryPageLimit = 20;
 constexpr uint32_t kTimeWaitMs = 12000;
@@ -239,6 +246,14 @@ uint32_t participantColour(const String &authorId, const String &authorName = ""
   return TFT_WHITE;
 }
 
+// Guards rooms and wifiProfiles, which the UI and network tasks share. A leaf: nothing else is
+// taken while it is held.
+SemaphoreHandle_t sharedListsMutex = nullptr;
+struct ListsLock {
+  ListsLock() { xSemaphoreTake(sharedListsMutex, portMAX_DELAY); }
+  ~ListsLock() { xSemaphoreGive(sharedListsMutex); }
+};
+
 enum class ScreenMode { Chat, Menu, Rooms, Volume, Language, EmojiRecipes, Changelog, VoiceMessages, Walkie, Status, Networks, NetworkPassword, ChargingConfirm, Charging, FoxFinding, Home, Library, LibrarySearch, NowPlaying, Remote, System };
 
 Preferences preferences;
@@ -248,8 +263,8 @@ std::vector<WifiProfile> wifiProfiles;
 std::vector<ScannedNetwork> scannedNetworks;
 std::vector<ChatMessage> messages;
 std::vector<ChatRoom> rooms;
-String currentRoomId = kDefaultRoomId;
-String currentRoomName = kDefaultRoomName;
+SharedText<40> currentRoomId{kDefaultRoomId};
+SharedText<40> currentRoomName{kDefaultRoomName};
 // Retained clips stream to microSD. The small fallback keeps voice usable
 // without a card while reserving heap for simultaneous HTTPS and WSS TLS.
 std::array<int16_t, kVoiceFallbackSamples> voiceSamples{};
@@ -261,10 +276,10 @@ size_t playbackBufferIndex = 0;
 SemaphoreHandle_t stateMutex;
 String deviceToken;
 String draft;
-String networkStatus = "BOOT";
-String walkieStatus = "OFFLINE";
-String walkieSpeaker;
-String currentSsid;
+SharedText<32> networkStatus{"BOOT"};
+SharedText<32> walkieStatus{"OFFLINE"};
+SharedText<32> walkieSpeaker;
+SharedText<33> currentSsid;
 String selectedSsid;
 String networkPassword;
 bool frenchGravePending = false;
@@ -278,6 +293,7 @@ bool ntpAttempted = false;
 bool timeSyncedByNtp = false;
 bool initialSyncComplete = false;
 volatile bool chatShrunk = false;
+volatile bool networkTaskParked = false;
 int64_t historyBeforeId = 0;
 size_t historyHydratedCount = 0;
 bool keyboardReady = false;
@@ -319,9 +335,9 @@ uint8_t volumeLevel = kDefaultVolumeLevel;
 int64_t lastServerId = 0;
 int64_t lastReceiptAt = 0;
 int lastHttpStatus = 0;
-String lastSyncError = "NONE";
-String lastSyncDetail;
-String lastSyncErrorRoom;
+SharedText<24> lastSyncError{"NONE"};
+SharedText<64> lastSyncDetail;
+SharedText<40> lastSyncErrorRoom;
 int lastSyncErrorHttpStatus = 0;
 size_t lastSyncResponseBytes = 0;
 uint32_t lastSyncErrorHeap = 0;
@@ -525,7 +541,7 @@ bool sendFoxPacket(EspNowType type, const void *payload, size_t length) {
   packet.magic = kEspNowMagic; packet.type = static_cast<uint8_t>(type); packet.sequence = ++espNowSequence;
   strncpy(packet.senderId, kDeviceId, sizeof(packet.senderId) - 1);
   strncpy(packet.senderName, kDeviceName, sizeof(packet.senderName) - 1);
-  strncpy(packet.roomId, currentRoomId.c_str(), sizeof(packet.roomId) - 1);
+  currentRoomId.copyTo(packet.roomId, sizeof(packet.roomId));
   if (!encryptMeshPacket(packet, static_cast<const uint8_t *>(payload), length)) return false;
   return esp_now_send(broadcast, reinterpret_cast<uint8_t *>(&packet), offsetof(EspNowPacket, payload) + packet.payloadLength) == ESP_OK;
 }
@@ -681,12 +697,14 @@ void saveHistoryLocked() {
   const String temporaryPath = roomHistoryPath(currentRoomId, true);
   File file = SD.open(temporaryPath, FILE_WRITE);
   if (!file) return;
+  bool complete = true;
   for (const auto &message : messages) {
-    file.printf("%lld\t%s\t%s\t%s\t%s\t%lld\t%d\n", message.id, cleanField(message.clientId).c_str(),
+    complete = file.printf("%lld\t%s\t%s\t%s\t%s\t%lld\t%d\n", message.id, cleanField(message.clientId).c_str(),
                 cleanField(message.authorId).c_str(), cleanField(message.authorName).c_str(), cleanField(message.body).c_str(),
-                message.createdAt, message.queued ? 1 : 0);
+                message.createdAt, message.queued ? 1 : 0) > 0 && complete;
   }
   file.close();
+  if (!complete) { SD.remove(temporaryPath); return; }  // The card is full: keep what was saved.
   SD.remove(path);
   SD.rename(temporaryPath, path);
 }
@@ -694,6 +712,8 @@ void saveHistoryLocked() {
 void loadHistory() {
   if (!sdReady) return;
   String path = roomHistoryPath(currentRoomId);
+  // Power lost between the save's remove and rename leaves only the new copy, which is whole.
+  if (!SD.exists(path) && SD.exists(roomHistoryPath(currentRoomId, true))) path = roomHistoryPath(currentRoomId, true);
   if (!SD.exists(path) && currentRoomId == "family" && SD.exists("/supachat-messages.tsv")) path = "/supachat-messages.tsv";
   File file = SD.open(path, FILE_READ);
   if (!file) return;
@@ -760,6 +780,7 @@ void saveWifiProfiles() {
 }
 
 void rememberWifi(const String &ssid, const String &password) {
+  ListsLock lists;
   auto existing = std::find_if(wifiProfiles.begin(), wifiProfiles.end(),
                                [&](const WifiProfile &profile) { return profile.ssid == ssid; });
   if (existing != wifiProfiles.end()) existing->password = password;
@@ -896,7 +917,7 @@ void sendEspNowAudio(const int16_t *samples, size_t count) {
   while (offset < count) {
     EspNowPacket packet{}; packet.magic = kEspNowMagic; packet.type = static_cast<uint8_t>(EspNowType::Audio); packet.sequence = ++espNowSequence;
     strncpy(packet.senderId, kDeviceId, sizeof(packet.senderId) - 1); strncpy(packet.senderName, kDeviceName, sizeof(packet.senderName) - 1);
-    strncpy(packet.roomId, currentRoomId.c_str(), sizeof(packet.roomId) - 1);
+    currentRoomId.copyTo(packet.roomId, sizeof(packet.roomId));
     const size_t take = std::min<size_t>((sizeof(packet.payload) / 2), count - offset);
     if (encryptMeshPacket(packet, reinterpret_cast<const uint8_t *>(samples + offset), take * 2))
       esp_now_send(broadcast, reinterpret_cast<uint8_t *>(&packet), offsetof(EspNowPacket, payload) + packet.payloadLength);
@@ -1161,7 +1182,7 @@ void sendEspNowBeacon() {
   static const uint8_t broadcast[] = {0xff,0xff,0xff,0xff,0xff,0xff};
   EspNowPacket packet{}; packet.magic = kEspNowMagic; packet.type = static_cast<uint8_t>(EspNowType::Beacon); packet.sequence = ++espNowSequence;
   strncpy(packet.senderId, kDeviceId, sizeof(packet.senderId) - 1); strncpy(packet.senderName, kDeviceName, sizeof(packet.senderName) - 1);
-  strncpy(packet.roomId, currentRoomId.c_str(), sizeof(packet.roomId) - 1);
+  currentRoomId.copyTo(packet.roomId, sizeof(packet.roomId));
   esp_now_send(broadcast, reinterpret_cast<uint8_t *>(&packet), offsetof(EspNowPacket, payload)); lastEspNowBeaconAt = millis();
 }
 
@@ -1173,10 +1194,15 @@ bool connectKnownWifi() {
   networkStatus = "SCANNING"; renderDirty = true;
   const int count = WiFi.scanNetworks(false, true);
   int bestProfile = -1; int bestRssi = -1000;
-  for (int scan = 0; scan < count; scan++) {
-    for (int profile = 0; profile < static_cast<int>(wifiProfiles.size()); profile++) {
-      if (WiFi.SSID(scan) == wifiProfiles[profile].ssid && WiFi.RSSI(scan) > bestRssi) { bestProfile = profile; bestRssi = WiFi.RSSI(scan); }
+  String joinSsid, joinPassword;
+  {
+    ListsLock lists;
+    for (int scan = 0; scan < count; scan++) {
+      for (int profile = 0; profile < static_cast<int>(wifiProfiles.size()); profile++) {
+        if (WiFi.SSID(scan) == wifiProfiles[profile].ssid && WiFi.RSSI(scan) > bestRssi) { bestProfile = profile; bestRssi = WiFi.RSSI(scan); }
+      }
     }
+    if (bestProfile >= 0) { joinSsid = wifiProfiles[bestProfile].ssid; joinPassword = wifiProfiles[bestProfile].password; }
   }
   WiFi.scanDelete();
   if (chargingModeActive) return false;
@@ -1186,7 +1212,7 @@ bool connectKnownWifi() {
   }
   networkStatus = "JOINING"; renderDirty = true;
   if (chargingModeActive) return false;
-  WiFi.begin(wifiProfiles[bestProfile].ssid.c_str(), wifiProfiles[bestProfile].password.c_str());
+  WiFi.begin(joinSsid.c_str(), joinPassword.c_str());
   const uint32_t started = millis();
   while (!chargingModeActive && WiFi.status() != WL_CONNECTED && millis() - started < 12000) vTaskDelay(pdMS_TO_TICKS(100));
   if (chargingModeActive) { WiFi.disconnect(false, false); return false; }
@@ -1339,6 +1365,13 @@ const char *chargeTrendName(ChargeTrend trend) {
 
 void appendChargeLog(const char *event, const char *detail = "") {
   if (!sdReady) return;
+  // One older log is kept beside the current one, so the pair can't outgrow the card.
+  File existing = SD.open(kChargeLogPath, FILE_READ);
+  if (existing) {
+    const size_t size = existing.size();
+    existing.close();
+    if (size > kChargeLogMaxBytes) { SD.remove(kChargeLogOldPath); SD.rename(kChargeLogPath, kChargeLogOldPath); }
+  }
   const bool writeHeader = !SD.exists(kChargeLogPath);
   File file = SD.open(kChargeLogPath, FILE_APPEND);
   if (!file) return;
@@ -1451,7 +1484,7 @@ bool requestJson(const String &path, const char *method, const String &requestBo
   const os::SecureLease lease(os::Priority::Background);
   if (!lease.held) { status = HTTPC_ERROR_CONNECTION_REFUSED; return false; }
   WiFiClientSecure client; client.setInsecure(); client.setTimeout(35); client.setHandshakeTimeout(20);
-  if (!client.connect(kApiHost, 443)) { status = HTTPC_ERROR_CONNECTION_REFUSED; return false; }
+  if (!client.connect(kApiHost, 443, kSecureConnectTimeoutMs)) { status = HTTPC_ERROR_CONNECTION_REFUSED; return false; }
   if (!client.verify(kTlsFingerprint, kApiHost)) { client.stop(); status = HTTPC_ERROR_CONNECTION_LOST; return false; }
   HTTPClient http; http.setTimeout(35000); http.setReuse(false);
   if (!http.begin(client, String(kApiBase) + path)) return false;
@@ -1607,9 +1640,13 @@ void recordSyncError(const char *kind, const String &detail, int status, size_t 
   renderDirty = true;
 }
 
-void archiveMessage(JsonObjectConst object) {
+// Each first sync rewrites the room's archive, so reboots can't grow it.
+bool archiveStarted = false;
+void archiveMessage(JsonObjectConst object, bool startOver) {
   if (!sdReady) return;
-  File file = SD.open(String("/supachat-archive-") + currentRoomId + ".tsv", FILE_APPEND);
+  const String path = String("/supachat-archive-") + currentRoomId + ".tsv";
+  if (startOver) { SD.remove(path); archiveStarted = true; }
+  File file = SD.open(path, FILE_APPEND);
   if (!file) return;
   file.printf("%lld\t%s\t%s\t%s\t%s\t%lld\n", static_cast<long long>(object["id"] | 0LL), object["client_id"] | "", object["author_id"] | "",
               object["author_name"] | "", cleanField(String(object["body"] | "")).c_str(), static_cast<long long>(object["created_at"] | 0LL));
@@ -1625,15 +1662,22 @@ void synchronize() {
       std::vector<ChatRoom> nextRooms;
       for (JsonObjectConst object : roomDocument["rooms"].as<JsonArrayConst>()) {
         const String id = String(object["id"] | ""); const int64_t latest = object["latest_message_id"] | 0;
-        auto previous = std::find_if(rooms.begin(), rooms.end(), [&](const ChatRoom &room) { return room.id == id; });
-        const int64_t seen = previous != rooms.end() ? previous->seenMessageId : latest;
+        int64_t seen = latest;
+        {
+          ListsLock lists;
+          auto previous = std::find_if(rooms.begin(), rooms.end(), [&](const ChatRoom &room) { return room.id == id; });
+          if (previous != rooms.end()) seen = previous->seenMessageId;
+        }
         nextRooms.push_back({id, String(object["name"] | "Room"), String(object["group_id"] | ""),
           String(object["group_name"] | ""), String(object["default_language"] | "en"), latest, seen});
       }
-      rooms = std::move(nextRooms); roomsInitialized = true;
-      auto active = std::find_if(rooms.begin(), rooms.end(), [&](const ChatRoom &room) { return room.id == currentRoomId; });
-      if (active == rooms.end() && !rooms.empty()) { currentRoomId = rooms[0].id; currentRoomName = rooms[0].name; }
-      else if (active != rooms.end()) currentRoomName = active->name;
+      {
+        ListsLock lists;
+        rooms = std::move(nextRooms); roomsInitialized = true;
+        auto active = std::find_if(rooms.begin(), rooms.end(), [&](const ChatRoom &room) { return room.id == currentRoomId; });
+        if (active == rooms.end() && !rooms.empty()) { currentRoomId = rooms[0].id; currentRoomName = rooms[0].name; }
+        else if (active != rooms.end()) currentRoomName = active->name;
+      }
       applyEffectiveLanguage();
     } else {
       recordSyncError("ROOM JSON", roomJsonError.c_str(), roomsStatus, roomsResponse.length(), !initialSyncComplete);
@@ -1670,7 +1714,7 @@ void synchronize() {
       : deserializeJson(document, &response[0], response.length());
   if (jsonError) {
     networkStatus = jsonError == DeserializationError::NoMemory ? "JSON MEMORY" : "BAD JSON";
-    recordSyncError(networkStatus.c_str(), jsonError.c_str(), status, response.length(), !initialSyncComplete);
+    recordSyncError(networkStatus.get().c_str(), jsonError.c_str(), status, response.length(), !initialSyncComplete);
     Serial.printf("sync json error=%s bytes=%u heap=%u\n", jsonError.c_str(), response.length(), lastSyncErrorHeap);
     return;
   }
@@ -1683,7 +1727,7 @@ void synchronize() {
   for (JsonObjectConst object : pageMessages) {
     const bool incoming = String(object["author_id"] | "") != kDeviceId;
     // RAM keeps the newest messages; older history pages go straight to the card.
-    if (hydratingHistory && messages.size() >= kRamMessageLimit) archiveMessage(object);
+    if (hydratingHistory && messages.size() >= kRamMessageLimit) archiveMessage(object, !archiveStarted);
     else mergeServerMessage(object);
     if (incoming) newlyRead.push_back(object["id"] | 0);
   }
@@ -1718,13 +1762,16 @@ void synchronize() {
   }
   networkStatus = "SYNCED"; renderDirty = true;
   initialSyncComplete = true;
-  auto activeRoom = std::find_if(rooms.begin(), rooms.end(), [&](const ChatRoom &room) { return room.id == currentRoomId; });
-  if (activeRoom != rooms.end()) activeRoom->seenMessageId = std::max(activeRoom->latestMessageId, lastServerId);
+  archiveStarted = false;
+  {
+    ListsLock lists;
+    auto activeRoom = std::find_if(rooms.begin(), rooms.end(), [&](const ChatRoom &room) { return room.id == currentRoomId; });
+    if (activeRoom != rooms.end()) activeRoom->seenMessageId = std::max(activeRoom->latestMessageId, lastServerId);
+  }
 }
 
 void networkTask(void *) {
-  os::bindTask(os::Owner::Chat);
-  uint32_t nextWifiAttempt = 0;
+  uint32_t nextWifiAttempt = 0, wifiRetryMs = 0, syncBackoffMs = 0;
   for (;;) {
     try {
     if (foxScanRequested) { foxScanRequested = false; collectFoxPlacePrint(); continue; }
@@ -1734,7 +1781,8 @@ void networkTask(void *) {
       xSemaphoreGive(stateMutex);
     }
     if (chargingModeActive) { vTaskDelay(pdMS_TO_TICKS(1000)); continue; }
-    if (manualWifiMode) { vTaskDelay(pdMS_TO_TICKS(100)); continue; }
+    if (manualWifiMode) { networkTaskParked = true; vTaskDelay(pdMS_TO_TICKS(100)); continue; }
+    networkTaskParked = false;
     if (localOnlyMode) {
       if (WiFi.status() == WL_CONNECTED) WiFi.disconnect(false, false);
       if (currentSsid.length() || networkStatus != "ESPNOW LOCAL") {
@@ -1742,13 +1790,16 @@ void networkTask(void *) {
       }
       vTaskDelay(pdMS_TO_TICKS(250)); continue;
     }
-    if (wifiResumeRequested) { wifiResumeRequested = false; nextWifiAttempt = 0; }
+    if (wifiResumeRequested) { wifiResumeRequested = false; nextWifiAttempt = 0; wifiRetryMs = 0; syncBackoffMs = 0; }
     const uint32_t now = millis();
     if (WiFi.status() != WL_CONNECTED && now < nextWifiAttempt) { vTaskDelay(pdMS_TO_TICKS(250)); continue; }
     if (!connectKnownWifi()) {
       if (!os::bootSettled()) os::setBoot(os::Boot::NoNetwork);
-      nextWifiAttempt = millis() + kWifiRetryMs; vTaskDelay(pdMS_TO_TICKS(500)); continue;
+      // Scanning costs battery and blocks ESP-NOW's channel, so away from known networks it slows down.
+      wifiRetryMs = std::min<uint32_t>(wifiRetryMs ? wifiRetryMs * 2 : kWifiRetryMs, kWifiRetryMaxMs);
+      nextWifiAttempt = millis() + wifiRetryMs; vTaskDelay(pdMS_TO_TICKS(500)); continue;
     }
+    wifiRetryMs = 0;
     if (os::boot() == os::Boot::Joining) os::setBoot(os::Boot::Syncing);
     ensureTime();
     if (localBlackout() && !syncOverride) {
@@ -1780,6 +1831,11 @@ void networkTask(void *) {
     if (voiceUploadPending && !localReplayActive) uploadVoiceClip();
     if (syncOverride) syncOverride = false;
     vTaskDelay(pdMS_TO_TICKS(kSyncPollMs));
+    // A network that won't reach the server (a captive portal, no internet) isn't hammered.
+    if (networkStatus.startsWith("SYNC ") && !networkStatus.startsWith("SYNCED") || networkStatus.startsWith("ROOM ")) {
+      syncBackoffMs = std::min<uint32_t>(syncBackoffMs ? syncBackoffMs * 2 : 6000, kSyncBackoffMaxMs);
+      for (uint32_t waited = 0; waited < syncBackoffMs && !syncOverride && !manualWifiMode && !wifiResumeRequested; waited += 250) vTaskDelay(pdMS_TO_TICKS(250));
+    } else syncBackoffMs = 0;
     } catch (const std::bad_alloc &) {
       // Chat ran out. Everything since the last good state is dropped, and it starts over.
       if (stateMutex) xSemaphoreGive(stateMutex);
@@ -1793,7 +1849,6 @@ void networkTask(void *) {
 }
 
 void walkieTask(void *) {
-  os::bindTask(os::Owner::Chat);
   bool holdsLease = false;
   for (;;) {
     try {
@@ -1852,11 +1907,16 @@ void printFont0Text(const String &text);
 
 void drawChat() {
   auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader("");
-  int activeIndex = -1; for (int index = 0; index < static_cast<int>(rooms.size()); index++) if (rooms[index].id == currentRoomId) activeIndex = index;
-  const int leftIndex = rooms.size() > 1 && activeIndex >= 0 ? (activeIndex - 1 + rooms.size()) % rooms.size() : -1;
-  const int rightIndex = rooms.size() > 1 && activeIndex >= 0 ? (activeIndex + 1) % rooms.size() : -1;
-  const bool leftNew = leftIndex >= 0 && rooms[leftIndex].latestMessageId > rooms[leftIndex].seenMessageId;
-  const bool rightNew = rightIndex >= 0 && rooms[rightIndex].latestMessageId > rooms[rightIndex].seenMessageId;
+  bool leftNew = false, rightNew = false;
+  {
+    ListsLock lists;
+    const String activeId = currentRoomId.get();
+    int activeIndex = -1; for (int index = 0; index < static_cast<int>(rooms.size()); index++) if (rooms[index].id == activeId) activeIndex = index;
+    const int leftIndex = rooms.size() > 1 && activeIndex >= 0 ? (activeIndex - 1 + rooms.size()) % rooms.size() : -1;
+    const int rightIndex = rooms.size() > 1 && activeIndex >= 0 ? (activeIndex + 1) % rooms.size() : -1;
+    leftNew = leftIndex >= 0 && rooms[leftIndex].latestMessageId > rooms[leftIndex].seenMessageId;
+    rightNew = rightIndex >= 0 && rooms[rightIndex].latestMessageId > rooms[rightIndex].seenMessageId;
+  }
   display.setTextSize(1); display.setTextColor(leftNew ? TFT_YELLOW : TFT_DARKGREY, TFT_DARKGREEN); display.setCursor(4, 6); display.print(leftNew ? "<*" : "< ");
   const String roomTitle = currentRoomName.substring(0, 10); display.setTextColor(TFT_WHITE, TFT_DARKGREEN); display.setCursor(50 - roomTitle.length() * 3, 6); display.print(roomTitle);
   display.setTextColor(rightNew ? TFT_YELLOW : TFT_DARKGREY, TFT_DARKGREEN); display.setCursor(91, 6); display.print(rightNew ? "*>" : " >");
@@ -1946,6 +2006,7 @@ void drawEmojiRecipes() {
 void drawRooms() {
   auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader(uiText("ROOMS", "SALONS")); display.setTextSize(1);
   const int start = std::max(0, roomSelection - 5);
+  ListsLock lists;
   for (int index = start; index < static_cast<int>(rooms.size()) && index < start + 6; index++) {
     const int y = 22 + (index - start) * 15; const bool selected = index == roomSelection;
     display.fillRoundRect(6, y, 228, 13, 3, selected ? TFT_GREEN : TFT_DARKGREY);
@@ -2013,8 +2074,8 @@ void drawStatus() {
   display.setTextColor(TFT_WHITE, TFT_BLACK); display.setCursor(6, 29);
   if (statusPage == 0) {
     display.printf(frenchUi ? "APPAREIL  %s\n" : "NODE      %s\n", kDeviceName);
-    display.printf("WIFI      %s\n", currentSsid.isEmpty() ? "offline" : currentSsid.c_str());
-    display.printf(frenchUi ? "ETAT      %s\n" : "STATE     %s\n", networkStatus.c_str()); display.printf(frenchUi ? "HEURE     %s\n" : "TIME      %s\n", timeKnown ? uiText("known", "connue") : uiText("unknown", "inconnue"));
+    display.printf("WIFI      %s\n", currentSsid.isEmpty() ? "offline" : currentSsid.get().c_str());
+    display.printf(frenchUi ? "ETAT      %s\n" : "STATE     %s\n", networkStatus.get().c_str()); display.printf(frenchUi ? "HEURE     %s\n" : "TIME      %s\n", timeKnown ? uiText("known", "connue") : uiText("unknown", "inconnue"));
     display.printf(frenchUi ? "BATTERIE  %d%%  %d mV\n" : "BATTERY   %d%%  %d mV\n", batteryLevel, batteryVoltageMv);
     display.printf(frenchUi ? "ALIM.     %s\n" : "POWER     %s\n", externalPowerDetected ? uiText("cable detected", "cable detecte") : uiText("not detected", "non detecte"));
     display.printf("SD/KEY    %s / %s\n", sdReady ? "ready" : "missing", keyboardReady ? "ready" : "fault");
@@ -2268,15 +2329,12 @@ void drawSystem() {
   int y = 24;
   for (const os::Owner owner : {os::Owner::Ui, os::Owner::Chat, os::Owner::Music, os::Owner::Books}) {
     display.setTextColor(TFT_WHITE, TFT_BLACK); display.setCursor(6, y); display.print(os::name(owner));
-    display.setTextColor(TFT_YELLOW, TFT_BLACK); display.setCursor(60, y); display.print(os::used(owner) / 1024);
-    display.print("K");
-    if (os::budget(owner)) { display.print(" / "); display.print(os::budget(owner) / 1024); display.print("K"); }
-    display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(180, y); display.print(os::stateName(os::state(owner)));
+    display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(80, y); display.print(os::stateName(os::state(owner)));
     y += 12;
   }
   display.setTextColor(TFT_WHITE, TFT_BLACK);
   display.setCursor(6, y + 2); display.print("FREE "); display.print(ESP.getFreeHeap() / 1024); display.print("K  LARGEST "); display.print(ESP.getMaxAllocHeap() / 1024); display.print("K");
-  display.setCursor(6, y + 14); display.print("SECURE "); display.print(os::secureHeld() ? "IN USE" : "IDLE");
+  display.setCursor(6, y + 14); display.print("LOWEST "); display.print(ESP.getMinFreeHeap() / 1024); display.print("K  SECURE "); display.print(os::secureHeld() ? "IN USE" : "IDLE");
   display.setCursor(6, y + 26);
   if (os::faultCount()) { display.setTextColor(TFT_RED, TFT_BLACK); display.print(String(os::lastFault()).substring(0, 38)); }
   else { display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.print(uiText("NO FAULTS", "AUCUNE ERREUR")); }
@@ -2381,6 +2439,7 @@ void applyEffectiveLanguage() {
   if (languageOverride == "fr") frenchUi = true;
   else if (languageOverride == "en") frenchUi = false;
   else {
+    ListsLock lists;
     auto active = std::find_if(rooms.begin(), rooms.end(), [&](const ChatRoom &room) { return room.id == currentRoomId; });
     frenchUi = active != rooms.end() ? active->defaultLanguage == "fr" : kBuildFrenchDefault;
   }
@@ -2476,7 +2535,7 @@ void sendDraft() {
     static const uint8_t broadcast[] = {0xff,0xff,0xff,0xff,0xff,0xff};
     EspNowPacket packet{}; packet.magic = kEspNowMagic; packet.type = static_cast<uint8_t>(EspNowType::Text); packet.sequence = ++espNowSequence;
     strncpy(packet.senderId, kDeviceId, sizeof(packet.senderId) - 1); strncpy(packet.senderName, kDeviceName, sizeof(packet.senderName) - 1);
-    strncpy(packet.roomId, currentRoomId.c_str(), sizeof(packet.roomId) - 1);
+    currentRoomId.copyTo(packet.roomId, sizeof(packet.roomId));
     strncpy(packet.clientId, message.clientId.c_str(), sizeof(packet.clientId) - 1);
     const size_t length = std::min<size_t>(message.body.length(), sizeof(packet.payload));
     if (encryptMeshPacket(packet, reinterpret_cast<const uint8_t *>(message.body.c_str()), length))
@@ -2487,9 +2546,13 @@ void sendDraft() {
 
 void scanForNetworks() {
   manualWifiMode = true; networkStatus = "SCANNING"; scannedNetworks.clear(); networkSelection = 0;
+  renderDirty = true; render();
+  // The network task may be mid-join or mid-scan; two scans at once make the second fail.
+  for (const uint32_t started = millis(); !networkTaskParked && millis() - started < 20000;) delay(50);
   WiFi.disconnect(false, false); delay(100);
-  const int count = WiFi.scanNetworks(false, true);
-  for (int index = 0; index < count; index++) {
+  int count = WiFi.scanNetworks(false, true);
+  for (int attempt = 0; attempt < 5 && count < 0; attempt++) { delay(1000); count = WiFi.scanNetworks(false, true); }
+  for (int index = 0; index < count && scannedNetworks.size() < kScanListLimit; index++) {
     const String ssid = WiFi.SSID(index); if (ssid.isEmpty()) continue;
     auto existing = std::find_if(scannedNetworks.begin(), scannedNetworks.end(),
                                  [&](const ScannedNetwork &item) { return item.ssid == ssid; });
@@ -2506,9 +2569,12 @@ void scanForNetworks() {
 void selectNetwork() {
   if (scannedNetworks.empty()) return;
   selectedSsid = scannedNetworks[networkSelection].ssid; networkPassword = "";
-  auto saved = std::find_if(wifiProfiles.begin(), wifiProfiles.end(),
-                            [&](const WifiProfile &profile) { return profile.ssid == selectedSsid; });
-  if (saved != wifiProfiles.end()) networkPassword = saved->password;
+  {
+    ListsLock lists;
+    auto saved = std::find_if(wifiProfiles.begin(), wifiProfiles.end(),
+                              [&](const WifiProfile &profile) { return profile.ssid == selectedSsid; });
+    if (saved != wifiProfiles.end()) networkPassword = saved->password;
+  }
   screenMode = ScreenMode::NetworkPassword; networkStatus = "TYPE PASSWORD"; renderDirty = true;
 }
 
@@ -2520,7 +2586,7 @@ void joinSelectedNetwork() {
   while (WiFi.status() != WL_CONNECTED && millis() - started < 15000) delay(100);
   if (WiFi.status() != WL_CONNECTED) { networkStatus = "FAILED - CHECK PASSWORD"; renderDirty = true; return; }
   currentSsid = WiFi.SSID(); rememberWifi(selectedSsid, networkPassword);
-  networkStatus = "SAVED + CONNECTED"; screenMode = ScreenMode::Networks; manualWifiMode = false; renderDirty = true;
+  networkStatus = "SAVED + CONNECTED"; screenMode = ScreenMode::Networks; manualWifiMode = false; wifiResumeRequested = true; renderDirty = true;
 }
 
 void openSelectedMenuItem() {
@@ -2550,11 +2616,18 @@ void openSelectedMenuItem() {
   renderDirty = true;
 }
 
+int roomCount() { ListsLock lists; return static_cast<int>(rooms.size()); }
+
 void selectRoom(int next) {
-  if (next < 0 || next >= static_cast<int>(rooms.size()) || rooms[next].id == currentRoomId) return;
+  String nextId, nextName;
+  {
+    ListsLock lists;
+    if (next < 0 || next >= static_cast<int>(rooms.size()) || rooms[next].id == currentRoomId) return;
+    nextId = rooms[next].id; nextName = rooms[next].name;
+  }
   xSemaphoreTake(stateMutex, portMAX_DELAY);
   saveHistoryLocked();
-  currentRoomId = rooms[next].id; currentRoomName = rooms[next].name; roomSelection = next;
+  currentRoomId = nextId; currentRoomName = nextName; roomSelection = next;
   applyEffectiveLanguage();
   messages.clear(); lastServerId = 0; lastReceiptAt = 0; historyOffset = 0; initialSyncComplete = false;
   historyBeforeId = 0; historyHydratedCount = 0; syncOverride = true;
@@ -2564,9 +2637,14 @@ void selectRoom(int next) {
 }
 
 void switchRoom(int direction) {
-  if (rooms.size() < 2) return;
-  int active = 0; for (int index = 0; index < static_cast<int>(rooms.size()); index++) if (rooms[index].id == currentRoomId) active = index;
-  selectRoom((active + direction + static_cast<int>(rooms.size())) % static_cast<int>(rooms.size()));
+  int target = -1;
+  {
+    ListsLock lists;
+    if (rooms.size() < 2) return;
+    int active = 0; for (int index = 0; index < static_cast<int>(rooms.size()); index++) if (rooms[index].id == currentRoomId) active = index;
+    target = (active + direction + static_cast<int>(rooms.size())) % static_cast<int>(rooms.size());
+  }
+  selectRoom(target);
 }
 
 String trackPath(const library::Item &item) { return queueFolder + "/" + item.title + ".mp3"; }
@@ -2769,9 +2847,12 @@ void serviceApps() {
 
 void serviceMedia() {
   serviceApps();
+  const bool listHadItems = !libraryItems.empty();
   if (library::takeItems(libraryItems)) {
+    // A list growing (the server's albums joining the card's) keeps the selection in place.
+    if (!listHadItems) librarySelection = 0;
+    else if (librarySelection >= static_cast<int>(libraryItems.size())) librarySelection = 0;
     // A book reopens on the chapter holding its saved place.
-    librarySelection = 0;
     for (int index = 0; index < static_cast<int>(libraryItems.size()); index++) if (libraryItems[index].resumeMs) librarySelection = index;
     renderDirty = true;
   }
@@ -2945,9 +3026,9 @@ void handleKeyboard() {
   }
   if (screenMode == ScreenMode::Rooms) {
     if (goUp && roomSelection > 0) roomSelection--;
-    else if (goDown && roomSelection + 1 < static_cast<int>(rooms.size())) roomSelection++;
+    else if (goDown && roomSelection + 1 < roomCount()) roomSelection++;
     else if (goLeft) screenMode = ScreenMode::Menu;
-    else if ((goRight || keys.enter) && !rooms.empty()) { selectRoom(roomSelection); screenMode=ScreenMode::Chat; }
+    else if ((goRight || keys.enter) && roomCount() > 0) { selectRoom(roomSelection); screenMode=ScreenMode::Chat; }
     playNextTone(); renderDirty=true; return;
   }
   if (screenMode == ScreenMode::Volume) {
@@ -3047,7 +3128,7 @@ void handleKeyboard() {
 
 void setup() {
   Serial.begin(115200);
-  os::bindTask(os::Owner::Ui);
+  sharedListsMutex = xSemaphoreCreateMutex();
   auto config = M5.config(); config.output_power = true;
   M5Cardputer.begin(config, true); M5Cardputer.Display.setRotation(1); M5Cardputer.Display.setTextWrap(false);
   loadConfiguration();

@@ -69,7 +69,8 @@ void playSource(const Command &command) {
   HMP3Decoder decoder = nullptr;
   // Chat's TLS work holds a lot of RAM for a few seconds at a time, so wait it out.
   for (uint8_t attempt = 0; attempt < kAllocationTries && !interrupted(); attempt++) {
-    // Plain malloc, so the ledger charges these to the app that is playing. No PSRAM here: it is internal.
+    // Leaves room for the screen and keyboard: below this the next attempt waits instead.
+    if (ESP.getFreeHeap() < kInputBytes + kPcmBuffers * kPcmSamples * sizeof(int16_t) + os::kPlayerAdmitFree / 2) { vTaskDelay(pdMS_TO_TICKS(1000)); continue; }
     input = static_cast<uint8_t *>(malloc(kInputBytes));
     pcm = static_cast<int16_t *>(malloc(kPcmBuffers * kPcmSamples * sizeof(int16_t)));
     decoder = MP3InitDecoder();
@@ -218,7 +219,6 @@ void playSource(const Command &command) {
 }
 
 void playerTask(void *) {
-  os::bindTask(os::Owner::Music);
   for (;;) {
     if (endRequested) { endRequested = false; taskHandle = nullptr; vTaskDelete(nullptr); }
     if (!hasPending) {

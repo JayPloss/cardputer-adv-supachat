@@ -38,7 +38,7 @@ const languageHandler=firmware.indexOf('if (screenMode == ScreenMode::Language)'
 assert.match(firmware,/volatile bool localOnlyMode = false/);assert.match(firmware,/if \(localOnlyMode\)[\s\S]*ESPNOW LOCAL/);assert.match(firmware,/setLocalOnlyMode\(!localOnlyMode\)/);assert.doesNotMatch(firmware,/putBool\([^\n]*localOnly/);assert.match(firmware,/ScreenMode::Changelog/);
 assert.match(firmware,/wifiResumeRequested = true/);assert.match(firmware,/wifiResumeRequested = false; nextWifiAttempt = 0/);
 const changelogHeader=fs.readFileSync(new URL('../firmware/include/changelog.h',import.meta.url),'utf8');for(const entry of changelog){assert.match(changelogHeader,new RegExp(entry.version.replace('.','\\.')));for(const line of entry.lines)assert.ok(changelogHeader.includes(line))}
-assert.match(firmware,/kDefaultRoomId\[\] = "wolfpack"/);assert.match(firmware,/String currentRoomId = kDefaultRoomId/);
+assert.match(firmware,/kDefaultRoomId\[\] = "wolfpack"/);assert.match(firmware,/SharedText<40> currentRoomId\{kDefaultRoomId\}/);
 assert.match(firmware,/char roomId\[9\]/);assert.match(firmware,/String\(packet->roomId\) != currentRoomId/);
 assert.match(firmware,/const bool hydratingHistory = !initialSyncComplete/);
 assert.match(firmware,/kHistoryPageLimit = 20/);assert.match(firmware,/"&before=" \+ String\(historyBeforeId\)/);assert.match(firmware,/deserializeJson\(document, &response\[0\], response\.length\(\)\)/);assert.doesNotMatch(firmware,/syncOverride\) \{ syncOverride = false; WiFi\.disconnect/);

@@ -13,20 +13,19 @@ From the runtime emulator (`cardputer-emulator`), with its stated estimates. It 
 | One secure connection at its peak | 71,000 | socket 2 K, two 16 K records, context 3 K, traffic 8 K, handshake 24 K |
 | Media tasks' stacks, while a media app is open | 20,000 | the code |
 | Player on the card: decoder 24 K, input 6 K, PCM 14 K | 44,000 | scenario `card-book` |
-| Reserved floor for the screen and keyboard | 16,384 | `os::kFloorBytes` |
 
-What follows from those: one secure connection fits at rest but not beside a media app (99 - 20 - 44 leaves 35 K, under the 71 K peak plus the floor). So:
+What follows from those: one secure connection fits at rest but not beside a media app (99 - 20 - 44 leaves 35 K, under the 71 K peak). So:
 
 - One secure connection at a time. Chat waits whenever a media app is open.
 - The walkie socket, which holds that slot, exists only on the walkie screen.
 - The media tasks exist only while a media app is open or something plays.
 - While something plays, chat's RAM shrinks to its last 5 messages and comes back from the card afterwards.
 
-Budgets: chat 38 K (its measured peak is 36 K, during the first sync), each media app 62 K.
+## What is enforced, and what isn't
 
-## What enforcement can't reach
+Nothing limits an individual app's allocations. An earlier version charged every `malloc` to its app through a linker `--wrap` with a prefix on each block. That boot-looped the real device: libc's own `free` reached the real heap directly, past the wrapper, with a prefixed pointer. So there are no per-app budgets, and the upload check refuses any `--wrap` of the allocator.
 
-The ledger sees what goes through `malloc`, `calloc`, `realloc` and `new`, by `--wrap` at link time, including from the prebuilt libraries that call `malloc`. It can't see anything calling `heap_caps_malloc` directly (the Wi-Fi driver, lwIP's pools, M5GFX's buffers) or ROM code. mbedTLS goes through `mbedtls_platform_set_calloc_free`, which stops it eating the floor. The broker admits a connection by free heap at the start, not by reserving it, so something else can still lose out during a handshake, and is then contained.
+What remains acts before heavy work starts, from the free heap as reported: a secure connection needs 80 KB free and a 20 KB block; the player waits if too little is free. The 16 KB floor for the screen and keyboard no longer exists as a limit. mbedTLS's allocator is left alone.
 
 ## Containment
 

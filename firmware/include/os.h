@@ -3,31 +3,26 @@
 #include <Arduino.h>
 
 // A small operating layer over the firmware's tasks, because RAM is the one thing they all
-// compete for. Every allocation is charged to the app that owns the task making it. Apps
-// live inside budgets, and a floor stays reserved for the screen and keyboard. Secure
-// connections go through one broker, and an app that runs out is stopped, not the device.
+// compete for. It doesn't touch allocations: replacing malloc with a wrapper that prefixes each
+// block crashed the real device at boot, because libc's own free bypasses the wrapper. What it does
+// is decide when heavy work may start, from the free heap as reported, and stop an app, not
+// the device, when one runs out.
 namespace os {
 
-// Who a task's allocations are charged to. Ui has no budget, and it alone may use the floor.
+// Names for faults and the SYSTEM screen.
 enum class Owner : uint8_t { System, Ui, Chat, Music, Books, Count };
 enum class AppState : uint8_t { Stopped, Starting, Foreground, Background };
 
-// From the emulator's measurements of the firmware; see docs/heap-budget.md.
-constexpr uint32_t kFloorBytes = 16 * 1024;
-constexpr uint32_t kChatBudget = 38 * 1024;
-constexpr uint32_t kMediaBudget = 62 * 1024;
-// A secure connection's peak: socket 2 KB, two 16 KB records, context 3 KB, Wi-Fi traffic
-// 8 KB, handshake 24 KB. Mostly outside the ledger, so the broker admits by free heap.
-constexpr uint32_t kSecureConnectionPeak = 71 * 1024;
+// Heavy work starts only above these. Not measured on a device yet; SYSTEM's numbers are how to check.
+// Set too high, chat just waits; set too low, an allocation fails and is contained.
+constexpr uint32_t kSecureAdmitFree = 80 * 1024;
+constexpr uint32_t kSecureAdmitLargest = 20 * 1024;
+constexpr uint32_t kPlayerAdmitFree = 60 * 1024;
 
 void begin();
-void bindTask(Owner owner);
 void setMediaOwner(Owner owner);
 Owner mediaOwner();
 
-uint32_t used(Owner owner);
-uint32_t peak(Owner owner);
-uint32_t budget(Owner owner);
 const char *name(Owner owner);
 
 // Apps. The UI says which is in front; the rest follows from what each is doing.
