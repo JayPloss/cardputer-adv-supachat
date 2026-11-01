@@ -2056,7 +2056,7 @@ constexpr HomeApp kHomeApps[] = {{"SUPACHAT", "SUPACHAT"}, {"MUSIC", "MUSIQUE"},
 constexpr int kHomeAppCount = sizeof(kHomeApps) / sizeof(kHomeApps[0]);
 int homeSelection = 0;
 
-enum class LibraryView : uint8_t { MusicRoot, Albums, Tracks, Liked, SearchResults };
+enum class LibraryView : uint8_t { MusicRoot, CardAlbums, Albums, Tracks, Liked, SearchResults };
 library::Collection libraryCollection = library::Collection::Music;
 LibraryView libraryView = LibraryView::MusicRoot;
 std::vector<library::Item> libraryItems;
@@ -2070,7 +2070,7 @@ int libraryOffset = 0;
 int queueIndex = -1;
 uint32_t lastBookmarkAt = 0;
 uint32_t lastMediaRenderAt = 0;
-String savedPlaceTrackId;
+bool tracksFromCardList = false;
 
 String utf8Head(const String &text, size_t maximumCharacters) {
   size_t characters = 0;
@@ -2149,10 +2149,11 @@ void drawNowPlaying() {
   display.setTextColor(TFT_WHITE, TFT_BLACK); display.setCursor(6, 28); printFont0Text(utf8Head(item->title, 38));
   display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 42); printFont0Text(utf8Head(item->detail, 38));
   const uint32_t position = media::positionSeconds();
+  const uint32_t duration = item->seconds ? item->seconds : media::durationSeconds();
   display.drawRoundRect(6, 60, 228, 8, 3, TFT_DARKGREY);
-  if (item->seconds) display.fillRoundRect(7, 61, std::min<uint32_t>(226, 226 * position / item->seconds), 6, 2, TFT_GREEN);
+  if (duration) display.fillRoundRect(7, 61, std::min<uint64_t>(226, 226ULL * position / duration), 6, 2, TFT_GREEN);
   display.setTextColor(TFT_WHITE, TFT_BLACK); display.setCursor(6, 74); display.print(clockText(position));
-  const String total = clockText(item->seconds); display.setCursor(234 - static_cast<int>(total.length()) * 6, 74); display.print(total);
+  const String total = clockText(duration); display.setCursor(234 - static_cast<int>(total.length()) * 6, 74); display.print(total);
   display.setCursor(6, 92);
   if (state == media::State::Failed) { display.setTextColor(TFT_RED, TFT_BLACK); display.print(media::failure()); }
   else {
@@ -2451,10 +2452,19 @@ void switchRoom(int direction) {
   selectRoom((active + direction + static_cast<int>(rooms.size())) % static_cast<int>(rooms.size()));
 }
 
+String folderOf(const String &path) { return path.substring(0, path.lastIndexOf('/')); }
+
+void savePlace() {
+  const auto *item = nowPlayingItem();
+  if (!item || queueCollection != library::Collection::Books) return;
+  if (item->path.length()) library::saveCardPlace(folderOf(item->path), item->path, media::positionSeconds());
+  else library::saveBookmark(item->id, media::positionSeconds() * 1000);
+}
+
 void stopMediaNow() {
   if (!media::active()) return;
   const auto *item = nowPlayingItem();
-  if (item && queueCollection == library::Collection::Books) library::saveBookmark(item->id, media::positionSeconds() * 1000);
+  savePlace();
   media::stop();
   const uint32_t started = millis();
   while (media::state() != media::State::Idle && millis() - started < 1500) delay(5);
@@ -2465,7 +2475,8 @@ void startQueuedTrack(uint32_t offsetSeconds) {
   if (!item) return;
   // The microphone and the speaker share the audio hardware.
   M5Cardputer.Mic.end(); M5Cardputer.Speaker.begin(); M5Cardputer.Speaker.setVolume(kVolumeValues[volumeLevel]);
-  media::play(library::streamUrl(item->id, queueCollection, offsetSeconds), offsetSeconds);
+  if (item->path.length()) media::playFile(item->path, offsetSeconds);
+  else media::play(library::streamUrl(item->id, queueCollection, offsetSeconds), offsetSeconds);
   lastBookmarkAt = millis();
 }
 
@@ -2477,7 +2488,7 @@ void openLibraryList(LibraryView view, const String &title) {
 void openMusicRoot() {
   libraryCollection = library::Collection::Music; libraryView = LibraryView::MusicRoot;
   libraryTitle = uiText("MUSIC", "MUSIQUE"); libraryItems.clear(); librarySelection = 0;
-  for (const char *label : {uiText("ALBUMS", "ALBUMS"), uiText("LIKED SONGS", "CHANSONS AIMEES"), uiText("SEARCH", "CHERCHER")}) {
+  for (const char *label : {uiText("ON THE CARD", "SUR LA CARTE"), uiText("ALBUMS", "ALBUMS"), uiText("LIKED SONGS", "CHANSONS AIMEES"), uiText("SEARCH", "CHERCHER")}) {
     library::Item item; item.title = label; libraryItems.push_back(item);
   }
   if (media::active()) { library::Item item; item.title = uiText("NOW PLAYING", "EN LECTURE"); libraryItems.push_back(item); }
@@ -2508,7 +2519,9 @@ bool goBackFromApp() {
     return true;
   }
   if (screenMode != ScreenMode::Library) return false;
-  if (libraryView == LibraryView::Tracks) {
+  if (libraryView == LibraryView::Tracks && tracksFromCardList) {
+    openLibraryList(LibraryView::CardAlbums, uiText("ON THE CARD", "SUR LA CARTE")); library::requestCardAlbums(libraryCollection);
+  } else if (libraryView == LibraryView::Tracks) {
     libraryOffset = 0; openLibraryList(LibraryView::Albums, libraryCollection == library::Collection::Books ? uiText("BOOKS", "LIVRES") : uiText("ALBUMS", "ALBUMS"));
     library::requestAlbums(libraryCollection, 0);
   } else if (libraryView == LibraryView::MusicRoot || libraryCollection == library::Collection::Books) screenMode = ScreenMode::Home;
@@ -2518,33 +2531,41 @@ bool goBackFromApp() {
 
 void openLibrarySelection() {
   if (libraryView == LibraryView::MusicRoot) {
-    if (librarySelection == 0) { libraryOffset = 0; openLibraryList(LibraryView::Albums, uiText("ALBUMS", "ALBUMS")); library::requestAlbums(library::Collection::Music, 0); }
-    else if (librarySelection == 1) { openLibraryList(LibraryView::Liked, uiText("LIKED", "AIMEES")); library::requestLiked(); }
-    else if (librarySelection == 2) { librarySearchText = ""; screenMode = ScreenMode::LibrarySearch; }
+    if (librarySelection == 0) { libraryOffset = 0; openLibraryList(LibraryView::CardAlbums, uiText("ON THE CARD", "SUR LA CARTE")); library::requestCardAlbums(library::Collection::Music); }
+    else if (librarySelection == 1) { libraryOffset = 0; openLibraryList(LibraryView::Albums, uiText("ALBUMS", "ALBUMS")); library::requestAlbums(library::Collection::Music, 0); }
+    else if (librarySelection == 2) { openLibraryList(LibraryView::Liked, uiText("LIKED", "AIMEES")); library::requestLiked(); }
+    else if (librarySelection == 3) { librarySearchText = ""; screenMode = ScreenMode::LibrarySearch; }
     else screenMode = ScreenMode::NowPlaying;
     renderDirty = true; return;
   }
   if (librarySelection >= static_cast<int>(libraryItems.size())) return;
-  if (libraryView == LibraryView::Albums) {
+  if (libraryView == LibraryView::Albums || libraryView == LibraryView::CardAlbums) {
     const auto album = libraryItems[librarySelection];
-    openLibraryList(LibraryView::Tracks, album.title); library::requestTracks(album.id);
+    tracksFromCardList = libraryView == LibraryView::CardAlbums;
+    openLibraryList(LibraryView::Tracks, album.title);
+    if (album.path.length()) library::requestCardTracks(album.path); else library::requestTracks(album.id);
     return;
   }
   // A list becomes the play queue, so the next song follows on its own.
   stopMediaNow();
   playQueue = libraryItems; queueCollection = libraryCollection; queueIndex = librarySelection;
   const auto *item = nowPlayingItem();
-  savedPlaceTrackId = item->resumeMs ? item->id : "";
   startQueuedTrack(item->resumeMs / 1000);
   screenMode = ScreenMode::NowPlaying; renderDirty = true;
+}
+
+void savePlaceAtStart() {
+  const auto *item = nowPlayingItem();
+  if (item && item->path.length() && queueCollection == library::Collection::Books) library::saveCardPlace(folderOf(item->path), item->path, 0);
 }
 
 void moveQueue(int direction) {
   const int next = queueIndex + direction;
   if (next < 0 || next >= static_cast<int>(playQueue.size())) return;
   stopMediaNow();
-  if (queueCollection == library::Collection::Books) library::deleteBookmark(playQueue[queueIndex].id);
-  queueIndex = next; startQueuedTrack(0); renderDirty = true;
+  // The place moves with the chapter: a card book keeps one file, a server book one bookmark.
+  if (queueCollection == library::Collection::Books && playQueue[queueIndex].path.isEmpty()) library::deleteBookmark(playQueue[queueIndex].id);
+  queueIndex = next; startQueuedTrack(0); savePlaceAtStart(); renderDirty = true;
 }
 
 void serviceMedia() {
@@ -2563,7 +2584,9 @@ void serviceMedia() {
     const auto *item = nowPlayingItem();
     if (queueIndex + 1 < static_cast<int>(playQueue.size())) moveQueue(1);
     else {
-      if (item && queueCollection == library::Collection::Books) library::deleteBookmark(item->id);
+      if (item && queueCollection == library::Collection::Books) {
+        if (item->path.length()) library::clearCardPlace(folderOf(item->path)); else library::deleteBookmark(item->id);
+      }
       media::stop();
     }
     return;
@@ -2572,7 +2595,7 @@ void serviceMedia() {
   if (screenMode == ScreenMode::NowPlaying && millis() - lastMediaRenderAt >= 1000) { lastMediaRenderAt = millis(); renderDirty = true; }
   const auto *item = nowPlayingItem();
   if (item && queueCollection == library::Collection::Books && millis() - lastBookmarkAt >= kBookmarkEveryMs) {
-    lastBookmarkAt = millis(); library::saveBookmark(item->id, media::positionSeconds() * 1000);
+    lastBookmarkAt = millis(); savePlace();
   }
 }
 
@@ -2622,8 +2645,7 @@ bool handleAppKeys(const Keyboard_Class::KeysState &keys, bool goUp, bool goDown
   // Now playing. Music keeps going after leaving this screen; S stops it.
   if (keys.enter) {
     media::togglePause();
-    const auto *item = nowPlayingItem();
-    if (item && queueCollection == library::Collection::Books) library::saveBookmark(item->id, media::positionSeconds() * 1000);
+    savePlace();
   } else if (goUp && volumeLevel < 4) { volumeLevel++; saveVolume(); }
   else if (goDown && volumeLevel > 0) { volumeLevel--; saveVolume(); }
   else if (goLeft || goRight) {
@@ -2636,7 +2658,8 @@ bool handleAppKeys(const Keyboard_Class::KeysState &keys, bool goUp, bool goDown
     for (const auto character : keys.word) {
       if (character == 's' || character == 'S') { stopMediaNow(); goBackFromApp(); }
       else if ((character == 'l' || character == 'L') && queueIndex >= 0 && queueCollection == library::Collection::Music) {
-        auto &item = playQueue[queueIndex]; item.liked = !item.liked; library::setLiked(item.id, item.liked);
+        auto &item = playQueue[queueIndex];
+        if (item.path.isEmpty()) { item.liked = !item.liked; library::setLiked(item.id, item.liked); }
       }
     }
   }

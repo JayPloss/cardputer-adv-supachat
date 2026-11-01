@@ -2,10 +2,12 @@
 
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
+#include <SD.h>
 #include <WiFi.h>
 #include <esp_random.h>
 #include <mbedtls/md5.h>
 
+#include <algorithm>
 #include <deque>
 
 #if __has_include("music_secrets.h")
@@ -28,8 +30,8 @@ constexpr int kMusicKbps = 96;
 constexpr int kBooksKbps = 48;
 constexpr uint32_t kTimeoutMs = 10000;
 
-enum class JobKind : uint8_t { Albums, Liked, Search, Tracks, SaveBookmark, DeleteBookmark, Like, Unlike };
-struct Job { JobKind kind; String text; int number; Collection collection; };
+enum class JobKind : uint8_t { CardAlbums, CardTracks, SavePlace, ClearPlace, Albums, Liked, Search, Tracks, SaveBookmark, DeleteBookmark, Like, Unlike };
+struct Job { JobKind kind; String text; int number; Collection collection; String extra; };
 
 SemaphoreHandle_t mutex = nullptr;
 TaskHandle_t taskHandle = nullptr;
@@ -69,6 +71,7 @@ String apiUrl(const char *method) {
 // Fetches a Subsonic call with only the filtered fields kept in RAM. HTTP/1.0
 // keeps the server from chunking, so the JSON parser can read the socket directly.
 bool fetch(const String &url, JsonDocument &filter, JsonDocument &document) {
+  if (!configured()) { failureText = "SERVER NOT SET UP"; return false; }
   if (WiFi.status() != WL_CONNECTED) { failureText = "NO WIFI"; return false; }
   HTTPClient http;
   http.useHTTP10(true);
@@ -132,18 +135,93 @@ void addTrack(std::vector<Item> &items, JsonObjectConst track) {
   items.push_back(std::move(item));
 }
 
+const char *cardRoot(Collection collection) { return collection == Collection::Books ? "/books" : "/music"; }
+
+String baseName(const String &path) { return path.substring(path.lastIndexOf('/') + 1); }
+
+void addCardFolders(std::vector<Item> &items, Collection collection) {
+  File root = SD.open(cardRoot(collection));
+  if (!root || !root.isDirectory()) return;
+  const size_t first = items.size();
+  for (File entry = root.openNextFile(); entry; entry = root.openNextFile()) {
+    if (entry.isDirectory()) {
+      Item item;
+      item.path = String(cardRoot(collection)) + "/" + baseName(entry.name());
+      item.title = baseName(entry.name());
+      items.push_back(std::move(item));
+    }
+    entry.close();
+  }
+  root.close();
+  std::sort(items.begin() + first, items.end(), [](const Item &a, const Item &b) { return a.title < b.title; });
+}
+
+String placePath(const String &folder) { return folder + "/.place"; }
+
+bool isMp3(const String &name) {
+  return !name.startsWith(".") && (name.endsWith(".mp3") || name.endsWith(".MP3"));
+}
+
+bool runCardTracks(const Job &job) {
+  File root = SD.open(job.text);
+  if (!root || !root.isDirectory()) { failureText = "NOT ON CARD"; return false; }
+  std::vector<Item> items;
+  for (File entry = root.openNextFile(); entry; entry = root.openNextFile()) {
+    const String name = baseName(entry.name());
+    if (!entry.isDirectory() && isMp3(name)) {
+      Item item;
+      item.path = job.text + "/" + name;
+      item.title = name.substring(0, name.length() - 4);
+      items.push_back(std::move(item));
+    }
+    entry.close();
+  }
+  root.close();
+  std::sort(items.begin(), items.end(), [](const Item &a, const Item &b) { return a.title < b.title; });
+  File place = SD.open(placePath(job.text), FILE_READ);
+  if (place) {
+    const String trackPath = place.readStringUntil('\n');
+    const uint32_t seconds = place.readStringUntil('\n').toInt();
+    place.close();
+    // A 1 ms floor still marks a saved place at the very start of a chapter.
+    for (Item &item : items) if (item.path == trackPath) item.resumeMs = std::max<uint32_t>(1, seconds * 1000);
+  }
+  publish(std::move(items));
+  return true;
+}
+
+void writeCardPlace(const Job &job) {
+  File place = SD.open(placePath(job.text), FILE_WRITE);
+  if (!place) return;
+  place.print(job.extra); place.print('\n'); place.print(job.number); place.print('\n');
+  place.close();
+}
+
 bool runAlbums(const Job &job) {
+  std::vector<Item> items;
+  if (job.number == 0) addCardFolders(items, job.collection);
+  const bool hasCardItems = !items.empty();
+  if (!configured() || WiFi.status() != WL_CONNECTED) {
+    if (hasCardItems) { publish(std::move(items)); return true; }
+    failureText = configured() ? "NO WIFI" : (job.collection == Collection::Books ? "NO BOOKS ON CARD" : "NO MUSIC ON CARD");
+    return false;
+  }
   lookUpFolders();
-  if (musicFolderId < 0) return false;
   const int folder = job.collection == Collection::Books ? booksFolderId : musicFolderId;
-  if (job.collection == Collection::Books && folder == 0) { failureText = "NO BOOKS YET"; return false; }
+  if (musicFolderId < 0 || (job.collection == Collection::Books && folder == 0)) {
+    if (hasCardItems) { publish(std::move(items)); return true; }
+    if (musicFolderId >= 0) failureText = "NO BOOKS YET";
+    return false;
+  }
   JsonDocument filter, document;
   JsonObject album = filter["subsonic-response"]["albumList2"]["album"][0].to<JsonObject>();
   album["id"] = true; album["name"] = true; album["artist"] = true; album["duration"] = true;
   String url = apiUrl("getAlbumList2") + "&type=alphabeticalByName&size=" + kPageSize + "&offset=" + job.number;
   if (folder) url += String("&musicFolderId=") + folder;
-  if (!fetch(url, filter, document)) return false;
-  std::vector<Item> items;
+  if (!fetch(url, filter, document)) {
+    if (hasCardItems) { publish(std::move(items)); return true; }
+    return false;
+  }
   for (JsonObjectConst value : document["subsonic-response"]["albumList2"]["album"].as<JsonArrayConst>()) addAlbum(items, value);
   publish(std::move(items));
   return true;
@@ -203,6 +281,15 @@ void workerTask(void *) {
     if (empty) { vTaskDelay(pdMS_TO_TICKS(50)); continue; }
     bool ok = true;
     switch (job.kind) {
+      case JobKind::CardAlbums: {
+        std::vector<Item> items;
+        addCardFolders(items, job.collection);
+        publish(std::move(items));
+        break;
+      }
+      case JobKind::CardTracks: ok = runCardTracks(job); break;
+      case JobKind::SavePlace: writeCardPlace(job); break;
+      case JobKind::ClearPlace: SD.remove(placePath(job.text)); break;
       case JobKind::Albums: ok = runAlbums(job); break;
       case JobKind::Liked: ok = runLiked(); break;
       case JobKind::Search: ok = runSearch(job); break;
@@ -217,11 +304,7 @@ void workerTask(void *) {
 }
 
 void enqueue(Job job, bool loadsList) {
-  if (loadsList) {
-    if (!configured()) { failureText = "NOT SET UP"; currentStatus = Status::Failed; return; }
-    currentStatus = Status::Loading;
-  }
-  if (!configured()) return;
+  if (loadsList) currentStatus = Status::Loading;
   xSemaphoreTake(mutex, portMAX_DELAY);
   jobs.push_back(std::move(job));
   xSemaphoreGive(mutex);
@@ -237,6 +320,10 @@ void begin() {
 bool configured() { return kHost[0] != 0; }
 
 void requestAlbums(Collection collection, int offset) { enqueue({JobKind::Albums, "", offset, collection}, true); }
+void requestCardAlbums(Collection collection) { enqueue({JobKind::CardAlbums, "", 0, collection}, true); }
+void requestCardTracks(const String &folder) { enqueue({JobKind::CardTracks, folder, 0, Collection::Books}, true); }
+void saveCardPlace(const String &folder, const String &trackPath, uint32_t seconds) { enqueue({JobKind::SavePlace, folder, static_cast<int>(seconds), Collection::Books, trackPath}, false); }
+void clearCardPlace(const String &folder) { enqueue({JobKind::ClearPlace, folder, 0, Collection::Books}, false); }
 void requestLiked() { enqueue({JobKind::Liked, "", 0, Collection::Music}, true); }
 void requestSearch(const String &query, int offset) { enqueue({JobKind::Search, query, offset, Collection::Music}, true); }
 void requestTracks(const String &albumId) { enqueue({JobKind::Tracks, albumId, 0, Collection::Music}, true); }
