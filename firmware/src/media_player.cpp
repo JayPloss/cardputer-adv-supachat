@@ -10,6 +10,10 @@
 
 #include <algorithm>
 
+// The MP3 library's own allocator spins forever when RAM runs out, which the watchdog turns
+// into a restart. Its decoder already handles a NULL, so it gets a plain allocation instead.
+extern "C" void *__wrap_helix_malloc(int size) { return calloc(1, size ? size : 1); }
+
 namespace media {
 namespace {
 // Chat voice uses channel 0, and so do the key and notification tones.
@@ -42,6 +46,8 @@ volatile uint32_t totalSeconds = 0;
 volatile uint32_t lowestFreeHeap = UINT32_MAX;
 volatile uint32_t underrunCount = 0;
 const char *volatile failureText = "";
+
+char memoryFailure[32];
 
 void fail(const char *reason) { failureText = reason; currentState = State::Failed; }
 
@@ -80,7 +86,10 @@ void playSource(const Command &command) {
     vTaskDelay(pdMS_TO_TICKS(1000));
   }
   if (!input || !pcm || !decoder) {
-    if (!interrupted()) fail("NO MEMORY");
+    if (!interrupted()) {
+      snprintf(memoryFailure, sizeof(memoryFailure), "NO MEMORY: %uK FREE", static_cast<unsigned>(ESP.getFreeHeap() / 1024));
+      fail(memoryFailure);
+    }
     return;
   }
 

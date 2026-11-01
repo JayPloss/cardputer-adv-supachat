@@ -321,6 +321,12 @@ bool audioPlaying = false;
 volatile bool messageNotificationPending = false;
 bool messageNotificationActive = false;
 volatile bool manualWifiMode = false;
+volatile bool radioOffWanted = false;
+volatile bool radioIsOff = false;
+uint32_t lastCardMediaAt = 0;
+constexpr uint32_t kRadioOffWaitMs = 4000;
+// The radio stays off across the gap between chapters and short pauses in use.
+constexpr uint32_t kRadioBackAfterMs = 10000;
 volatile int64_t voiceDownloadRequestedId = 0;
 volatile bool voicePlaybackCancelled = false;
 volatile bool voiceDownloadActive = false;
@@ -1793,6 +1799,20 @@ void networkTask(void *) {
       xSemaphoreGive(stateMutex);
     }
     if (chargingModeActive) { vTaskDelay(pdMS_TO_TICKS(1000)); continue; }
+    if (radioOffWanted) {
+      if (!radioIsOff) {
+        if (espNowActive) { esp_now_deinit(); espNowActive = false; }
+        WiFi.disconnect(true, false); WiFi.mode(WIFI_OFF);
+        currentSsid = ""; networkStatus = "RADIO OFF"; renderDirty = true;
+        radioIsOff = true;
+      }
+      vTaskDelay(pdMS_TO_TICKS(200)); continue;
+    }
+    if (radioIsOff) {
+      WiFi.mode(WIFI_STA); WiFi.setAutoReconnect(false); WiFi.persistent(false);
+      if (kEspNowEnabled) initializeEspNow();
+      radioIsOff = false; wifiResumeRequested = true;
+    }
     if (manualWifiMode) { networkTaskParked = true; vTaskDelay(pdMS_TO_TICKS(100)); continue; }
     networkTaskParked = false;
     if (localOnlyMode) {
@@ -2713,6 +2733,12 @@ void startQueuedTrack(uint32_t offsetSeconds) {
   mediaStarting = true;
   shrinkChatForPlayback();
   for (const uint32_t started = millis(); walkieInitialized && millis() - started < 1500;) delay(10);
+  // The card needs no radio, and the Wi-Fi driver's buffers are the biggest thing the player can get back.
+  if (item->onCard) {
+    radioOffWanted = true;
+    lastCardMediaAt = millis();
+    for (const uint32_t started = millis(); !radioIsOff && millis() - started < kRadioOffWaitMs;) delay(10);
+  }
   if (item->onCard) media::playFile(trackPath(*item), offsetSeconds);
   else media::play(library::streamUrl(item->id, queueCollection, offsetSeconds), offsetSeconds);
   mediaStarting = false;
@@ -2872,6 +2898,10 @@ void serviceApps() {
 
 void serviceMedia() {
   serviceApps();
+  if (radioOffWanted) {
+    if (media::active() || mediaStarting || adjacentWanted) lastCardMediaAt = millis();
+    else if (millis() - lastCardMediaAt > kRadioBackAfterMs) radioOffWanted = false;
+  }
   const bool listHadItems = !libraryItems.empty();
   if (library::takeItems(libraryItems)) {
     // A list growing (the server's albums joining the card's) keeps the selection in place.
