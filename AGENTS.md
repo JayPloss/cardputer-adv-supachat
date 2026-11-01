@@ -16,6 +16,16 @@
   without ceremony. An unknown device is a lookup failure, not permission to
   guess.
 
+## Emulators
+
+- `emulator/` here is a browser mock of the UI plus contract tests of library behaviour. It does not
+  run the firmware.
+- `JayPloss/cardputer-emulator`, checked out beside this repo, is the runtime one: it compiles the
+  real firmware against a device-sized heap, and it reproduced both real out-of-memory crashes.
+  Run `make check` there before promoting anything to a device; the upload gate runs it when it is present.
+- `firmware/include/os.h` is the layer keeping apps within their RAM: budgets, one secure connection
+  at a time, containment, the boot phase. `docs/heap-budget.md` has the measurements behind it.
+
 ## Authentication claims
 
 - Never describe a login issue as fixed, functional, working, or expected to work based only on account existence, password assignment, password-hash verification, server health, route health, unit tests, or a simulated identity header.

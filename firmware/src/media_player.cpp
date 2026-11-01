@@ -254,7 +254,8 @@ void playerTask(void *) {
 }  // namespace
 
 bool begin() {
-  if (taskHandle) return true;
+  // Wanted again before it had ended: it just carries on.
+  if (taskHandle) { endRequested = false; return true; }
   if (!commandMutex) commandMutex = xSemaphoreCreateMutex();
   // Core 0 is shared with the Wi-Fi stack; this outranks chat sync so a TLS
   // handshake there cannot hold up decoding.

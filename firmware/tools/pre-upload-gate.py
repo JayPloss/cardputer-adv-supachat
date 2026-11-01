@@ -11,6 +11,11 @@ def run_device_contract_gate(source, target, env):
         ["node", os.path.join(repo, "emulator", "device-contract.mjs")],
         ["node", os.path.join(repo, "emulator", "test-flow.mjs")],
     ]
+    # The runtime emulator, when it is checked out beside this repo: real firmware on a device-sized heap.
+    # The power lab is its own program and has no scenarios.
+    runtime = os.path.abspath(os.path.join(repo, "..", "cardputer-emulator"))
+    if os.path.isdir(runtime) and env["PIOENV"] != "power-lab":
+        checks.append(["python3", os.path.join(runtime, "tools", "check.py")])
     for command in checks:
         completed = subprocess.run(command, cwd=repo, check=False)
         if completed.returncode:

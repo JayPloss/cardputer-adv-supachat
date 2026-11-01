@@ -34,7 +34,7 @@ constexpr uint32_t kTimeoutMs = 10000;
 constexpr size_t kCardTrackLimit = 300;
 
 enum class JobKind : uint8_t { CardAlbums, CardTracks, Adjacent, SavePlace, ClearPlace, Albums, Liked, Search, Tracks, SaveBookmark, DeleteBookmark, Like, Unlike };
-struct Job { JobKind kind; String text; int number; Collection collection; String extra; uint32_t generation = 0; };
+struct Job { JobKind kind; String text; int number; Collection collection; String extra; uint32_t generation; };
 
 SemaphoreHandle_t mutex = nullptr;
 TaskHandle_t taskHandle = nullptr;
@@ -362,7 +362,8 @@ void enqueue(Job job, bool loadsList) {
 }  // namespace
 
 bool begin() {
-  if (taskHandle) return true;
+  // Wanted again before it had ended: it just carries on.
+  if (taskHandle) { endRequested = false; return true; }
   if (!mutex) mutex = xSemaphoreCreateMutex();
   return xTaskCreatePinnedToCore(workerTask, "library", 12288, nullptr, 1, &taskHandle, 0) == pdPASS;
 }
