@@ -325,6 +325,7 @@ volatile bool radioOffWanted = false;
 volatile bool radioIsOff = false;
 uint32_t lastCardMediaAt = 0;
 constexpr uint32_t kRadioOffWaitMs = 4000;
+constexpr uint8_t kListeningToneVolume = 36;
 // The radio stays off across the gap between chapters and short pauses in use.
 constexpr uint32_t kRadioBackAfterMs = 10000;
 volatile int64_t voiceDownloadRequestedId = 0;
@@ -817,6 +818,9 @@ void playNextTone() {
   if (now - lastToneAt < kToneIntervalMs || kKeypressSongLength == 0) return;
   lastToneAt = now;
   M5Cardputer.Speaker.setVolume(kVolumeValues[volumeLevel]);
+  // Tones are full-scale and speech isn't, so in the listening apps they sit well below the book.
+  const bool listening = screenMode == ScreenMode::Library || screenMode == ScreenMode::LibrarySearch || screenMode == ScreenMode::NowPlaying;
+  M5Cardputer.Speaker.setChannelVolume(0, listening ? kListeningToneVolume : 255);
   M5Cardputer.Speaker.tone(kKeypressSongFrequencies[songPosition], kToneDurationMs, 0, true);
   songPosition = (songPosition + 1) % kKeypressSongLength;
 }
@@ -2700,7 +2704,7 @@ void savePlace() {
   else library::saveBookmark(item->id, media::positionSeconds() * 1000);
 }
 
-bool mediaOwnsRadio() { return mediaStarting || media::active(); }
+bool mediaOwnsRadio() { return mediaStarting || media::active() || radioOffWanted; }
 
 void stopMediaNow() {
   if (!media::active()) return;
@@ -2734,6 +2738,7 @@ void startQueuedTrack(uint32_t offsetSeconds) {
   shrinkChatForPlayback();
   for (const uint32_t started = millis(); walkieInitialized && millis() - started < 1500;) delay(10);
   // The card needs no radio, and the Wi-Fi driver's buffers are the biggest thing the player can get back.
+  if (!item->onCard) radioOffWanted = false;
   if (item->onCard) {
     radioOffWanted = true;
     lastCardMediaAt = millis();
@@ -2807,9 +2812,9 @@ bool goBackFromApp() {
 void openLibrarySelection() {
   if (libraryView == LibraryView::MusicRoot) {
     if (librarySelection == 0) { libraryOffset = 0; openLibraryList(LibraryView::CardAlbums, uiText("ON THE CARD", "SUR LA CARTE")); library::requestCardAlbums(library::Collection::Music); }
-    else if (librarySelection == 1) { libraryOffset = 0; openLibraryList(LibraryView::Albums, uiText("ALBUMS", "ALBUMS")); library::requestAlbums(library::Collection::Music, 0); }
-    else if (librarySelection == 2) { openLibraryList(LibraryView::Liked, uiText("LIKED", "AIMEES")); library::requestLiked(); }
-    else if (librarySelection == 3) { librarySearchText = ""; screenMode = ScreenMode::LibrarySearch; }
+    else if (librarySelection == 1) { radioOffWanted = false; libraryOffset = 0; openLibraryList(LibraryView::Albums, uiText("ALBUMS", "ALBUMS")); library::requestAlbums(library::Collection::Music, 0); }
+    else if (librarySelection == 2) { radioOffWanted = false; openLibraryList(LibraryView::Liked, uiText("LIKED", "AIMEES")); library::requestLiked(); }
+    else if (librarySelection == 3) { radioOffWanted = false; librarySearchText = ""; screenMode = ScreenMode::LibrarySearch; }
     else screenMode = ScreenMode::NowPlaying;
     renderDirty = true; return;
   }
@@ -2899,7 +2904,9 @@ void serviceApps() {
 void serviceMedia() {
   serviceApps();
   if (radioOffWanted) {
-    if (media::active() || mediaStarting || adjacentWanted) lastCardMediaAt = millis();
+    // Choosing the next chapter or book needs the same room as the last one had: chat stays out until he leaves.
+    const bool inListeningApp = screenMode == ScreenMode::Library || screenMode == ScreenMode::LibrarySearch || screenMode == ScreenMode::NowPlaying;
+    if (media::active() || mediaStarting || adjacentWanted || inListeningApp) lastCardMediaAt = millis();
     else if (millis() - lastCardMediaAt > kRadioBackAfterMs) radioOffWanted = false;
   }
   const bool listHadItems = !libraryItems.empty();

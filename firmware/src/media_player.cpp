@@ -21,7 +21,8 @@ constexpr uint8_t kSpeakerChannel = 1;
 // The card never stalls the way Wi-Fi does, so it needs far less held in RAM.
 constexpr size_t kStreamInputBytes = 16 * 1024;
 constexpr size_t kCardInputBytes = 6 * 1024;
-constexpr uint8_t kAllocationTries = 6;
+// Chat's last connection can hold RAM for a while, and this runs behind a BUFFERING screen.
+constexpr uint8_t kAllocationTries = 20;
 constexpr size_t kFileChunkBytes = 2048;
 constexpr size_t kPcmBuffers = 3;
 constexpr size_t kMaxFrameSamples = 1152 * 2;
@@ -258,6 +259,8 @@ void playerTask(void *) {
       os::recordFault(os::mediaOwner(), "player out of memory");
       fail("OUT OF MEMORY");
     }
+    // Everything the player held is back; a free that slipped past the ledger must not refuse the next book.
+    os::reconcile(os::mediaOwner());
   }
 }
 }  // namespace
