@@ -25,6 +25,8 @@
 #include "keypress_song.h"
 #include "media_player.h"
 #include "music_library.h"
+#include "os.h"
+#include <new>
 #include "splash_logo.h"
 
 #ifndef SUPACHAT_DEVICE_NAME
@@ -52,7 +54,9 @@ String languageOverride = "auto";
 const char *uiText(const char *english, const char *french) { return frenchUi ? french : english; }
 constexpr char kFirmwareVersion[] = "v0.54";
 constexpr size_t kMessageLimit = 140;
-constexpr size_t kHistoryLimit = 100;
+constexpr size_t kHistoryLimit = 100;  // What the first sync fetches; older pages go to the card.
+constexpr size_t kRamMessageLimit = 40;
+constexpr size_t kShrunkMessages = 5;
 constexpr uint32_t kToneIntervalMs = 40;
 constexpr uint32_t kToneDurationMs = 180;
 constexpr uint8_t kDefaultVolumeLevel = 3;
@@ -62,7 +66,6 @@ constexpr uint32_t kRenderIntervalMs = 50;
 constexpr uint32_t kWifiRetryMs = 30000;
 constexpr uint32_t kSyncPollMs = 3000;
 constexpr uint32_t kMediaSyncPollMs = 60000;
-constexpr uint32_t kChatHeapFloor = 55000;
 constexpr uint32_t kBookmarkEveryMs = 30000;
 constexpr uint32_t kBookSkipSeconds = 30;
 constexpr uint32_t kBatterySampleMs = 1000;
@@ -236,7 +239,7 @@ uint32_t participantColour(const String &authorId, const String &authorName = ""
   return TFT_WHITE;
 }
 
-enum class ScreenMode { Chat, Menu, Rooms, Volume, Language, EmojiRecipes, Changelog, VoiceMessages, Walkie, Status, Networks, NetworkPassword, ChargingConfirm, Charging, FoxFinding, Home, Library, LibrarySearch, NowPlaying, Remote };
+enum class ScreenMode { Chat, Menu, Rooms, Volume, Language, EmojiRecipes, Changelog, VoiceMessages, Walkie, Status, Networks, NetworkPassword, ChargingConfirm, Charging, FoxFinding, Home, Library, LibrarySearch, NowPlaying, Remote, System };
 
 Preferences preferences;
 M5Canvas uiCanvas(&M5Cardputer.Display);
@@ -274,6 +277,7 @@ bool timeKnown = false;
 bool ntpAttempted = false;
 bool timeSyncedByNtp = false;
 bool initialSyncComplete = false;
+volatile bool chatShrunk = false;
 int64_t historyBeforeId = 0;
 size_t historyHydratedCount = 0;
 bool keyboardReady = false;
@@ -607,10 +611,24 @@ void drawBootSplash() {
   display.print(kFirmwareVersion);
 }
 
+// The splash's status line, so that a wait is explained.
+void drawBootStatus(os::Boot phase) {
+  auto &display = M5Cardputer.Display;
+  display.setFont(&fonts::Font0); display.setTextSize(1); display.setTextColor(TFT_WHITE, TFT_BLACK);
+  display.fillRect(60, 125, 180, 10, TFT_BLACK); display.setCursor(64, 125); display.print(os::bootText(phase));
+}
+
 void showBootSplash() {
   M5Cardputer.Speaker.setVolume(kVolumeValues[volumeLevel]);
   size_t step = 0;
+  const uint32_t bootStarted = millis();
+  os::Boot shownPhase = os::Boot::Joining;
+  drawBootStatus(shownPhase);
   for (;;) {
+    // Control comes when chat's first sync has settled, or when it can't proceed.
+    if (os::boot() != shownPhase) { shownPhase = os::boot(); drawBootStatus(shownPhase); }
+    if (os::bootSettled()) { M5Cardputer.Speaker.stop(); return; }
+    if (millis() - bootStarted >= os::kBootMaxMs) { os::setBoot(os::Boot::TimedOut); M5Cardputer.Speaker.stop(); return; }
     const size_t noteIndex = step % kBootTuneLength;
     if (kBootTuneFrequencies[noteIndex] > 0) {
       M5Cardputer.Speaker.tone(kBootTuneFrequencies[noteIndex], kBootTuneNoteMs, 0, true);
@@ -621,7 +639,8 @@ void showBootSplash() {
     while (static_cast<int32_t>(target - millis()) > 0) {
       M5Cardputer.update();
       if (M5Cardputer.Keyboard.isPressed() || M5Cardputer.BtnA.isPressed()) {
-        M5Cardputer.Speaker.stop(); return;
+        // A skip: chat keeps syncing, in the background and under its budget.
+        os::setBoot(os::Boot::Skipped); M5Cardputer.Speaker.stop(); return;
       }
       delay(10);
     }
@@ -646,7 +665,7 @@ String jsonEscape(const String &value) {
 }
 
 void trimHistory() {
-  if (messages.size() > kHistoryLimit) messages.erase(messages.begin(), messages.begin() + (messages.size() - kHistoryLimit));
+  if (messages.size() > kRamMessageLimit) messages.erase(messages.begin(), messages.begin() + (messages.size() - kRamMessageLimit));
 }
 
 String roomHistoryPath(const String &roomId, bool temporary = false) {
@@ -1429,6 +1448,8 @@ void serviceChargingMode() {
 
 bool requestJson(const String &path, const char *method, const String &requestBody, String &responseBody, int &status) {
   if (chargingModeActive) { status = HTTPC_ERROR_CONNECTION_REFUSED; return false; }
+  const os::SecureLease lease(os::Priority::Background);
+  if (!lease.held) { status = HTTPC_ERROR_CONNECTION_REFUSED; return false; }
   WiFiClientSecure client; client.setInsecure(); client.setTimeout(35); client.setHandshakeTimeout(20);
   if (!client.connect(kApiHost, 443)) { status = HTTPC_ERROR_CONNECTION_REFUSED; return false; }
   if (!client.verify(kTlsFingerprint, kApiHost)) { client.stop(); status = HTTPC_ERROR_CONNECTION_LOST; return false; }
@@ -1447,6 +1468,8 @@ bool requestJson(const String &path, const char *method, const String &requestBo
 }
 
 bool uploadVoiceClip() {
+  const os::SecureLease lease(os::Priority::Foreground, 5000);
+  if (!lease.held) return false;
   if (!voiceUploadPending || !voiceSampleCount || WiFi.status() != WL_CONNECTED) return false;
   WiFiClientSecure client; client.setInsecure(); client.setTimeout(35); client.setHandshakeTimeout(20);
   if (!client.connect(kApiHost, 443) || !client.verify(kTlsFingerprint, kApiHost)) { client.stop(); return false; }
@@ -1473,6 +1496,8 @@ bool uploadVoiceClip() {
 }
 
 bool downloadVoiceClip(int64_t messageId) {
+  const os::SecureLease lease(os::Priority::Foreground, 5000);
+  if (!lease.held) return false;
   WiFiClientSecure client; client.setCACert(kRootCa); client.setTimeout(35);
   HTTPClient http; http.setTimeout(35000); http.setReuse(false);
   if (!http.begin(client, String(kApiBase) + "/api/voice/" + String(messageId) + "/audio")) return false;
@@ -1582,6 +1607,15 @@ void recordSyncError(const char *kind, const String &detail, int status, size_t 
   renderDirty = true;
 }
 
+void archiveMessage(JsonObjectConst object) {
+  if (!sdReady) return;
+  File file = SD.open(String("/supachat-archive-") + currentRoomId + ".tsv", FILE_APPEND);
+  if (!file) return;
+  file.printf("%lld\t%s\t%s\t%s\t%s\t%lld\n", static_cast<long long>(object["id"] | 0LL), object["client_id"] | "", object["author_id"] | "",
+              object["author_name"] | "", cleanField(String(object["body"] | "")).c_str(), static_cast<long long>(object["created_at"] | 0LL));
+  file.close();
+}
+
 void synchronize() {
   String roomsResponse; int roomsStatus = 0;
   if (requestJson("/api/rooms", "GET", "", roomsResponse, roomsStatus) && roomsStatus == 200) {
@@ -1648,7 +1682,9 @@ void synchronize() {
   xSemaphoreTake(stateMutex, portMAX_DELAY);
   for (JsonObjectConst object : pageMessages) {
     const bool incoming = String(object["author_id"] | "") != kDeviceId;
-    mergeServerMessage(object);
+    // RAM keeps the newest messages; older history pages go straight to the card.
+    if (hydratingHistory && messages.size() >= kRamMessageLimit) archiveMessage(object);
+    else mergeServerMessage(object);
     if (incoming) newlyRead.push_back(object["id"] | 0);
   }
   for (JsonObjectConst receipt : document["receipts"].as<JsonArrayConst>()) {
@@ -1687,9 +1723,16 @@ void synchronize() {
 }
 
 void networkTask(void *) {
+  os::bindTask(os::Owner::Chat);
   uint32_t nextWifiAttempt = 0;
   for (;;) {
+    try {
     if (foxScanRequested) { foxScanRequested = false; collectFoxPlacePrint(); continue; }
+    if (chatShrunk && !mediaOwnsRadio()) {
+      xSemaphoreTake(stateMutex, portMAX_DELAY);
+      messages.clear(); loadHistory(); chatShrunk = false; renderDirty = true;
+      xSemaphoreGive(stateMutex);
+    }
     if (chargingModeActive) { vTaskDelay(pdMS_TO_TICKS(1000)); continue; }
     if (manualWifiMode) { vTaskDelay(pdMS_TO_TICKS(100)); continue; }
     if (localOnlyMode) {
@@ -1702,7 +1745,11 @@ void networkTask(void *) {
     if (wifiResumeRequested) { wifiResumeRequested = false; nextWifiAttempt = 0; }
     const uint32_t now = millis();
     if (WiFi.status() != WL_CONNECTED && now < nextWifiAttempt) { vTaskDelay(pdMS_TO_TICKS(250)); continue; }
-    if (!connectKnownWifi()) { nextWifiAttempt = millis() + kWifiRetryMs; vTaskDelay(pdMS_TO_TICKS(500)); continue; }
+    if (!connectKnownWifi()) {
+      if (!os::bootSettled()) os::setBoot(os::Boot::NoNetwork);
+      nextWifiAttempt = millis() + kWifiRetryMs; vTaskDelay(pdMS_TO_TICKS(500)); continue;
+    }
+    if (os::boot() == os::Boot::Joining) os::setBoot(os::Boot::Syncing);
     ensureTime();
     if (localBlackout() && !syncOverride) {
       networkStatus = "BLACKOUT 22-06"; currentSsid = ""; renderDirty = true;
@@ -1716,25 +1763,49 @@ void networkTask(void *) {
       const bool loaded = downloadVoiceClip(messageId); voiceDownloadActive = false;
       if (!loaded && !voicePlaybackCancelled) { voicePlayingMessageId = 0; walkieStatus = "PLAY FAILED"; renderDirty = true; }
     }
-    // Chat's parsing allocates as it goes, so it waits while the player leaves too little.
-    if (media::active() && ESP.getMaxAllocHeap() < kChatHeapFloor) { vTaskDelay(pdMS_TO_TICKS(1000)); continue; }
+    // Chat waits while the player is on, and while the walkie socket holds the secure slot.
+    // It catches up the moment there is room: one more secure connection doesn't fit beside the player.
+    if (mediaOwnsRadio() || os::secureHeld() || !os::secureFits()) {
+      if (!os::bootSettled() && !os::secureFits()) os::setBoot(os::Boot::ServerDown);
+      if (!mediaOwnsRadio() && !os::secureHeld()) networkStatus = "CHAT WAITS";
+      renderDirty = true; vTaskDelay(pdMS_TO_TICKS(500)); continue;
+    }
+    const bool hadSynced = initialSyncComplete;
     synchronize();
+    if (!os::bootSettled()) {
+      if (initialSyncComplete && !hadSynced) os::setBoot(os::Boot::Ready);
+      else if (networkStatus.startsWith("SYNC ") || networkStatus.startsWith("ROOM ")) os::setBoot(os::Boot::ServerDown);
+    }
+    os::setState(os::Owner::Chat, screenMode == ScreenMode::Chat ? os::AppState::Foreground : os::AppState::Background);
     if (voiceUploadPending && !localReplayActive) uploadVoiceClip();
     if (syncOverride) syncOverride = false;
     vTaskDelay(pdMS_TO_TICKS(kSyncPollMs));
-    // Each poll is a fresh TLS handshake, which needs RAM the audio buffers hold.
-    for (uint32_t waited = 0; media::active() && waited < kMediaSyncPollMs && !syncOverride; waited += 250) vTaskDelay(pdMS_TO_TICKS(250));
+    } catch (const std::bad_alloc &) {
+      // Chat ran out. Everything since the last good state is dropped, and it starts over.
+      if (stateMutex) xSemaphoreGive(stateMutex);
+      os::recordFault(os::Owner::Chat, "out of memory, restarted");
+      os::setState(os::Owner::Chat, os::AppState::Starting);
+      if (!os::bootSettled()) os::setBoot(os::Boot::ServerDown);
+      renderDirty = true;
+      vTaskDelay(pdMS_TO_TICKS(kSyncPollMs));
+    }
   }
 }
 
 void walkieTask(void *) {
+  os::bindTask(os::Owner::Chat);
+  bool holdsLease = false;
   for (;;) {
+    try {
     if (chargingModeActive) { vTaskDelay(pdMS_TO_TICKS(1000)); continue; }
-    if (mediaOwnsRadio()) {
+    // The socket and its secure slot exist only while the walkie screen is on.
+    if (mediaOwnsRadio() || screenMode != ScreenMode::Walkie) {
       if (walkieInitialized) { walkieSocket.disconnect(); walkieInitialized = false; walkieConnected = false; }
-      vTaskDelay(pdMS_TO_TICKS(250)); continue;
+      if (holdsLease) { os::releaseSecure(); holdsLease = false; }
+      vTaskDelay(pdMS_TO_TICKS(100)); continue;
     }
     if (WiFi.status() == WL_CONNECTED && timeKnown && initialSyncComplete) {
+      if (!holdsLease && !(holdsLease = os::acquireSecure(os::Priority::Foreground, 500))) { walkieStatus = "WAITING FOR RAM"; renderDirty = true; continue; }
       if (!walkieInitialized) {
         walkieHeaders = "Authorization: Bearer " + deviceToken + "\r\n";
         walkieSocket.setExtraHeaders(walkieHeaders.c_str()); walkieSocket.onEvent(onWalkieEvent); walkieSocket.setReconnectInterval(2000);
@@ -1744,6 +1815,13 @@ void walkieTask(void *) {
       walkieSocket.loop();
     }
     vTaskDelay(pdMS_TO_TICKS(10));
+    } catch (const std::bad_alloc &) {
+      if (stateMutex) xSemaphoreGive(stateMutex);
+      os::recordFault(os::Owner::Chat, "walkie out of memory");
+      walkieSocket.disconnect(); walkieInitialized = false; walkieConnected = false;
+      if (holdsLease) { os::releaseSecure(); holdsLease = false; }
+      vTaskDelay(pdMS_TO_TICKS(1000));
+    }
   }
 }
 
@@ -2062,6 +2140,7 @@ struct HomeApp { const char *english; const char *french; };
 constexpr HomeApp kHomeApps[] = {{"SUPACHAT", "SUPACHAT"}, {"MUSIC", "MUSIQUE"}, {"BOOKS", "LIVRES"}, {"R/C", "R/C"}};
 constexpr int kHomeAppCount = sizeof(kHomeApps) / sizeof(kHomeApps[0]);
 int homeSelection = 0;
+String homeNotice;
 
 enum class LibraryView : uint8_t { MusicRoot, CardAlbums, Albums, Tracks, Liked, SearchResults };
 library::Collection libraryCollection = library::Collection::Music;
@@ -2081,6 +2160,11 @@ bool tracksFromCardList = false;
 String libraryFolder;
 String queueFolder;
 volatile bool mediaStarting = false;
+os::Owner playingOwner = os::Owner::Music;
+bool adjacentWanted = false;
+bool mediaTasksWanted = false;
+bool queueEnded = false;
+uint32_t homeNoticeAt = 0;
 
 String utf8Head(const String &text, size_t maximumCharacters) {
   size_t characters = 0;
@@ -2114,8 +2198,9 @@ void drawHome() {
   }
   display.setTextSize(1);
   const auto *playing = nowPlayingItem();
-  if (playing && media::active()) { display.setTextColor(TFT_YELLOW, TFT_BLACK); display.setCursor(6, 110); printFont0Text(utf8Head(playing->title, 37)); }
-  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 123); display.print(uiText("ARROWS MOVE       ENTER OPEN", "FLECHES BOUGER    ENTER OUVRIR"));
+  if (homeNotice.length()) { display.setTextColor(TFT_RED, TFT_BLACK); display.setCursor(6, 110); display.print(homeNotice.substring(0, 38)); }
+  else if (playing && media::active()) { display.setTextColor(TFT_YELLOW, TFT_BLACK); display.setCursor(6, 110); printFont0Text(utf8Head(playing->title, 37)); }
+  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 123); display.print(uiText("ARROWS MOVE   ENTER OPEN   0 SYSTEM", "FLECHES  ENTER OUVRIR   0 SYSTEME"));
 }
 
 void drawLibrary() {
@@ -2177,6 +2262,27 @@ void drawNowPlaying() {
   display.setCursor(6, 123); display.print(queueCollection == library::Collection::Books ? uiText("ENTER PAUSE       S STOP", "ENTER PAUSE       S ARRET") : uiText("ENTER PAUSE  L LIKE  S STOP", "ENTER PAUSE  L AIME  S ARRET"));
 }
 
+void drawSystem() {
+  auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader("SYSTEM");
+  display.setTextSize(1);
+  int y = 24;
+  for (const os::Owner owner : {os::Owner::Ui, os::Owner::Chat, os::Owner::Music, os::Owner::Books}) {
+    display.setTextColor(TFT_WHITE, TFT_BLACK); display.setCursor(6, y); display.print(os::name(owner));
+    display.setTextColor(TFT_YELLOW, TFT_BLACK); display.setCursor(60, y); display.print(os::used(owner) / 1024);
+    display.print("K");
+    if (os::budget(owner)) { display.print(" / "); display.print(os::budget(owner) / 1024); display.print("K"); }
+    display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(180, y); display.print(os::stateName(os::state(owner)));
+    y += 12;
+  }
+  display.setTextColor(TFT_WHITE, TFT_BLACK);
+  display.setCursor(6, y + 2); display.print("FREE "); display.print(ESP.getFreeHeap() / 1024); display.print("K  LARGEST "); display.print(ESP.getMaxAllocHeap() / 1024); display.print("K");
+  display.setCursor(6, y + 14); display.print("SECURE "); display.print(os::secureHeld() ? "IN USE" : "IDLE");
+  display.setCursor(6, y + 26);
+  if (os::faultCount()) { display.setTextColor(TFT_RED, TFT_BLACK); display.print(String(os::lastFault()).substring(0, 38)); }
+  else { display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.print(uiText("NO FAULTS", "AUCUNE ERREUR")); }
+  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 123); display.print(uiText("LEFT BACK", "GAUCHE RETOUR"));
+}
+
 void drawRemote() {
   auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader("R/C");
   display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(12, 56); display.print(uiText("NOTHING CONNECTED YET", "RIEN DE CONNECTE"));
@@ -2200,6 +2306,7 @@ void render() {
   else if (screenMode == ScreenMode::LibrarySearch) drawLibrarySearch();
   else if (screenMode == ScreenMode::NowPlaying) drawNowPlaying();
   else if (screenMode == ScreenMode::Remote) drawRemote();
+  else if (screenMode == ScreenMode::System) drawSystem();
   else drawNetworks();
   if (uiCanvasReady) uiCanvas.pushSprite(0, 0);
   renderDirty = false; lastRenderAt = millis();
@@ -2482,19 +2589,37 @@ void stopMediaNow() {
   while (media::state() != media::State::Idle && millis() - started < 1500) delay(5);
 }
 
+void shrinkChatForPlayback() {
+  xSemaphoreTake(stateMutex, portMAX_DELAY);
+  if (!chatShrunk && initialSyncComplete && sdReady && messages.size() > kShrunkMessages) {
+    saveHistoryLocked();
+    messages.erase(messages.begin(), messages.end() - kShrunkMessages);
+    messages.shrink_to_fit();
+    historyOffset = 0;
+    chatShrunk = true;
+  }
+  xSemaphoreGive(stateMutex);
+}
+
 void startQueuedTrack(uint32_t offsetSeconds) {
   const auto *item = nowPlayingItem();
   if (!item) return;
   // The microphone and the speaker share the audio hardware.
   M5Cardputer.Mic.end(); M5Cardputer.Speaker.begin(); M5Cardputer.Speaker.setVolume(kVolumeValues[volumeLevel]);
-  // Give the walkie socket's RAM back before the player asks for its own.
+  // Give the walkie socket's RAM back before the player asks for its own, and chat's
+  // messages too: they are on the card, and come back when playback ends.
   mediaStarting = true;
+  shrinkChatForPlayback();
   for (const uint32_t started = millis(); walkieInitialized && millis() - started < 1500;) delay(10);
   if (item->onCard) media::playFile(trackPath(*item), offsetSeconds);
   else media::play(library::streamUrl(item->id, queueCollection, offsetSeconds), offsetSeconds);
   mediaStarting = false;
   lastBookmarkAt = millis();
 }
+
+// A media app asks for its tasks; they start once any secure connection in flight has
+// finished, and until then its first request waits in the queue with LOADING on the screen.
+void startMediaTasks() { mediaTasksWanted = true; os::holdSecure(true); }
 
 void openLibraryList(LibraryView view, const String &title) {
   libraryView = view; libraryTitle = title; libraryItems.clear(); librarySelection = 0;
@@ -2503,6 +2628,9 @@ void openLibraryList(LibraryView view, const String &title) {
 
 void openMusicRoot() {
   libraryCollection = library::Collection::Music; libraryView = LibraryView::MusicRoot;
+  os::setMediaOwner(os::Owner::Music);
+  startMediaTasks();
+  library::forget();
   libraryTitle = uiText("MUSIC", "MUSIQUE"); libraryItems.clear(); librarySelection = 0;
   for (const char *label : {uiText("ON THE CARD", "SUR LA CARTE"), uiText("ALBUMS", "ALBUMS"), uiText("LIKED SONGS", "CHANSONS AIMEES"), uiText("SEARCH", "CHERCHER")}) {
     library::Item item; item.title = label; libraryItems.push_back(item);
@@ -2513,11 +2641,14 @@ void openMusicRoot() {
 
 void openBooks() {
   libraryCollection = library::Collection::Books; libraryOffset = 0;
+  os::setMediaOwner(os::Owner::Books);
+  startMediaTasks();
   openLibraryList(LibraryView::Albums, uiText("BOOKS", "LIVRES"));
   library::requestAlbums(library::Collection::Books, 0);
 }
 
 void openHomeApp(int index) {
+  library::forget();
   if (index == 0) screenMode = ScreenMode::Chat;
   else if (index == 1) openMusicRoot();
   else if (index == 2) openBooks();
@@ -2528,7 +2659,7 @@ void openHomeApp(int index) {
 // One level back within HOME's apps. False when the screen is not one of them.
 bool goBackFromApp() {
   if (screenMode == ScreenMode::Home) return true;
-  if (screenMode == ScreenMode::Remote) { screenMode = ScreenMode::Home; return true; }
+  if (screenMode == ScreenMode::Remote || screenMode == ScreenMode::System) { screenMode = ScreenMode::Home; return true; }
   if (screenMode == ScreenMode::LibrarySearch) { openMusicRoot(); return true; }
   if (screenMode == ScreenMode::NowPlaying) {
     if (queueCollection == library::Collection::Books) openBooks(); else openMusicRoot();
@@ -2567,7 +2698,17 @@ void openLibrarySelection() {
   stopMediaNow();
   // Moved, not copied: a long book's list twice over doesn't fit next to the player.
   queueIndex = librarySelection; queueFolder = libraryFolder; queueCollection = libraryCollection;
-  playQueue = std::move(libraryItems); libraryItems.clear();
+  playingOwner = os::mediaOwner();
+  if (libraryItems[librarySelection].onCard) {
+    // A chapter on the card needs no list beside the player: the next is found when wanted.
+    const library::Item chosen = libraryItems[librarySelection];
+    std::vector<library::Item>().swap(libraryItems);
+    std::vector<library::Item>().swap(playQueue);
+    playQueue.push_back(chosen);
+    queueIndex = 0;
+  } else {
+    playQueue = std::move(libraryItems); std::vector<library::Item>().swap(libraryItems);
+  }
   const auto *item = nowPlayingItem();
   startQueuedTrack(item->resumeMs / 1000);
   screenMode = ScreenMode::NowPlaying; renderDirty = true;
@@ -2579,6 +2720,14 @@ void savePlaceAtStart() {
 }
 
 void moveQueue(int direction) {
+  if (queueIndex >= 0 && queueIndex < static_cast<int>(playQueue.size()) && playQueue[queueIndex].onCard) {
+    stopMediaNow();
+    // The radio and chat's RAM stay with the player across the gap between chapters.
+    mediaStarting = true;
+    library::requestAdjacentTrack(queueFolder, playQueue[queueIndex].title, direction);
+    adjacentWanted = true;
+    return;
+  }
   const int next = queueIndex + direction;
   if (next < 0 || next >= static_cast<int>(playQueue.size())) return;
   stopMediaNow();
@@ -2587,7 +2736,39 @@ void moveQueue(int direction) {
   queueIndex = next; startQueuedTrack(0); savePlaceAtStart(); renderDirty = true;
 }
 
+// Which app the current screen belongs to; chat owns all of its old screens.
+os::Owner frontApp() {
+  switch (screenMode) {
+    case ScreenMode::Home: case ScreenMode::System: case ScreenMode::Remote: return os::Owner::Ui;
+    case ScreenMode::Library: case ScreenMode::LibrarySearch: case ScreenMode::NowPlaying: return os::mediaOwner();
+    default: return os::Owner::Chat;
+  }
+}
+
+void serviceApps() {
+  const os::Owner front = frontApp();
+  for (const os::Owner app : {os::Owner::Music, os::Owner::Books}) {
+    const bool playing = media::active() && playingOwner == app;
+    os::setState(app, front == app ? os::AppState::Foreground : playing ? os::AppState::Background : os::AppState::Stopped);
+  }
+  if (initialSyncComplete) os::setState(os::Owner::Chat, front == os::Owner::Chat ? os::AppState::Foreground : os::AppState::Background);
+  os::setState(os::Owner::Ui, front == os::Owner::Ui ? os::AppState::Foreground : os::AppState::Background);
+  // A media app that went away gives its list back.
+  if (screenMode == ScreenMode::Home && !libraryItems.empty()) { std::vector<library::Item>().swap(libraryItems); renderDirty = true; }
+  // And with nothing playing, the tasks too: their stacks are chat's room for a connection.
+  if (front != os::mediaOwner() && !media::active() && !mediaStarting) {
+    media::end(); library::end(); mediaTasksWanted = false; os::holdSecure(false);
+  } else if (mediaTasksWanted && !os::secureHeld()) {
+    if (!library::begin() || !media::begin()) os::recordFault(os::mediaOwner(), "no RAM to start");
+    mediaTasksWanted = false;
+  }
+  char notice[64];
+  if (os::takeFaultNotice(notice, sizeof(notice))) { homeNotice = notice; homeNoticeAt = millis(); renderDirty = true; }
+  if (homeNotice.length() && millis() - homeNoticeAt > 10000) { homeNotice = ""; renderDirty = true; }
+}
+
 void serviceMedia() {
+  serviceApps();
   if (library::takeItems(libraryItems)) {
     // A book reopens on the chapter holding its saved place.
     librarySelection = 0;
@@ -2596,12 +2777,27 @@ void serviceMedia() {
   }
   static library::Status lastStatus = library::Status::Idle;
   if (library::status() != lastStatus) { lastStatus = library::status(); renderDirty = true; }
+  library::Item adjacent;
+  bool adjacentFound = false;
+  if (adjacentWanted && library::takeAdjacentTrack(adjacent, adjacentFound)) {
+    adjacentWanted = false;
+    if (adjacentFound) {
+      playQueue[queueIndex] = adjacent;
+      startQueuedTrack(0); savePlaceAtStart();
+    } else if (queueEnded && queueCollection == library::Collection::Books) {
+      library::clearCardPlace(queueFolder);  // The last chapter ended: the book is finished.
+    }
+    if (!adjacentFound) mediaStarting = false;
+    queueEnded = false;
+    renderDirty = true;
+  }
   const auto state = media::state();
   static media::State lastState = media::State::Idle;
   if (state != lastState) { lastState = state; renderDirty = true; }
-  if (state == media::State::Ended) {
+  if (state == media::State::Ended && !adjacentWanted) {
     const auto *item = nowPlayingItem();
-    if (queueIndex + 1 < static_cast<int>(playQueue.size())) moveQueue(1);
+    if (item && item->onCard) { queueEnded = true; media::stop(); moveQueue(1); }
+    else if (queueIndex + 1 < static_cast<int>(playQueue.size())) moveQueue(1);
     else {
       if (item && queueCollection == library::Collection::Books) {
         if (item->onCard) library::clearCardPlace(queueFolder); else library::deleteBookmark(item->id);
@@ -2623,7 +2819,7 @@ bool handleAppKeys(const Keyboard_Class::KeysState &keys, bool goUp, bool goDown
   const bool escape = physicalKeyAt(0, 0) && (screenMode == ScreenMode::Chat || screenMode == ScreenMode::LibrarySearch ? keys.fn : true);
   if (escape && (screenMode == ScreenMode::Chat || screenMode == ScreenMode::Menu)) { screenMode = ScreenMode::Home; playNextTone(); renderDirty = true; return true; }
   const bool ownScreen = screenMode == ScreenMode::Home || screenMode == ScreenMode::Library || screenMode == ScreenMode::LibrarySearch ||
-                         screenMode == ScreenMode::NowPlaying || screenMode == ScreenMode::Remote;
+                         screenMode == ScreenMode::NowPlaying || screenMode == ScreenMode::Remote || screenMode == ScreenMode::System;
   if (!ownScreen) return false;
   if (escape) { goBackFromApp(); playNextTone(); renderDirty = true; return true; }
   if (screenMode == ScreenMode::Home) {
@@ -2631,11 +2827,14 @@ bool handleAppKeys(const Keyboard_Class::KeysState &keys, bool goUp, bool goDown
     else if (goLeft || goRight) homeSelection ^= 1;
     else if (keys.enter) openHomeApp(homeSelection);
     else {
-      for (const auto character : keys.word) if (character >= '1' && character < '1' + kHomeAppCount) openHomeApp(character - '1');
+      for (const auto character : keys.word) {
+        if (character >= '1' && character < '1' + kHomeAppCount) openHomeApp(character - '1');
+        else if (character == '0') screenMode = ScreenMode::System;
+      }
     }
     playNextTone(); renderDirty = true; return true;
   }
-  if (screenMode == ScreenMode::Remote) {
+  if (screenMode == ScreenMode::Remote || screenMode == ScreenMode::System) {
     if (goLeft || keys.enter) { screenMode = ScreenMode::Home; playNextTone(); renderDirty = true; }
     return true;
   }
@@ -2848,6 +3047,7 @@ void handleKeyboard() {
 
 void setup() {
   Serial.begin(115200);
+  os::bindTask(os::Owner::Ui);
   auto config = M5.config(); config.output_power = true;
   M5Cardputer.begin(config, true); M5Cardputer.Display.setRotation(1); M5Cardputer.Display.setTextWrap(false);
   loadConfiguration();
@@ -2863,7 +3063,7 @@ void setup() {
   uiCanvas.setPsram(false); uiCanvas.setColorDepth(16);
   uiCanvasReady = uiCanvas.createSprite(240, 135) != nullptr; uiCanvas.setTextWrap(false);
   stateMutex = xSemaphoreCreateMutex(); bootNonce = esp_random();
-  media::begin(); library::begin();
+  os::begin();
   // Cardputer ADV's explicit SD bus keeps GPIO11 free for the TCA8418
   // keyboard interrupt. Default ESP32-S3 SPI pins would disable all keys.
   SPI.begin(kSdSckPin, kSdMisoPin, kSdMosiPin, kSdCsPin);
@@ -2874,13 +3074,29 @@ void setup() {
   xTaskCreatePinnedToCore(networkTask, "supachat-net", 16384, nullptr, 1, nullptr, 0);
   xTaskCreatePinnedToCore(walkieTask, "supachat-ws", 12288, nullptr, 1, nullptr, 1);
   showBootSplash();
+  Serial.printf("BOOT %s at %u ms\n", os::bootText(os::boot()), millis());
   inputQuarantined = true;
   render();
   Serial.printf("SUPACHAT ready node=%s wifi_profiles=%u sd=%d keyboard=%d board=%d\n", kDeviceId,
                 wifiProfiles.size(), sdReady, keyboardReady, static_cast<int>(M5.getBoard()));
 }
 
+static void loopBody();
+
 void loop() {
+  // The screen and keyboard live on the reserved floor, so this is a last resort. An out of
+  // memory here drops to HOME, where the least is held.
+  try {
+    loopBody();
+  } catch (const std::bad_alloc &) {
+    if (stateMutex) xSemaphoreGive(stateMutex);
+    os::recordFault(os::Owner::Ui, "out of memory, back to HOME");
+    std::vector<library::Item>().swap(libraryItems);
+    screenMode = ScreenMode::Home; renderDirty = true;
+  }
+}
+
+static void loopBody() {
   M5Cardputer.update();
   if (M5Cardputer.BtnA.isPressed()) lastUserInputAt = millis();
   sampleBattery(); handleKeyboard(); serviceFoxFinding();
@@ -2919,6 +3135,7 @@ void loop() {
   if (screenMode != ScreenMode::VoiceMessages && screenMode != ScreenMode::Walkie && spacePttHeld) { spacePttHeld = false; spaceReleaseStartedAt = 0; stopVoiceRecording(); }
   if (kEspNowEnabled && millis() - lastEspNowBeaconAt >= kEspNowBeaconMs) sendEspNowBeacon();
   if (screenMode == ScreenMode::Status && statusPage == 1 && lastSyncError != "NONE" && millis() - lastRenderAt >= 1000) renderDirty = true;
+  if (screenMode == ScreenMode::System && millis() - lastRenderAt >= 1000) renderDirty = true;
   if (renderDirty && millis() - lastRenderAt >= kRenderIntervalMs) render();
   delay(2);
 }

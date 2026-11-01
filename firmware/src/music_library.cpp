@@ -1,4 +1,5 @@
 #include "music_library.h"
+#include "os.h"
 
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
@@ -32,14 +33,20 @@ constexpr int kBooksKbps = 48;
 constexpr uint32_t kTimeoutMs = 10000;
 constexpr size_t kCardTrackLimit = 300;
 
-enum class JobKind : uint8_t { CardAlbums, CardTracks, SavePlace, ClearPlace, Albums, Liked, Search, Tracks, SaveBookmark, DeleteBookmark, Like, Unlike };
-struct Job { JobKind kind; String text; int number; Collection collection; String extra; };
+enum class JobKind : uint8_t { CardAlbums, CardTracks, Adjacent, SavePlace, ClearPlace, Albums, Liked, Search, Tracks, SaveBookmark, DeleteBookmark, Like, Unlike };
+struct Job { JobKind kind; String text; int number; Collection collection; String extra; uint32_t generation = 0; };
 
 SemaphoreHandle_t mutex = nullptr;
 TaskHandle_t taskHandle = nullptr;
+volatile bool endRequested = false;
 std::deque<Job> jobs;
 std::vector<Item> finished;
 bool itemsFresh = false;
+volatile uint32_t wantedGeneration = 0;
+uint32_t runningGeneration = 0;
+Item adjacentItem;
+bool adjacentReady = false;
+bool adjacentFound = false;
 volatile Status currentStatus = Status::Idle;
 const char *volatile failureText = "";
 // getMusicFolders answers once; -1 means not looked up yet, 0 means no such library.
@@ -82,6 +89,7 @@ bool fetch(const String &url, JsonDocument &filter, JsonDocument &document) {
   http.begin(url);
   const int code = http.GET();
   if (code != HTTP_CODE_OK) { failureText = code < 0 ? "NO SERVER" : "SERVER ERROR"; http.end(); return false; }
+  http.getStream().setTimeout(kTimeoutMs / 1000);  // A busy server can pause longer than Stream's 1 s default.
   filter["subsonic-response"]["status"] = true;
   const DeserializationError error = deserializeJson(document, http.getStream(), DeserializationOption::Filter(filter));
   http.end();
@@ -111,6 +119,7 @@ void lookUpFolders() {
 }
 
 void publish(std::vector<Item> &&items) {
+  if (runningGeneration != wantedGeneration) return;
   xSemaphoreTake(mutex, portMAX_DELAY);
   finished = std::move(items);
   itemsFresh = true;
@@ -191,6 +200,31 @@ bool runCardTracks(const Job &job) {
   }
   publish(std::move(items));
   return true;
+}
+
+void runAdjacent(const Job &job) {
+  File root = SD.open(job.text);
+  String best;
+  const bool forward = job.number > 0;
+  if (root && root.isDirectory()) {
+    for (File entry = root.openNextFile(); entry; entry = root.openNextFile()) {
+      const String name = baseName(entry.name());
+      if (!entry.isDirectory() && isMp3(name)) {
+        const String title = name.substring(0, name.length() - 4);
+        const bool past = forward ? title > job.extra : title < job.extra;
+        if (past && (best.isEmpty() || (forward ? title < best : title > best))) best = title;
+      }
+      entry.close();
+    }
+    root.close();
+  }
+  xSemaphoreTake(mutex, portMAX_DELAY);
+  adjacentItem = Item();
+  adjacentItem.onCard = true;
+  adjacentItem.title = best;
+  adjacentFound = best.length() > 0;
+  adjacentReady = true;
+  xSemaphoreGive(mutex);
 }
 
 void writeCardPlace(const Job &job) {
@@ -275,7 +309,9 @@ bool runTracks(const Job &job) {
 }
 
 void workerTask(void *) {
+  os::bindTask(os::Owner::Music);
   for (;;) {
+    if (endRequested) { endRequested = false; taskHandle = nullptr; vTaskDelete(nullptr); }
     xSemaphoreTake(mutex, portMAX_DELAY);
     const bool empty = jobs.empty();
     Job job{};
@@ -283,6 +319,7 @@ void workerTask(void *) {
     xSemaphoreGive(mutex);
     if (empty) { vTaskDelay(pdMS_TO_TICKS(50)); continue; }
     bool ok = true;
+    runningGeneration = job.generation;
     // Running out of RAM here shows on the screen instead of restarting the device.
     try {
     switch (job.kind) {
@@ -293,6 +330,7 @@ void workerTask(void *) {
         break;
       }
       case JobKind::CardTracks: ok = runCardTracks(job); break;
+      case JobKind::Adjacent: runAdjacent(job); break;
       case JobKind::SavePlace: writeCardPlace(job); break;
       case JobKind::ClearPlace: SD.remove(placePath(job.text)); break;
       case JobKind::Albums: ok = runAlbums(job); break;
@@ -306,25 +344,30 @@ void workerTask(void *) {
     }
     } catch (const std::bad_alloc &) {
       failureText = "OUT OF MEMORY";
+      os::recordFault(os::mediaOwner(), "list out of memory");
       ok = false;
     }
-    if (!ok) currentStatus = Status::Failed;
+    if (!ok && runningGeneration == wantedGeneration) currentStatus = Status::Failed;
   }
 }
 
 void enqueue(Job job, bool loadsList) {
-  if (loadsList) currentStatus = Status::Loading;
+  if (!mutex) mutex = xSemaphoreCreateMutex();
+  if (loadsList) { wantedGeneration = wantedGeneration + 1; currentStatus = Status::Loading; }
+  job.generation = wantedGeneration;
   xSemaphoreTake(mutex, portMAX_DELAY);
   jobs.push_back(std::move(job));
   xSemaphoreGive(mutex);
 }
 }  // namespace
 
-void begin() {
-  if (taskHandle) return;
-  mutex = xSemaphoreCreateMutex();
-  xTaskCreatePinnedToCore(workerTask, "library", 12288, nullptr, 1, &taskHandle, 0);
+bool begin() {
+  if (taskHandle) return true;
+  if (!mutex) mutex = xSemaphoreCreateMutex();
+  return xTaskCreatePinnedToCore(workerTask, "library", 12288, nullptr, 1, &taskHandle, 0) == pdPASS;
 }
+
+void end() { if (taskHandle) endRequested = true; }
 
 bool configured() { return kHost[0] != 0; }
 
@@ -333,6 +376,15 @@ void requestCardAlbums(Collection collection) { enqueue({JobKind::CardAlbums, ""
 void requestCardTracks(const String &folder) { enqueue({JobKind::CardTracks, folder, 0, Collection::Books}, true); }
 void saveCardPlace(const String &folder, const String &trackPath, uint32_t seconds) { enqueue({JobKind::SavePlace, folder, static_cast<int>(seconds), Collection::Books, trackPath}, false); }
 void clearCardPlace(const String &folder) { enqueue({JobKind::ClearPlace, folder, 0, Collection::Books}, false); }
+void requestAdjacentTrack(const String &folder, const String &title, int direction) { enqueue({JobKind::Adjacent, folder, direction, Collection::Books, title}, false); }
+bool takeAdjacentTrack(Item &item, bool &found) {
+  if (!mutex) return false;
+  xSemaphoreTake(mutex, portMAX_DELAY);
+  const bool ready = adjacentReady;
+  if (ready) { item = adjacentItem; found = adjacentFound; adjacentReady = false; }
+  xSemaphoreGive(mutex);
+  return ready;
+}
 void requestLiked() { enqueue({JobKind::Liked, "", 0, Collection::Music}, true); }
 void requestSearch(const String &query, int offset) { enqueue({JobKind::Search, query, offset, Collection::Music}, true); }
 void requestTracks(const String &albumId) { enqueue({JobKind::Tracks, albumId, 0, Collection::Music}, true); }
@@ -340,10 +392,13 @@ void saveBookmark(const String &trackId, uint32_t positionMs) { enqueue({JobKind
 void deleteBookmark(const String &trackId) { enqueue({JobKind::DeleteBookmark, trackId, 0, Collection::Books}, false); }
 void setLiked(const String &trackId, bool liked) { enqueue({liked ? JobKind::Like : JobKind::Unlike, trackId, 0, Collection::Music}, false); }
 
+void forget() { wantedGeneration = wantedGeneration + 1; if (currentStatus == Status::Loading) currentStatus = Status::Idle; }
+
 Status status() { return currentStatus; }
 const char *failure() { return failureText; }
 
 bool takeItems(std::vector<Item> &items) {
+  if (!mutex) return false;
   xSemaphoreTake(mutex, portMAX_DELAY);
   const bool fresh = itemsFresh;
   if (fresh) { items = std::move(finished); finished.clear(); itemsFresh = false; }

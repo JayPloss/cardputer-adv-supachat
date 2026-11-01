@@ -1,4 +1,5 @@
 #include "media_player.h"
+#include "os.h"
 
 #include <HTTPClient.h>
 #include <SD.h>
@@ -28,6 +29,7 @@ struct Command { String url; String path; uint32_t startSeconds = 0; };
 
 SemaphoreHandle_t commandMutex = nullptr;
 TaskHandle_t taskHandle = nullptr;
+volatile bool endRequested = false;
 Command pending;
 volatile bool hasPending = false;
 volatile bool stopRequested = false;
@@ -46,17 +48,15 @@ void fail(const char *reason) { failureText = reason; currentState = State::Fail
 bool interrupted() { return stopRequested || hasPending; }
 
 // Reads the first frame header so a constant-bitrate file can be timed and seeked.
-bool openAt(File &file, uint32_t seconds, uint8_t *scratch) {
+bool openAt(File &file, uint32_t seconds, uint8_t *scratch, HMP3Decoder decoder) {
   const int got = file.read(scratch, 4096);
   const int sync = got > 0 ? MP3FindSyncWord(scratch, got) : -1;
   MP3FrameInfo info;
-  HMP3Decoder probe = MP3InitDecoder();
-  const bool found = probe && sync >= 0 && MP3GetNextFrameInfo(probe, &info, scratch + sync) == ERR_MP3_NONE && info.bitrate > 0;
+  const bool found = sync >= 0 && MP3GetNextFrameInfo(decoder, &info, scratch + sync) == ERR_MP3_NONE && info.bitrate > 0;
   if (found) {
     totalSeconds = static_cast<uint64_t>(file.size()) * 8 / info.bitrate;
     file.seek(sync + static_cast<uint64_t>(seconds) * info.bitrate / 8);
   }
-  if (probe) MP3FreeDecoder(probe);
   return found;
 }
 
@@ -69,8 +69,9 @@ void playSource(const Command &command) {
   HMP3Decoder decoder = nullptr;
   // Chat's TLS work holds a lot of RAM for a few seconds at a time, so wait it out.
   for (uint8_t attempt = 0; attempt < kAllocationTries && !interrupted(); attempt++) {
-    input = static_cast<uint8_t *>(heap_caps_malloc(kInputBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-    pcm = static_cast<int16_t *>(heap_caps_malloc(kPcmBuffers * kPcmSamples * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    // Plain malloc, so the ledger charges these to the app that is playing. No PSRAM here: it is internal.
+    input = static_cast<uint8_t *>(malloc(kInputBytes));
+    pcm = static_cast<int16_t *>(malloc(kPcmBuffers * kPcmSamples * sizeof(int16_t)));
     decoder = MP3InitDecoder();
     if (input && pcm && decoder) break;
     if (decoder) MP3FreeDecoder(decoder);
@@ -89,7 +90,7 @@ void playSource(const Command &command) {
   if (local) {
     file = SD.open(command.path, FILE_READ);
     if (!file) fail("FILE NOT FOUND");
-    else if (!openAt(file, command.startSeconds, input)) fail("NOT AN MP3");
+    else if (!openAt(file, command.startSeconds, input, decoder)) fail("NOT AN MP3");
   } else {
     // HTTP/1.0: no chunk markers inside the MP3 data, and the server closes at the end.
     http.useHTTP10(true);
@@ -217,7 +218,9 @@ void playSource(const Command &command) {
 }
 
 void playerTask(void *) {
+  os::bindTask(os::Owner::Music);
   for (;;) {
+    if (endRequested) { endRequested = false; taskHandle = nullptr; vTaskDelete(nullptr); }
     if (!hasPending) {
       if (stopRequested) {
         stopRequested = false;
@@ -240,18 +243,25 @@ void playerTask(void *) {
     failureText = "";
     currentState = State::Connecting;
     if (command.path.isEmpty() && WiFi.status() != WL_CONNECTED) { fail("NO WIFI"); continue; }
-    playSource(command);
+    try {
+      playSource(command);
+    } catch (const std::bad_alloc &) {
+      os::recordFault(os::mediaOwner(), "player out of memory");
+      fail("OUT OF MEMORY");
+    }
   }
 }
 }  // namespace
 
-void begin() {
-  if (taskHandle) return;
-  commandMutex = xSemaphoreCreateMutex();
+bool begin() {
+  if (taskHandle) return true;
+  if (!commandMutex) commandMutex = xSemaphoreCreateMutex();
   // Core 0 is shared with the Wi-Fi stack; this outranks chat sync so a TLS
   // handshake there cannot hold up decoding.
-  xTaskCreatePinnedToCore(playerTask, "media", 8192, nullptr, 3, &taskHandle, 0);
+  return xTaskCreatePinnedToCore(playerTask, "media", 8192, nullptr, 3, &taskHandle, 0) == pdPASS;
 }
+
+void end() { if (taskHandle) endRequested = true; }
 
 void play(const String &url, uint32_t startSeconds) {
   xSemaphoreTake(commandMutex, portMAX_DELAY);

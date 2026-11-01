@@ -9,7 +9,9 @@ namespace media {
 
 enum class State : uint8_t { Idle, Connecting, Playing, Paused, Ended, Failed };
 
-void begin();
+// Start and stop the player's task: its stack is RAM that chat needs when no media app is up.
+bool begin();
+void end();
 // Starts url from the top; startSeconds only labels the position, because the
 // server has already applied any time offset to the stream it sends.
 void play(const String &url, uint32_t startSeconds);
