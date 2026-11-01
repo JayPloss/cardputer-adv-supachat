@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <deque>
+#include <new>
 
 #if __has_include("music_secrets.h")
 #include "music_secrets.h"
@@ -29,6 +30,7 @@ constexpr char kBooksFolderName[] = "Books";
 constexpr int kMusicKbps = 96;
 constexpr int kBooksKbps = 48;
 constexpr uint32_t kTimeoutMs = 10000;
+constexpr size_t kCardTrackLimit = 300;
 
 enum class JobKind : uint8_t { CardAlbums, CardTracks, SavePlace, ClearPlace, Albums, Liked, Search, Tracks, SaveBookmark, DeleteBookmark, Like, Unlike };
 struct Job { JobKind kind; String text; int number; Collection collection; String extra; };
@@ -166,11 +168,12 @@ bool runCardTracks(const Job &job) {
   File root = SD.open(job.text);
   if (!root || !root.isDirectory()) { failureText = "NOT ON CARD"; return false; }
   std::vector<Item> items;
-  for (File entry = root.openNextFile(); entry; entry = root.openNextFile()) {
+  items.reserve(100);
+  for (File entry = root.openNextFile(); entry && items.size() < kCardTrackLimit; entry = root.openNextFile()) {
     const String name = baseName(entry.name());
     if (!entry.isDirectory() && isMp3(name)) {
       Item item;
-      item.path = job.text + "/" + name;
+      item.onCard = true;
       item.title = name.substring(0, name.length() - 4);
       items.push_back(std::move(item));
     }
@@ -184,7 +187,7 @@ bool runCardTracks(const Job &job) {
     const uint32_t seconds = place.readStringUntil('\n').toInt();
     place.close();
     // A 1 ms floor still marks a saved place at the very start of a chapter.
-    for (Item &item : items) if (item.path == trackPath) item.resumeMs = std::max<uint32_t>(1, seconds * 1000);
+    for (Item &item : items) if (job.text + "/" + item.title + ".mp3" == trackPath) item.resumeMs = std::max<uint32_t>(1, seconds * 1000);
   }
   publish(std::move(items));
   return true;
@@ -280,6 +283,8 @@ void workerTask(void *) {
     xSemaphoreGive(mutex);
     if (empty) { vTaskDelay(pdMS_TO_TICKS(50)); continue; }
     bool ok = true;
+    // Running out of RAM here shows on the screen instead of restarting the device.
+    try {
     switch (job.kind) {
       case JobKind::CardAlbums: {
         std::vector<Item> items;
@@ -298,6 +303,10 @@ void workerTask(void *) {
       case JobKind::DeleteBookmark: call(apiUrl("deleteBookmark") + "&id=" + urlEncode(job.text)); break;
       case JobKind::Like: call(apiUrl("star") + "&id=" + urlEncode(job.text)); break;
       case JobKind::Unlike: call(apiUrl("unstar") + "&id=" + urlEncode(job.text)); break;
+    }
+    } catch (const std::bad_alloc &) {
+      failureText = "OUT OF MEMORY";
+      ok = false;
     }
     if (!ok) currentStatus = Status::Failed;
   }

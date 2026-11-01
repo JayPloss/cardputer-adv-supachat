@@ -11,7 +11,8 @@ namespace library {
 
 struct Item {
   String id;
-  String path;  // On the card when set; on the server otherwise.
+  String path;  // A folder on the card, for albums and books.
+  bool onCard = false;  // A track named title + ".mp3" in the list's folder.
   String title;
   String detail;
   uint32_t seconds = 0;

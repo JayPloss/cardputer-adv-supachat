@@ -13,12 +13,14 @@ namespace media {
 namespace {
 // Chat voice uses channel 0, and so do the key and notification tones.
 constexpr uint8_t kSpeakerChannel = 1;
-constexpr size_t kInputBytes = 24 * 1024;
-constexpr size_t kPrebufferBytes = 12 * 1024;
+// The card never stalls the way Wi-Fi does, so it needs far less held in RAM.
+constexpr size_t kStreamInputBytes = 16 * 1024;
+constexpr size_t kCardInputBytes = 6 * 1024;
+constexpr uint8_t kAllocationTries = 6;
 constexpr size_t kFileChunkBytes = 2048;
 constexpr size_t kPcmBuffers = 3;
 constexpr size_t kMaxFrameSamples = 1152 * 2;
-constexpr size_t kPcmSamples = kMaxFrameSamples * 2;
+constexpr size_t kPcmSamples = kMaxFrameSamples;
 constexpr uint32_t kStallTimeoutMs = 15000;
 constexpr uint32_t kConnectTimeoutMs = 8000;
 
@@ -59,17 +61,28 @@ bool openAt(File &file, uint32_t seconds, uint8_t *scratch) {
 }
 
 void playSource(const Command &command) {
-  uint8_t *input = static_cast<uint8_t *>(heap_caps_malloc(kInputBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-  int16_t *pcm = static_cast<int16_t *>(heap_caps_malloc(kPcmBuffers * kPcmSamples * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-  HMP3Decoder decoder = MP3InitDecoder();
-  if (!input || !pcm || !decoder) {
-    fail("NO MEMORY");
+  const bool local = command.path.length() > 0;
+  const size_t kInputBytes = local ? kCardInputBytes : kStreamInputBytes;
+  const size_t kPrebufferBytes = kInputBytes / 2;
+  uint8_t *input = nullptr;
+  int16_t *pcm = nullptr;
+  HMP3Decoder decoder = nullptr;
+  // Chat's TLS work holds a lot of RAM for a few seconds at a time, so wait it out.
+  for (uint8_t attempt = 0; attempt < kAllocationTries && !interrupted(); attempt++) {
+    input = static_cast<uint8_t *>(heap_caps_malloc(kInputBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    pcm = static_cast<int16_t *>(heap_caps_malloc(kPcmBuffers * kPcmSamples * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    decoder = MP3InitDecoder();
+    if (input && pcm && decoder) break;
     if (decoder) MP3FreeDecoder(decoder);
     free(input); free(pcm);
+    input = nullptr; pcm = nullptr; decoder = nullptr;
+    vTaskDelay(pdMS_TO_TICKS(1000));
+  }
+  if (!input || !pcm || !decoder) {
+    if (!interrupted()) fail("NO MEMORY");
     return;
   }
 
-  const bool local = command.path.length() > 0;
   File file;
   HTTPClient http;
   WiFiClient *stream = nullptr;

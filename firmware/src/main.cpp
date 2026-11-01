@@ -62,6 +62,7 @@ constexpr uint32_t kRenderIntervalMs = 50;
 constexpr uint32_t kWifiRetryMs = 30000;
 constexpr uint32_t kSyncPollMs = 3000;
 constexpr uint32_t kMediaSyncPollMs = 60000;
+constexpr uint32_t kChatHeapFloor = 55000;
 constexpr uint32_t kBookmarkEveryMs = 30000;
 constexpr uint32_t kBookSkipSeconds = 30;
 constexpr uint32_t kBatterySampleMs = 1000;
@@ -219,6 +220,7 @@ struct ChargePlotPoint {
 };
 void applyEffectiveLanguage();
 void stopMediaNow();
+bool mediaOwnsRadio();
 void setLocalOnlyMode(bool enabled);
 
 uint32_t participantColour(const String &authorId, const String &authorName = "") {
@@ -1714,6 +1716,8 @@ void networkTask(void *) {
       const bool loaded = downloadVoiceClip(messageId); voiceDownloadActive = false;
       if (!loaded && !voicePlaybackCancelled) { voicePlayingMessageId = 0; walkieStatus = "PLAY FAILED"; renderDirty = true; }
     }
+    // Chat's parsing allocates as it goes, so it waits while the player leaves too little.
+    if (media::active() && ESP.getMaxAllocHeap() < kChatHeapFloor) { vTaskDelay(pdMS_TO_TICKS(1000)); continue; }
     synchronize();
     if (voiceUploadPending && !localReplayActive) uploadVoiceClip();
     if (syncOverride) syncOverride = false;
@@ -1726,7 +1730,7 @@ void networkTask(void *) {
 void walkieTask(void *) {
   for (;;) {
     if (chargingModeActive) { vTaskDelay(pdMS_TO_TICKS(1000)); continue; }
-    if (media::active()) {
+    if (mediaOwnsRadio()) {
       if (walkieInitialized) { walkieSocket.disconnect(); walkieInitialized = false; walkieConnected = false; }
       vTaskDelay(pdMS_TO_TICKS(250)); continue;
     }
@@ -2074,6 +2078,9 @@ int queueIndex = -1;
 uint32_t lastBookmarkAt = 0;
 uint32_t lastMediaRenderAt = 0;
 bool tracksFromCardList = false;
+String libraryFolder;
+String queueFolder;
+volatile bool mediaStarting = false;
 
 String utf8Head(const String &text, size_t maximumCharacters) {
   size_t characters = 0;
@@ -2455,14 +2462,16 @@ void switchRoom(int direction) {
   selectRoom((active + direction + static_cast<int>(rooms.size())) % static_cast<int>(rooms.size()));
 }
 
-String folderOf(const String &path) { return path.substring(0, path.lastIndexOf('/')); }
+String trackPath(const library::Item &item) { return queueFolder + "/" + item.title + ".mp3"; }
 
 void savePlace() {
   const auto *item = nowPlayingItem();
   if (!item || queueCollection != library::Collection::Books) return;
-  if (item->path.length()) library::saveCardPlace(folderOf(item->path), item->path, media::positionSeconds());
+  if (item->onCard) library::saveCardPlace(queueFolder, trackPath(*item), media::positionSeconds());
   else library::saveBookmark(item->id, media::positionSeconds() * 1000);
 }
+
+bool mediaOwnsRadio() { return mediaStarting || media::active(); }
 
 void stopMediaNow() {
   if (!media::active()) return;
@@ -2478,8 +2487,12 @@ void startQueuedTrack(uint32_t offsetSeconds) {
   if (!item) return;
   // The microphone and the speaker share the audio hardware.
   M5Cardputer.Mic.end(); M5Cardputer.Speaker.begin(); M5Cardputer.Speaker.setVolume(kVolumeValues[volumeLevel]);
-  if (item->path.length()) media::playFile(item->path, offsetSeconds);
+  // Give the walkie socket's RAM back before the player asks for its own.
+  mediaStarting = true;
+  for (const uint32_t started = millis(); walkieInitialized && millis() - started < 1500;) delay(10);
+  if (item->onCard) media::playFile(trackPath(*item), offsetSeconds);
   else media::play(library::streamUrl(item->id, queueCollection, offsetSeconds), offsetSeconds);
+  mediaStarting = false;
   lastBookmarkAt = millis();
 }
 
@@ -2546,12 +2559,15 @@ void openLibrarySelection() {
     const auto album = libraryItems[librarySelection];
     tracksFromCardList = libraryView == LibraryView::CardAlbums;
     openLibraryList(LibraryView::Tracks, album.title);
+    libraryFolder = album.path;
     if (album.path.length()) library::requestCardTracks(album.path); else library::requestTracks(album.id);
     return;
   }
   // A list becomes the play queue, so the next song follows on its own.
   stopMediaNow();
-  playQueue = libraryItems; queueCollection = libraryCollection; queueIndex = librarySelection;
+  // Moved, not copied: a long book's list twice over doesn't fit next to the player.
+  queueIndex = librarySelection; queueFolder = libraryFolder; queueCollection = libraryCollection;
+  playQueue = std::move(libraryItems); libraryItems.clear();
   const auto *item = nowPlayingItem();
   startQueuedTrack(item->resumeMs / 1000);
   screenMode = ScreenMode::NowPlaying; renderDirty = true;
@@ -2559,7 +2575,7 @@ void openLibrarySelection() {
 
 void savePlaceAtStart() {
   const auto *item = nowPlayingItem();
-  if (item && item->path.length() && queueCollection == library::Collection::Books) library::saveCardPlace(folderOf(item->path), item->path, 0);
+  if (item && item->onCard && queueCollection == library::Collection::Books) library::saveCardPlace(queueFolder, trackPath(*item), 0);
 }
 
 void moveQueue(int direction) {
@@ -2567,7 +2583,7 @@ void moveQueue(int direction) {
   if (next < 0 || next >= static_cast<int>(playQueue.size())) return;
   stopMediaNow();
   // The place moves with the chapter: a card book keeps one file, a server book one bookmark.
-  if (queueCollection == library::Collection::Books && playQueue[queueIndex].path.isEmpty()) library::deleteBookmark(playQueue[queueIndex].id);
+  if (queueCollection == library::Collection::Books && !playQueue[queueIndex].onCard) library::deleteBookmark(playQueue[queueIndex].id);
   queueIndex = next; startQueuedTrack(0); savePlaceAtStart(); renderDirty = true;
 }
 
@@ -2588,7 +2604,7 @@ void serviceMedia() {
     if (queueIndex + 1 < static_cast<int>(playQueue.size())) moveQueue(1);
     else {
       if (item && queueCollection == library::Collection::Books) {
-        if (item->path.length()) library::clearCardPlace(folderOf(item->path)); else library::deleteBookmark(item->id);
+        if (item->onCard) library::clearCardPlace(queueFolder); else library::deleteBookmark(item->id);
       }
       media::stop();
     }
@@ -2662,7 +2678,7 @@ bool handleAppKeys(const Keyboard_Class::KeysState &keys, bool goUp, bool goDown
       if (character == 's' || character == 'S') { stopMediaNow(); goBackFromApp(); }
       else if ((character == 'l' || character == 'L') && queueIndex >= 0 && queueCollection == library::Collection::Music) {
         auto &item = playQueue[queueIndex];
-        if (item.path.isEmpty()) { item.liked = !item.liked; library::setLiked(item.id, item.liked); }
+        if (!item.onCard) { item.liked = !item.liked; library::setLiked(item.id, item.liked); }
       }
     }
   }
