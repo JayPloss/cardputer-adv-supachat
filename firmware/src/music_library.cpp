@@ -35,6 +35,7 @@ constexpr uint32_t kTimeoutMs = 4000;
 constexpr uint32_t kConnectTimeoutMs = 2000;
 constexpr uint32_t kServerRetryMs = 60000;
 constexpr size_t kCardTrackLimit = 300;
+constexpr size_t kCardFolderRoom = 40;
 
 enum class JobKind : uint8_t { CardAlbums, CardTracks, Adjacent, SavePlace, ClearPlace, Albums, Liked, Search, Tracks, SaveBookmark, DeleteBookmark, Like, Unlike };
 struct Job { JobKind kind; String text; int number; Collection collection; String extra; uint32_t generation; };
@@ -189,6 +190,8 @@ void addCardFolders(std::vector<Item> &items, Collection collection) {
   File root = SD.open(cardRoot(collection));
   if (!root || !root.isDirectory()) return;
   const size_t first = items.size();
+  // Room up front: a growing list needs twice its size at each step, which doesn't fit beside the player.
+  items.reserve(first + kCardFolderRoom);
   for (File entry = root.openNextFile(); entry; entry = root.openNextFile()) {
     if (entry.isDirectory()) {
       Item item;
@@ -222,8 +225,17 @@ bool readPlace(const String &path, String &trackPath, uint32_t &seconds) {
 bool runCardTracks(const Job &job) {
   File root = SD.open(job.text);
   if (!root || !root.isDirectory()) { failureText = "NOT ON CARD"; return false; }
+  // Counted first: growing to a long list needs twice its size at each step, which doesn't fit.
+  size_t tracks = 0;
+  for (File entry = root.openNextFile(); entry && tracks < kCardTrackLimit; entry = root.openNextFile()) {
+    if (!entry.isDirectory()) tracks++;
+    entry.close();
+  }
+  root.close();
+  root = SD.open(job.text);
+  if (!root) { failureText = "NOT ON CARD"; return false; }
   std::vector<Item> items;
-  items.reserve(32);
+  items.reserve(tracks);
   for (File entry = root.openNextFile(); entry && items.size() < kCardTrackLimit; entry = root.openNextFile()) {
     const String name = baseName(entry.name());
     if (!entry.isDirectory() && isMp3(name)) {

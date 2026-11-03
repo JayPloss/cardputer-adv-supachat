@@ -2824,7 +2824,8 @@ void openLibrarySelection() {
     tracksFromCardList = libraryView == LibraryView::CardAlbums;
     openLibraryList(LibraryView::Tracks, album.title);
     libraryFolder = album.path;
-    if (album.path.length()) library::requestCardTracks(album.path); else library::requestTracks(album.id);
+    // A folder's song list doesn't fit beside the player, so opening one on the card stops what's playing.
+    if (album.path.length()) { stopMediaNow(); library::requestCardTracks(album.path); } else library::requestTracks(album.id);
     return;
   }
   // A list becomes the play queue, so the next song follows on its own.
