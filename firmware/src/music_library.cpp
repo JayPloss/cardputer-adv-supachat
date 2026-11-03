@@ -35,7 +35,6 @@ constexpr uint32_t kTimeoutMs = 4000;
 constexpr uint32_t kConnectTimeoutMs = 2000;
 constexpr uint32_t kServerRetryMs = 60000;
 constexpr size_t kCardTrackLimit = 300;
-constexpr size_t kCardFolderRoom = 40;
 
 enum class JobKind : uint8_t { CardAlbums, CardTracks, Adjacent, SavePlace, ClearPlace, Albums, Liked, Search, Tracks, SaveBookmark, DeleteBookmark, Like, Unlike };
 struct Job { JobKind kind; String text; int number; Collection collection; String extra; uint32_t generation; };
@@ -190,8 +189,16 @@ void addCardFolders(std::vector<Item> &items, Collection collection) {
   File root = SD.open(cardRoot(collection));
   if (!root || !root.isDirectory()) return;
   const size_t first = items.size();
-  // Room up front: a growing list needs twice its size at each step, which doesn't fit beside the player.
-  items.reserve(first + kCardFolderRoom);
+  // Counted first: a growing list needs twice its size at each step, which doesn't fit beside the player.
+  size_t folders = 0;
+  for (File entry = root.openNextFile(); entry; entry = root.openNextFile()) {
+    if (entry.isDirectory()) folders++;
+    entry.close();
+  }
+  root.close();
+  root = SD.open(cardRoot(collection));
+  if (!root) return;
+  items.reserve(first + folders);
   for (File entry = root.openNextFile(); entry; entry = root.openNextFile()) {
     if (entry.isDirectory()) {
       Item item;
