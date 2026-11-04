@@ -26,6 +26,10 @@
 - `firmware/include/os.h` is the layer keeping apps within their RAM: budgets, one secure connection
   at a time, containment, the boot phase. `docs/heap-budget.md` has the measurements behind it.
 
+## Screens
+
+- Before designing or changing a screen, menu, label, font size, key behaviour or UI sound, load `skills/design-reference-cardputer/SKILL.md`. Its `references/lessons.md` holds the mistakes already made, and takes new ones.
+
 ## Authentication claims
 
 - Never describe a login issue as fixed, functional, working, or expected to work based only on account existence, password assignment, password-hash verification, server health, route health, unit tests, or a simulated identity header.
