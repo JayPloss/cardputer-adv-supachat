@@ -43,7 +43,7 @@ issues and their acceptance criteria are tracked in
 
 ## HOME screen and apps
 
-The device boots through the SupaChat splash to a HOME screen with four apps: SUPACHAT, MUSIC, BOOKS and R/C. Arrows and Enter (or keys 1-4) open one. The rear button goes back one level; the top-left key does too (Fn + that key while typing).
+The device boots through the SupaChat splash to a HOME screen of apps, four to a page. Page 1 has SUPACHAT, MUSIC, BOOKS and R/C. Page 2 has the settings: WI-FI, VOLUME, STATUS and LANGUAGE. Page 3 has CHARGING, LOCAL, CHANGELOG and SYSTEM. The arrows move between apps and on to the next page; going past the first or last page gives a bump and a falling tone. Enter or keys 1-4 open an app on the page, and key 0 opens SYSTEM. The rear button goes back one level; the top-left key does too (Fn + that key while typing).
 
 MUSIC and BOOKS stream from Navidrome on the home LAN over the Subsonic API: plain HTTP, MP3 only, decoded with libhelix on a dedicated task (`firmware/src/media_player.cpp`, `firmware/src/music_library.cpp`). The Cardputer ADV has no PSRAM, so all audio buffers live in internal RAM and are released when playback stops. While media plays, the walkie socket closes and chat polls once a minute. Starting a walkie recording, charging mode or ESP-NOW local mode stops playback first.
 
@@ -156,17 +156,17 @@ At boot, the MVP handheld:
 
 The firmware enables WiFi power saving and keeps network work on a separate FreeRTOS task so typing, display refresh, and melody playback stay responsive. Its Networks menu scans visible SSIDs, shows passwords during entry by design, joins the selected network, and saves up to 12 profiles in NVS. The provisioning tool can also import saved Windows profiles without printing or committing their keys.
 
-### Paginated menus
+### SupaChat's menu
 
-The Cardputer's top-level menu is split across two pages. Left and Right move between pages; Up and Down move the selection within the visible page; Enter opens the selected item. Each page has an obvious page indicator and preserves its own last selection. Text-entry punctuation and room-switch navigation keep their contextual behavior outside the menu.
+SupaChat's menu holds what belongs to chat: back to chat, rooms, sync, voice messages, walkie-talkie, emoji recipes and fox finding. Up and Down move the selection, Enter opens it, and Left returns to chat. The device's settings are apps on HOME.
 
 ### On-device changelog
 
-The second menu page includes a Changelog area. Up and Down scroll releases by firmware build number, starting with the installed build. The canonical release notes live in `firmware/include/changelog.h`; emulator contracts verify every rendered build and line against that source.
+The CHANGELOG app on HOME shows each release. Up and Down scroll releases by firmware build number, starting with the installed build. The canonical release notes live in `firmware/include/changelog.h`; emulator contracts verify every rendered build and line against that source.
 
 ### ESP-NOW local-only mode
 
-The second menu page also exposes `ESP-NOW LOCAL`. Turning it on deliberately disconnects Wi-Fi, stops HTTPS/WSS work, pins the radio to the shared fallback channel, and leaves encrypted nearby text and audio active. Turning it off resumes normal Wi-Fi discovery. This operator choice is intentionally held only in RAM and always resets to off after reboot.
+The LOCAL app on HOME turns on ESP-NOW local mode. Turning it on deliberately disconnects Wi-Fi, stops HTTPS/WSS work, pins the radio to the shared fallback channel, and leaves encrypted nearby text and audio active. Turning it off resumes normal Wi-Fi discovery. This operator choice is intentionally held only in RAM and always resets to off after reboot.
 
 Custom firmware now broadcasts nearby presence and sends encrypted text or 8 kHz audio over ESP-NOW when the Hetzner walkie socket is unavailable. Two-device RF acceptance is still required before calling this path production-ready.
 

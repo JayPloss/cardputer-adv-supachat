@@ -48,8 +48,13 @@ await shot('menu');
 async function openMenu(index) {
   await page.reload();
   await page.getByRole('button', { name: 'REAR · MENU' }).click();
-  for (let pageIndex = 0; pageIndex < Math.floor(index / 6); pageIndex++) await page.locator('[data-key="RIGHT"]').click();
-  for (let i = 0; i < index % 6; i++) await page.getByRole('button', { name: '↓ .' }).click();
+  for (let i = 0; i < index; i++) await page.getByRole('button', { name: '↓ .' }).click();
+  await page.getByRole('button', { name: 'ENTER' }).click();
+}
+
+async function openHome(index) {
+  await page.reload();
+  await page.evaluate((app) => { window.__supachatState.screen = 'home'; window.__supachatState.homeSelection = app; window.__supachatDraw(); }, index);
   await page.getByRole('button', { name: 'ENTER' }).click();
 }
 
@@ -62,19 +67,19 @@ await page.waitForTimeout(250); await shot('voice-message-recording'); await pag
 assert.equal((await state()).clipReady, true); await page.getByRole('button', { name: 'ENTER' }).click();
 assert.equal((await state()).replayAudible, true); await shot('voice-message-replay');
 await openMenu(4); await shot('walkie-ready'); await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2); await page.mouse.down(); await page.waitForTimeout(250); await shot('walkie-transmitting'); await page.mouse.up(); assert.equal((await state()).clipPending,false);
-await openMenu(5); await shot('volume');
-await openMenu(6); await shot('language'); await page.locator('[data-key="RIGHT"]').click(); assert.equal((await state()).languageOverride, 'en'); assert.equal((await state()).screen,'language');
-await openMenu(7); await shot('networks'); await page.getByRole('button', { name: 'ENTER' }).click(); await shot('network-password');
+await openHome(5); await shot('volume');
+await openHome(7); await shot('language'); await page.locator('[data-key="RIGHT"]').click(); assert.equal((await state()).languageOverride, 'en'); assert.equal((await state()).screen,'language');
+await openHome(4); await shot('networks'); await page.getByRole('button', { name: 'ENTER' }).click(); await shot('network-password');
 await page.reload(); await page.getByRole('button', { name: 'REAR · MENU' }).click(); await page.locator('[data-key="RIGHT"]').click(); await shot('menu-page-2');
-await openMenu(8); assert.equal((await state()).localOnly,true); assert.equal((await state()).ssid,''); assert.equal((await state()).network,'ESPNOW LOCAL'); await shot('menu-local-only');
-await openMenu(9); await shot('charging-confirm'); await page.getByRole('button', { name: 'ENTER' }).click(); assert.equal((await state()).charging,true); await shot('charging-active');
-await openMenu(10); await shot('status'); await page.locator('[data-key="RIGHT"]').click(); assert.equal((await state()).statusPage,1); await shot('status-diagnostics-empty');
+await openHome(9); assert.equal((await state()).localOnly,true); assert.equal((await state()).ssid,''); assert.equal((await state()).network,'ESPNOW LOCAL'); await shot('menu-local-only');
+await openHome(8); await shot('charging-confirm'); await page.getByRole('button', { name: 'ENTER' }).click(); assert.equal((await state()).charging,true); await shot('charging-active');
+await openHome(6); await shot('status'); await page.locator('[data-key="RIGHT"]').click(); assert.equal((await state()).statusPage,1); await shot('status-diagnostics-empty');
 await page.reload(); await page.getByLabel('Sync fault injection').selectOption('bad-data'); await page.getByRole('button', { name: 'REAR · MENU' }).click(); await page.locator('[data-key="RIGHT"]').click(); for(let i=0;i<4;i++)await page.getByRole('button', { name: '↓ .' }).click(); await page.getByRole('button', { name: 'ENTER' }).click(); await page.locator('[data-key="RIGHT"]').click(); assert.equal((await state()).lastSyncError,'BAD JSON'); await shot('status-diagnostics-bad-json');
-await openMenu(11); await shot('changelog-current'); await page.locator('[data-key="RIGHT"]').click(); assert.equal((await state()).changelogSelection,1); await shot('changelog-previous'); await page.getByRole('button', { name: '↓ .' }).click(); assert.equal((await state()).changelogLineOffset,1); await shot('changelog-scrolled');
-await openMenu(13); await shot('fox-finding-select'); await page.getByRole('button', { name: 'ENTER' }).click(); assert.equal((await state()).foxState,'requesting'); await shot('fox-finding-requesting');
+await openHome(10); await shot('changelog-current'); await page.locator('[data-key="RIGHT"]').click(); assert.equal((await state()).changelogSelection,1); await shot('changelog-previous'); await page.getByRole('button', { name: '↓ .' }).click(); assert.equal((await state()).changelogLineOffset,1); await shot('changelog-scrolled');
+await openMenu(6); await shot('fox-finding-select'); await page.getByRole('button', { name: 'ENTER' }).click(); assert.equal((await state()).foxState,'requesting'); await shot('fox-finding-requesting');
 await page.evaluate(()=>{window.__supachatState.foxAck();window.__supachatState.foxPlaceResult();window.__supachatDraw()}); assert.equal((await state()).foxState,'guiding'); await shot('fox-finding-guiding');
 await page.evaluate(()=>{window.__supachatState.foxLoseSignal();window.__supachatDraw()}); await shot('fox-finding-signal-lost');
-await openMenu(13); await page.evaluate(()=>{window.__supachatState.offerPack('Papa','Juju',77);window.__supachatDraw()}); await shot('fox-finding-pack-invite'); await page.getByRole('button', { name: 'ENTER' }).click(); await page.evaluate(()=>{window.__supachatState.foxPlaceResult();window.__supachatState.packObservation('Albie',{rssi:-67,similarity:72,confidence:2});window.__supachatState.packObservation('Papa',{rssi:-52,similarity:80,confidence:3});window.__supachatState.packObservation('Naomie',{rssi:-60,similarity:91,confidence:2});window.__supachatDraw()}); assert.equal((await state()).foxJoinedPack,true); await shot('fox-finding-pack-guiding');
+await openMenu(6); await page.evaluate(()=>{window.__supachatState.offerPack('Papa','Juju',77);window.__supachatDraw()}); await shot('fox-finding-pack-invite'); await page.getByRole('button', { name: 'ENTER' }).click(); await page.evaluate(()=>{window.__supachatState.foxPlaceResult();window.__supachatState.packObservation('Albie',{rssi:-67,similarity:72,confidence:2});window.__supachatState.packObservation('Papa',{rssi:-52,similarity:80,confidence:3});window.__supachatState.packObservation('Naomie',{rssi:-60,similarity:91,confidence:2});window.__supachatDraw()}); assert.equal((await state()).foxJoinedPack,true); await shot('fox-finding-pack-guiding');
 await page.reload(); await page.getByLabel('Sync fault injection').selectOption('io');
 assert.equal((await state()).network, 'SYNC IO -1'); await shot('chat-sync-io');
 await page.goto(`${base}?language=fr`);

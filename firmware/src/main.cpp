@@ -53,7 +53,7 @@ constexpr bool kBuildFrenchDefault = false;
 bool frenchUi = kBuildFrenchDefault;
 SharedText<8> languageOverride{"auto"};
 const char *uiText(const char *english, const char *french) { return frenchUi ? french : english; }
-constexpr char kFirmwareVersion[] = "v0.54";
+constexpr char kFirmwareVersion[] = "v0.55";
 constexpr size_t kMessageLimit = 140;
 constexpr size_t kHistoryLimit = 100;  // What the first sync fetches; older pages go to the card.
 constexpr size_t kRamMessageLimit = 40;
@@ -333,10 +333,7 @@ volatile bool voicePlaybackCancelled = false;
 volatile bool voiceDownloadActive = false;
 int64_t voicePlayingMessageId = 0;
 int voiceInboxSelection = 0;
-constexpr int kMenuPageCount = 3;
-constexpr int kMenuItemsPerPage = 6;
-int menuPage = 0;
-int menuSelections[kMenuPageCount] = {0, 0, 0};
+int menuSelection = 0;
 int changelogSelection = 0;
 int changelogLineOffset = 0;
 int statusPage = 0;
@@ -812,17 +809,31 @@ bool localBlackout() {
   return value.tm_hour >= 22 || value.tm_hour < 6;
 }
 
+// Tones are full-scale and speech isn't, so beside a book or song they sit well below it.
+uint8_t toneChannelVolume() {
+  const bool listening = media::active() || screenMode == ScreenMode::Library || screenMode == ScreenMode::LibrarySearch || screenMode == ScreenMode::NowPlaying;
+  return listening ? kListeningToneVolume : 255;
+}
+
 void playNextTone() {
   if (chargingModeActive || voiceRecording || audioPlaying || messageNotificationActive) return;
   const uint32_t now = millis();
   if (now - lastToneAt < kToneIntervalMs || kKeypressSongLength == 0) return;
   lastToneAt = now;
   M5Cardputer.Speaker.setVolume(kVolumeValues[volumeLevel]);
-  // Tones are full-scale and speech isn't, so in the listening apps they sit well below the book.
-  const bool listening = screenMode == ScreenMode::Library || screenMode == ScreenMode::LibrarySearch || screenMode == ScreenMode::NowPlaying;
-  M5Cardputer.Speaker.setChannelVolume(0, listening ? kListeningToneVolume : 255);
+  M5Cardputer.Speaker.setChannelVolume(0, toneChannelVolume());
   M5Cardputer.Speaker.tone(kKeypressSongFrequencies[songPosition], kToneDurationMs, 0, true);
   songPosition = (songPosition + 1) % kKeypressSongLength;
+}
+
+// "Can't go there": two falling notes, unlike anything in the key song.
+void playDeniedTone() {
+  if (chargingModeActive || voiceRecording || audioPlaying || messageNotificationActive) return;
+  lastToneAt = millis();
+  M5Cardputer.Speaker.setVolume(kVolumeValues[volumeLevel]);
+  M5Cardputer.Speaker.setChannelVolume(0, toneChannelVolume());
+  M5Cardputer.Speaker.tone(294, 70, 0, true);
+  M5Cardputer.Speaker.tone(196, 120, 0, false);
 }
 
 void serviceMessageNotification() {
@@ -1476,7 +1487,7 @@ void exitChargingMode() {
   WiFi.mode(WIFI_STA); WiFi.setAutoReconnect(false); WiFi.persistent(false); WiFi.disconnect(false, false);
   if (kEspNowEnabled) initializeEspNow();
   wifiResumeRequested = true; syncOverride = true; networkStatus = "RESUMING";
-  screenMode = ScreenMode::Menu; renderDirty = true;
+  screenMode = ScreenMode::Home; renderDirty = true;
 }
 
 void serviceChargingMode() {
@@ -2018,22 +2029,19 @@ void drawChat() {
   display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(198, 126); display.printf("%d/140", utf8CharacterCount(draft));
 }
 
-const char *kMenuItemsEn[] = {"BACK TO CHAT", "ROOMS", "SYNC NOW", "VOICE MESSAGES", "WALKIE-TALKIE", "VOLUME", "LANGUAGE", "NETWORKS", "ESP-NOW LOCAL", "CHARGING MODE", "STATUS", "CHANGELOG", "EMOJI RECIPES", "FOX FINDING"};
-const char *kMenuItemsFr[] = {"RETOUR CHAT", "SALONS", "SYNCHRO", "MESSAGES VOCAUX", "WALKIE-TALKIE", "VOLUME", "LANGUE", "RESEAUX", "ESP-NOW LOCAL", "MODE CHARGE", "ETAT", "CHANGEMENTS", "RECETTES EMOJI", "CHASSE AU RENARD"};
-constexpr int kMenuItemCounts[kMenuPageCount] = {6, 6, 2};
+const char *kMenuItemsEn[] = {"BACK TO CHAT", "ROOMS", "SYNC NOW", "VOICE MESSAGES", "WALKIE-TALKIE", "EMOJI RECIPES", "FOX FINDING"};
+const char *kMenuItemsFr[] = {"RETOUR CHAT", "SALONS", "SYNCHRO", "MESSAGES VOCAUX", "WALKIE-TALKIE", "RECETTES EMOJI", "CHASSE AU RENARD"};
+constexpr int kMenuItemCount = sizeof(kMenuItemsEn) / sizeof(kMenuItemsEn[0]);
 void drawMenu() {
   auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader("MENU");
-  display.setTextSize(1); display.setTextColor(TFT_YELLOW, TFT_DARKGREEN); display.setCursor(78, 6); display.printf("%d/%d", menuPage + 1, kMenuPageCount);
-  for (int row = 0; row < kMenuItemCounts[menuPage]; row++) {
-    const int index = menuPage * kMenuItemsPerPage + row;
-    const int y = 21 + row * 14; const bool selected = row == menuSelections[menuPage];
+  display.setTextSize(1);
+  for (int row = 0; row < kMenuItemCount; row++) {
+    const int y = 21 + row * 14; const bool selected = row == menuSelection;
     display.fillRoundRect(6, y, 228, 12, 3, selected ? TFT_GREEN : TFT_DARKGREY);
     display.setTextColor(selected ? TFT_BLACK : TFT_WHITE, selected ? TFT_GREEN : TFT_DARKGREY);
-    display.setCursor(13, y + 3); display.print(frenchUi ? kMenuItemsFr[index] : kMenuItemsEn[index]);
-    if (index == 8) { display.setCursor(184, y + 3); display.print(localOnlyMode ? "ON" : "OFF"); }
+    display.setCursor(13, y + 3); display.print(frenchUi ? kMenuItemsFr[row] : kMenuItemsEn[row]);
   }
-  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 110); display.print(uiText("LEFT/RIGHT PAGE", "GAUCHE/DROITE PAGE"));
-  display.setCursor(6, 122); display.print(uiText("UP/DOWN MOVE      ENTER OPEN", "HAUT/BAS BOUGER   ENTER OUVRIR"));
+  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 123); display.print(uiText("UP/DOWN MOVE      ENTER OPEN", "HAUT/BAS BOUGER   ENTER OUVRIR"));
 }
 
 const char *kEmojiRecipes[] = {":)  HAPPY", ":(  SAD", ";)  WINK", ":D  LAUGH", "<3  LOVE", ":P  PLAYFUL", ":O  SURPRISED", ":/  UNSURE"};
@@ -2240,9 +2248,19 @@ void drawFoxFinding() {
 
 // HOME and its apps. SUPACHAT is the existing chat; the others live below.
 struct HomeApp { const char *english; const char *french; };
-constexpr HomeApp kHomeApps[] = {{"SUPACHAT", "SUPACHAT"}, {"MUSIC", "MUSIQUE"}, {"BOOKS", "LIVRES"}, {"R/C", "R/C"}};
+// Pages of four, in order. A label fits a tile at 9 characters: see design-reference-cardputer.
+constexpr HomeApp kHomeApps[] = {{"SUPACHAT", "SUPACHAT"}, {"MUSIC", "MUSIQUE"}, {"BOOKS", "LIVRES"}, {"R/C", "R/C"},
+                                 {"WI-FI", "WI-FI"}, {"VOLUME", "VOLUME"}, {"STATUS", "ETAT"}, {"LANGUAGE", "LANGUE"},
+                                 {"CHARGING", "CHARGE"}, {"LOCAL OFF", "LOCAL NON"}, {"CHANGELOG", "VERSIONS"}, {"SYSTEM", "SYSTEME"}};
 constexpr int kHomeAppCount = sizeof(kHomeApps) / sizeof(kHomeApps[0]);
+constexpr int kHomeAppsPerPage = 4;
+constexpr int kHomePageCount = kHomeAppCount / kHomeAppsPerPage;
+constexpr int kHomeLocalApp = 9;
 int homeSelection = 0;
+// The bump at the end of the pages: the grid knocks against the edge it can't pass, then settles.
+constexpr uint32_t kHomeBumpMs = 240;
+uint32_t homeBumpAt = 0;
+int homeBumpDirection = 0;
 String homeNotice;
 
 enum class LibraryView : uint8_t { MusicRoot, CardAlbums, Albums, Tracks, Liked, SearchResults };
@@ -2292,18 +2310,28 @@ const library::Item *nowPlayingItem() {
 
 void drawHome() {
   auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader("HOME");
-  for (int index = 0; index < kHomeAppCount; index++) {
-    const int x = 6 + (index % 2) * 117; const int y = 24 + (index / 2) * 41; const bool selected = index == homeSelection;
+  const int page = homeSelection / kHomeAppsPerPage;
+  int bump = 0;
+  if (homeBumpAt) {
+    const uint32_t elapsed = millis() - homeBumpAt;
+    bump = homeBumpDirection * (elapsed < 60 ? 6 : elapsed < 120 ? -3 : elapsed < 180 ? 2 : 0);
+    if (homeBumpDirection) display.fillRect(homeBumpDirection < 0 ? 0 : 236, 24, 4, 77, TFT_RED);
+  }
+  for (int slot = 0; slot < kHomeAppsPerPage; slot++) {
+    const int index = page * kHomeAppsPerPage + slot;
+    const int x = 6 + (slot % 2) * 117 + bump; const int y = 24 + (slot / 2) * 41; const bool selected = index == homeSelection;
     display.fillRoundRect(x, y, 111, 36, 4, selected ? TFT_GREEN : TFT_DARKGREY);
     display.setTextSize(2); display.setTextColor(selected ? TFT_BLACK : TFT_WHITE, selected ? TFT_GREEN : TFT_DARKGREY);
     const char *label = frenchUi ? kHomeApps[index].french : kHomeApps[index].english;
+    if (index == kHomeLocalApp && localOnlyMode) label = uiText("LOCAL ON", "LOCAL OUI");
     display.setCursor(x + (111 - static_cast<int>(strlen(label)) * 12) / 2, y + 10); display.print(label);
   }
+  for (int dot = 0; dot < kHomePageCount; dot++) display.fillCircle(120 + (dot * 2 - kHomePageCount + 1) * 7, 105, 3, dot == page ? TFT_GREEN : TFT_DARKGREY);
   display.setTextSize(1);
   const auto *playing = nowPlayingItem();
-  if (homeNotice.length()) { display.setTextColor(TFT_RED, TFT_BLACK); display.setCursor(6, 110); display.print(homeNotice.substring(0, 38)); }
-  else if (playing && media::active()) { display.setTextColor(TFT_YELLOW, TFT_BLACK); display.setCursor(6, 110); printFont0Text(utf8Head(playing->title, 37)); }
-  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 123); display.print(uiText("ARROWS MOVE   ENTER OPEN   0 SYSTEM", "FLECHES  ENTER OUVRIR   0 SYSTEME"));
+  if (homeNotice.length()) { display.setTextColor(TFT_RED, TFT_BLACK); display.setCursor(6, 112); display.print(homeNotice.substring(0, 38)); }
+  else if (playing && media::active()) { display.setTextColor(TFT_YELLOW, TFT_BLACK); display.setCursor(6, 112); printFont0Text(utf8Head(playing->title, 37)); }
+  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 123); display.print(uiText("ARROWS MOVE       ENTER OPEN", "FLECHES           ENTER OUVRIR"));
 }
 
 void drawLibrary() {
@@ -2638,20 +2666,13 @@ void joinSelectedNetwork() {
 }
 
 void openSelectedMenuItem() {
-  const int selection = menuPage * kMenuItemsPerPage + menuSelections[menuPage];
+  const int selection = menuSelection;
   if (selection == 0) screenMode = ScreenMode::Chat;
   else if (selection == 1) screenMode = ScreenMode::Rooms;
   else if (selection == 2) { if (!localOnlyMode) syncOverride = true; networkStatus = localOnlyMode ? "ESPNOW LOCAL" : "SYNC REQUESTED"; screenMode = ScreenMode::Chat; }
   else if (selection == 3) { screenMode = ScreenMode::VoiceMessages; walkieStatus = "READY"; }
   else if (selection == 4) { screenMode = ScreenMode::Walkie; walkieStatus = localOnlyMode ? "ESPNOW LOCAL" : "READY TO TALK"; }
-  else if (selection == 5) screenMode = ScreenMode::Volume;
-  else if (selection == 6) screenMode = ScreenMode::Language;
-  else if (selection == 7) { if (!localOnlyMode) { screenMode = ScreenMode::Networks; scanForNetworks(); } }
-  else if (selection == 8) setLocalOnlyMode(!localOnlyMode);
-  else if (selection == 9) screenMode = ScreenMode::ChargingConfirm;
-  else if (selection == 10) screenMode = ScreenMode::Status;
-  else if (selection == 11) screenMode = ScreenMode::Changelog;
-  else if (selection == 12) screenMode = ScreenMode::EmojiRecipes;
+  else if (selection == 5) screenMode = ScreenMode::EmojiRecipes;
   else {
     screenMode = ScreenMode::FoxFinding; foxState = FoxState::Selecting; foxPeerSelection = 0;
     // Discovery cannot begin while participants remain on unrelated Wi-Fi
@@ -2780,19 +2801,49 @@ void openBooks() {
   library::requestAlbums(library::Collection::Books, 0);
 }
 
+void bumpHome(int direction) {
+  homeBumpAt = millis(); if (!homeBumpAt) homeBumpAt = 1;
+  homeBumpDirection = direction;
+  playDeniedTone(); renderDirty = true;
+}
+
 void openHomeApp(int index) {
   library::forget();
   if (index == 0) screenMode = ScreenMode::Chat;
   else if (index == 1) openMusicRoot();
   else if (index == 2) openBooks();
-  else screenMode = ScreenMode::Remote;
+  else if (index == 3) screenMode = ScreenMode::Remote;
+  else if (index == 4) {
+    // Wi-Fi is off while local mode is on, and joining a network would have nowhere to go.
+    if (localOnlyMode) { homeNotice = uiText("TURN LOCAL OFF FIRST", "COUPER LOCAL D'ABORD"); homeNoticeAt = millis(); bumpHome(0); return; }
+    screenMode = ScreenMode::Networks; scanForNetworks();
+  }
+  else if (index == 5) screenMode = ScreenMode::Volume;
+  else if (index == 6) screenMode = ScreenMode::Status;
+  else if (index == 7) screenMode = ScreenMode::Language;
+  else if (index == 8) screenMode = ScreenMode::ChargingConfirm;
+  else if (index == kHomeLocalApp) setLocalOnlyMode(!localOnlyMode);
+  else if (index == 10) screenMode = ScreenMode::Changelog;
+  else screenMode = ScreenMode::System;
   renderDirty = true;
+}
+
+// The device's settings: apps on HOME, each going back to it.
+bool isSettingsScreen() {
+  return screenMode == ScreenMode::Networks || screenMode == ScreenMode::NetworkPassword || screenMode == ScreenMode::Volume || screenMode == ScreenMode::Status ||
+         screenMode == ScreenMode::Language || screenMode == ScreenMode::ChargingConfirm || screenMode == ScreenMode::Changelog;
+}
+
+void leaveSettingsScreen() {
+  if (screenMode == ScreenMode::NetworkPassword) { frenchGravePending = false; networkPassword = ""; screenMode = ScreenMode::Networks; return; }
+  manualWifiMode = false; statusPage = 0; screenMode = ScreenMode::Home;
 }
 
 // One level back within HOME's apps. False when the screen is not one of them.
 bool goBackFromApp() {
   if (screenMode == ScreenMode::Home) return true;
   if (screenMode == ScreenMode::Remote || screenMode == ScreenMode::System) { screenMode = ScreenMode::Home; return true; }
+  if (isSettingsScreen()) { leaveSettingsScreen(); return true; }
   if (screenMode == ScreenMode::LibrarySearch) { openMusicRoot(); return true; }
   if (screenMode == ScreenMode::NowPlaying) {
     if (queueCollection == library::Collection::Books) openBooks(); else openMusicRoot();
@@ -2870,10 +2921,12 @@ void moveQueue(int direction) {
   queueIndex = next; startQueuedTrack(0); savePlaceAtStart(); renderDirty = true;
 }
 
-// Which app the current screen belongs to; chat owns all of its old screens.
+// Which app the current screen belongs to; chat owns its own screens and the settings belong to no app.
 os::Owner frontApp() {
   switch (screenMode) {
-    case ScreenMode::Home: case ScreenMode::System: case ScreenMode::Remote: return os::Owner::Ui;
+    case ScreenMode::Home: case ScreenMode::System: case ScreenMode::Remote:
+    case ScreenMode::Networks: case ScreenMode::NetworkPassword: case ScreenMode::Volume: case ScreenMode::Status:
+    case ScreenMode::Language: case ScreenMode::ChargingConfirm: case ScreenMode::Changelog: return os::Owner::Ui;
     case ScreenMode::Library: case ScreenMode::LibrarySearch: case ScreenMode::NowPlaying: return os::mediaOwner();
     default: return os::Owner::Chat;
   }
@@ -2960,19 +3013,28 @@ void serviceMedia() {
 
 // Keys for HOME and its apps, plus the back key from chat and the menu.
 bool handleAppKeys(const Keyboard_Class::KeysState &keys, bool goUp, bool goDown, bool goLeft, bool goRight) {
-  const bool escape = physicalKeyAt(0, 0) && (screenMode == ScreenMode::Chat || screenMode == ScreenMode::LibrarySearch ? keys.fn : true);
+  const bool escape = physicalKeyAt(0, 0) && (screenMode == ScreenMode::Chat || screenMode == ScreenMode::LibrarySearch || screenMode == ScreenMode::NetworkPassword ? keys.fn : true);
   if (escape && (screenMode == ScreenMode::Chat || screenMode == ScreenMode::Menu)) { screenMode = ScreenMode::Home; playNextTone(); renderDirty = true; return true; }
+  if (escape && isSettingsScreen()) { leaveSettingsScreen(); playNextTone(); renderDirty = true; return true; }
   const bool ownScreen = screenMode == ScreenMode::Home || screenMode == ScreenMode::Library || screenMode == ScreenMode::LibrarySearch ||
                          screenMode == ScreenMode::NowPlaying || screenMode == ScreenMode::Remote || screenMode == ScreenMode::System;
   if (!ownScreen) return false;
   if (escape) { goBackFromApp(); playNextTone(); renderDirty = true; return true; }
   if (screenMode == ScreenMode::Home) {
-    if (goUp || goDown) homeSelection = (homeSelection + 2) % kHomeAppCount;
-    else if (goLeft || goRight) homeSelection ^= 1;
-    else if (keys.enter) openHomeApp(homeSelection);
+    const int page = homeSelection / kHomeAppsPerPage; const int slot = homeSelection % kHomeAppsPerPage;
+    const bool onLeft = slot % 2 == 0;
+    if (goUp || goDown) homeSelection = page * kHomeAppsPerPage + (slot + 2) % kHomeAppsPerPage;
+    else if (goLeft && onLeft) {
+      if (page == 0) { bumpHome(-1); return true; }
+      homeSelection = (page - 1) * kHomeAppsPerPage + slot + 1;
+    } else if (goRight && !onLeft) {
+      if (page + 1 == kHomePageCount) { bumpHome(1); return true; }
+      homeSelection = (page + 1) * kHomeAppsPerPage + slot - 1;
+    } else if (goLeft || goRight) homeSelection += onLeft ? 1 : -1;
+    else if (keys.enter) { openHomeApp(homeSelection); if (homeBumpAt) return true; }
     else {
       for (const auto character : keys.word) {
-        if (character >= '1' && character < '1' + kHomeAppCount) openHomeApp(character - '1');
+        if (character >= '1' && character < '1' + kHomeAppsPerPage) { homeSelection = page * kHomeAppsPerPage + (character - '1'); openHomeApp(homeSelection); if (homeBumpAt) return true; }
         else if (character == '0') screenMode = ScreenMode::System;
       }
     }
@@ -3058,16 +3120,14 @@ void handleKeyboard() {
   const bool goRight = navigationChord && navRight();
   if (handleAppKeys(keys, goUp, goDown, goLeft, goRight)) return;
   if (screenMode == ScreenMode::Menu) {
-    const int pageItems = kMenuItemCounts[menuPage];
-    if (goUp) { menuSelections[menuPage] = (menuSelections[menuPage] + pageItems - 1) % pageItems; playNextTone(); }
-    else if (goDown) { menuSelections[menuPage] = (menuSelections[menuPage] + 1) % pageItems; playNextTone(); }
-    else if (goLeft) { menuPage = (menuPage + kMenuPageCount - 1) % kMenuPageCount; playNextTone(); }
-    else if (goRight) { menuPage = (menuPage + 1) % kMenuPageCount; playNextTone(); }
+    if (goUp) { menuSelection = (menuSelection + kMenuItemCount - 1) % kMenuItemCount; playNextTone(); }
+    else if (goDown) { menuSelection = (menuSelection + 1) % kMenuItemCount; playNextTone(); }
+    else if (goLeft) { screenMode = ScreenMode::Chat; playNextTone(); }
     else if (keys.enter) { openSelectedMenuItem(); playNextTone(); }
     renderDirty = true; return;
   }
   if (screenMode == ScreenMode::ChargingConfirm) {
-    if (goLeft) { screenMode = ScreenMode::Menu; playNextTone(); }
+    if (goLeft) { leaveSettingsScreen(); playNextTone(); }
     else if (keys.enter) enterChargingMode();
     renderDirty = true; return;
   }
@@ -3097,7 +3157,7 @@ void handleKeyboard() {
   if (screenMode == ScreenMode::Volume) {
     if (goLeft && volumeLevel > 0) { volumeLevel--; saveVolume(); playNextTone(); }
     else if (goRight && volumeLevel < 4) { volumeLevel++; saveVolume(); playNextTone(); }
-    else if (keys.enter) screenMode = ScreenMode::Menu;
+    else if (keys.enter) { leaveSettingsScreen(); playNextTone(); }
     renderDirty = true; return;
   }
   if (screenMode == ScreenMode::VoiceMessages || screenMode == ScreenMode::Walkie) {
@@ -3109,12 +3169,12 @@ void handleKeyboard() {
   if (screenMode == ScreenMode::Networks) {
     if (goUp && networkSelection > 0) { networkSelection--; playNextTone(); }
     else if (goDown && networkSelection + 1 < static_cast<int>(scannedNetworks.size())) { networkSelection++; playNextTone(); }
-    else if (goLeft) { manualWifiMode = false; screenMode = ScreenMode::Menu; playNextTone(); }
+    else if (goLeft) { leaveSettingsScreen(); playNextTone(); }
     else if (goRight || keys.enter) { selectNetwork(); playNextTone(); }
     renderDirty = true; return;
   }
   if (screenMode == ScreenMode::NetworkPassword) {
-    if (goLeft) { frenchGravePending = false; screenMode = ScreenMode::Networks; networkPassword = ""; playNextTone(); renderDirty = true; return; }
+    if (goLeft) { leaveSettingsScreen(); playNextTone(); renderDirty = true; return; }
     playNextTone();
     if (keys.enter) { flushFrenchDeadKey(networkPassword, 63, true); joinSelectedNetwork(); return; }
     if (keys.del) {
@@ -3132,12 +3192,12 @@ void handleKeyboard() {
       else if (languageOverride == "en") languageOverride = goRight ? "fr" : "auto";
       else languageOverride = goRight ? "auto" : "en";
       saveLanguageOverride(); playNextTone();
-    } else if (keys.enter) { screenMode = ScreenMode::Menu; playNextTone(); }
+    } else if (keys.enter) { leaveSettingsScreen(); playNextTone(); }
     renderDirty = true; return;
   }
   if (screenMode == ScreenMode::Status) {
     if (goLeft || goRight) { statusPage = 1 - statusPage; playNextTone(); }
-    else if (keys.enter) { statusPage = 0; screenMode = ScreenMode::Menu; playNextTone(); }
+    else if (keys.enter) { leaveSettingsScreen(); playNextTone(); }
     renderDirty = true; return;
   }
   if (screenMode == ScreenMode::Changelog) {
@@ -3146,7 +3206,7 @@ void handleKeyboard() {
     else if (goDown && changelogLineOffset + 4 < entry.lineCount) { changelogLineOffset++; playNextTone(); }
     else if (goLeft && changelogSelection > 0) { changelogSelection--; changelogLineOffset = 0; playNextTone(); }
     else if (goRight && changelogSelection + 1 < kSupaChatChangelogCount) { changelogSelection++; changelogLineOffset = 0; playNextTone(); }
-    else if (keys.enter) { screenMode = ScreenMode::Menu; playNextTone(); }
+    else if (keys.enter) { leaveSettingsScreen(); playNextTone(); }
     renderDirty = true; return;
   }
   if (screenMode == ScreenMode::EmojiRecipes) {
@@ -3286,6 +3346,7 @@ static void loopBody() {
   }
   if (screenMode != ScreenMode::VoiceMessages && screenMode != ScreenMode::Walkie && spacePttHeld) { spacePttHeld = false; spaceReleaseStartedAt = 0; stopVoiceRecording(); }
   if (kEspNowEnabled && millis() - lastEspNowBeaconAt >= kEspNowBeaconMs) sendEspNowBeacon();
+  if (homeBumpAt) { if (millis() - homeBumpAt >= kHomeBumpMs) homeBumpAt = 0; renderDirty = true; }
   if (screenMode == ScreenMode::Status && statusPage == 1 && lastSyncError != "NONE" && millis() - lastRenderAt >= 1000) renderDirty = true;
   if (screenMode == ScreenMode::System && millis() - lastRenderAt >= 1000) renderDirty = true;
   if (renderDirty && millis() - lastRenderAt >= kRenderIntervalMs) render();

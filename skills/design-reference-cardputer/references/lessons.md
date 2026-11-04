@@ -4,7 +4,7 @@ Each item says where it came from. Add to this list; don't delete from it unless
 
 ## Keys
 
-- **The arrows are not arrow keys.** They share `;` `.` `,` `/`. On a text entry screen they type punctuation and need Fn to navigate; on a navigation screen they navigate with or without Fn. This was wrong twice (commits "Fix contextual arrows and French glyph rendering" and "fix physical menu navigation"). Every new screen must be listed correctly in `textEntryScreen` in `main.cpp`.
+- **The arrows are not arrow keys.** They share `;` `.` `,` `/`. On a text entry screen they type punctuation and need Fn to navigate; on a navigation screen they navigate without Fn, and Fn stops them. This took two commits and a change of mind to settle ("Fix contextual arrows and French glyph rendering", "fix physical menu navigation"); the code and `emulator/test-flow.mjs` hold the current rule. Every new screen must be listed correctly in `textEntryScreen` in `main.cpp`.
 - **The key that dismisses the splash must not reach the next screen.** Boot and charging mode have an input quarantine (`docs/firmware-fixes-backlog.md`, item 1). A new full-screen transition that consumes a held key needs the same thought.
 - **Back has two routes.** The rear button and the top-left key both go back one level (Fn + top-left while typing). A screen reachable from two places must go back to where it came from.
 
@@ -23,8 +23,9 @@ Each item says where it came from. Add to this list; don't delete from it unless
 ## Layout
 
 - Header y=0..19; content from y=20; chat composer from y=106; footer text at or above y=123.
-- **Paged menus show a page indicator and keep each page's own last selection** (README, "Paginated menus").
-- **The 2x2 Home grid at `Font0` x2 tested well on the device.** Jay, 2026-11-01: "okay, menu worked well." A tile is 111 px wide, so a label is at most 9 characters at x2. Plan shorter French words, not smaller type.
+- **Pages show an indicator** HOME's pages are one continuous grid: moving off an edge lands on the same row of the next page.
+- **A dead key is a bug.** A key that can't act says so: HOME's edge and Wi-Fi during local mode use `bumpHome`, a falling two-note tone and a red edge.
+- **The 2x2 Home grid at `Font0` x2 tested well on the device.** Jay, on the first build with apps: "okay, menu worked well." A tile is 111 px wide, so a label is at most 9 characters at x2. Plan shorter French words, not smaller type.
 - **Most secondary screens are still at `Font0` x1**, the smallest thing that can be drawn. That's history, not a decision to copy.
 
 ## Memory and time
