@@ -16,6 +16,15 @@
   without ceremony. An unknown device is a lookup failure, not permission to
   guess.
 
+- Opening a Cardputer's serial port on Linux (pyserial, `cat`, `stty`, a monitor) can reset it
+  into download mode: the kernel raises DTR and RTS one after the other, and the USB-Serial/JTAG
+  reads that as "reset with GPIO0 low". It then sits at `waiting for download`, off the network,
+  until reset again. esptool 4.5.1's `--after hard_reset` and an RTC-watchdog reset did not bring
+  it back (2026-11-07, Papa's device). Don't open the port on a running device just to read logs;
+  check its state from the server first (`presence.last_seen_at` moves on every request), and if
+  it is stuck, the owner presses reset or unplugs it. (Origin 2026-11-07: a read-only log check
+  knocked Papa's device offline during a delivery diagnosis.)
+
 ## Emulators
 
 - `emulator/` here is a browser mock of the UI plus contract tests of library behaviour. It does not
