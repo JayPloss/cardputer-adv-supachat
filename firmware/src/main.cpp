@@ -4,6 +4,7 @@
 #include <M5Cardputer.h>
 #include <Preferences.h>
 #include "changelog.h"
+#include "clock_apps.h"
 #include "fox_finding.h"
 #include <WebSocketsClient.h>
 #include <SD.h>
@@ -12,6 +13,7 @@
 #include <WiFiClientSecure.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
+#include <esp_sntp.h>
 #include <mbedtls/gcm.h>
 #include <algorithm>
 #include <array>
@@ -53,7 +55,7 @@ constexpr bool kBuildFrenchDefault = false;
 bool frenchUi = kBuildFrenchDefault;
 SharedText<8> languageOverride{"auto"};
 const char *uiText(const char *english, const char *french) { return frenchUi ? french : english; }
-constexpr char kFirmwareVersion[] = "v0.55";
+constexpr char kFirmwareVersion[] = "v0.56";
 constexpr size_t kMessageLimit = 140;
 constexpr size_t kHistoryLimit = 100;  // What the first sync fetches; older pages go to the card.
 constexpr size_t kRamMessageLimit = 40;
@@ -260,7 +262,7 @@ struct ListsLock {
   ~ListsLock() { xSemaphoreGive(sharedListsMutex); }
 };
 
-enum class ScreenMode { Chat, Menu, Rooms, Volume, Language, EmojiRecipes, Changelog, VoiceMessages, Walkie, Status, Networks, NetworkPassword, ChargingConfirm, Charging, FoxFinding, Home, Library, LibrarySearch, NowPlaying, Remote, System };
+enum class ScreenMode { Chat, Menu, Rooms, Volume, Language, EmojiRecipes, Changelog, VoiceMessages, Walkie, Status, Networks, NetworkPassword, ChargingConfirm, Charging, FoxFinding, Home, Library, LibrarySearch, NowPlaying, Remote, System, Timer, Alarm, ScreenTime, Stopwatch };
 
 Preferences preferences;
 M5Canvas uiCanvas(&M5Cardputer.Display);
@@ -427,6 +429,23 @@ supachat::fox::Match foxPlaceMatch{};
 supachat::fox::RssiTrend foxRssiTrend;
 
 void serviceMessageNotification();
+// The clock apps: timer, alarm, screen time and stopwatch. They run from the loop, whatever is on the screen.
+clockapps::Countdown timerCountdown;
+uint16_t timerTyped = 0;
+clockapps::ScreenTime screenTime;
+clockapps::Alarm alarmClock;
+uint16_t alarmTyped = 0;
+clockapps::Stopwatch stopwatch;
+// Set by SNTP when a time server has answered. The clock seeded from the build time is not good enough to ring by.
+volatile bool clockFromNtp = false;
+bool alarmRinging = false;
+uint32_t ringStartedAt = 0;
+uint32_t ringKeysFrom = 0;
+uint32_t nextRingToneAt = 0;
+uint8_t ringStep = 0;
+clockapps::Warning bannerWarning = clockapps::Warning::None;
+uint32_t bannerUntil = 0;
+uint32_t lastAlarmCheckAt = 0;
 uint32_t lastToneAt = 0;
 uint32_t lastRenderAt = 0;
 uint32_t bootNonce = 0;
@@ -769,6 +788,20 @@ void loadConfiguration() {
     const String psk = preferences.getString(("psk" + String(index)).c_str(), "");
     if (!ssid.isEmpty()) wifiProfiles.push_back({ssid, psk});
   }
+  alarmClock.hour = std::min<uint8_t>(preferences.getUChar("alarm_h", 7), 23);
+  alarmClock.minute = std::min<uint8_t>(preferences.getUChar("alarm_m", 0), 59);
+  alarmClock.repeat = preferences.getUChar("alarm_rep", clockapps::kOnce) & 0x7F;
+  alarmClock.enabled = preferences.getBool("alarm_on", false);
+  timerCountdown.set(std::min<uint32_t>(preferences.getUInt("timer_ms", 5 * 60000u), (99 * 60 + 59) * 1000u));
+  screenTime.countdown.set(std::min<uint32_t>(preferences.getUInt("screen_ms", 30 * 60000u), 120 * 60000u));
+  preferences.end();
+}
+
+void saveClockSettings() {
+  preferences.begin("supachat", false);
+  preferences.putUChar("alarm_h", alarmClock.hour); preferences.putUChar("alarm_m", alarmClock.minute);
+  preferences.putUChar("alarm_rep", alarmClock.repeat); preferences.putBool("alarm_on", alarmClock.enabled);
+  preferences.putUInt("timer_ms", timerCountdown.durationMs); preferences.putUInt("screen_ms", screenTime.countdown.durationMs);
   preferences.end();
 }
 
@@ -1248,14 +1281,18 @@ bool connectKnownWifi() {
   return true;
 }
 
+void onTimeSynced(struct timeval *) { clockFromNtp = true; }
+
+// The clock is seeded from the build time, so a plausible year proves nothing: only SNTP's callback
+// says a server answered. SNTP keeps polling after this, so a first try that fails is not the last.
 void ensureTime() {
   if (ntpAttempted) return;
   ntpAttempted = true;
+  sntp_set_time_sync_notification_cb(onTimeSynced);
   configTzTime("EST5EDT,M3.2.0/2,M11.1.0/2", "time.cloudflare.com", "time.google.com", "pool.ntp.org");
   const uint32_t started = millis();
-  struct tm value{};
   while (millis() - started < kTimeWaitMs) {
-    if (getLocalTime(&value, 100) && value.tm_year >= 124) { timeKnown = true; timeSyncedByNtp = true; return; }
+    if (clockFromNtp) { timeKnown = true; timeSyncedByNtp = true; return; }
     vTaskDelay(pdMS_TO_TICKS(200));
   }
 }
@@ -1954,6 +1991,19 @@ void drawHeader(const char *title) {
   }
 }
 
+// Screen time's warnings take the whole header for a while, over every app. Drawn last, after a
+// screen's own additions to its header, such as chat's room names.
+void drawWarningBanner() {
+  if (bannerWarning == clockapps::Warning::None) return;
+  auto &display = uiCanvas;
+  const bool one = bannerWarning == clockapps::Warning::OneMinute;
+  const uint16_t background = one ? TFT_RED : TFT_YELLOW;
+  const char *text = one ? uiText("SCREEN: 1 MIN LEFT", "ECRAN: ENCORE 1 MIN") : uiText("SCREEN: 5 MIN LEFT", "ECRAN: ENCORE 5 MIN");
+  display.fillRect(0, 0, 240, 20, background); display.setTextSize(2);
+  display.setTextColor(one ? TFT_WHITE : TFT_BLACK, background);
+  display.setCursor((240 - static_cast<int>(strlen(text)) * 12) / 2, 2); display.print(text); display.setTextSize(1);
+}
+
 size_t utf8CharacterCount(const String &text);
 String utf8Tail(const String &text, size_t maximumCharacters);
 void printFont0Text(const String &text);
@@ -2247,15 +2297,17 @@ void drawFoxFinding() {
 }
 
 // HOME and its apps. SUPACHAT is the existing chat; the others live below.
-struct HomeApp { const char *english; const char *french; };
+enum class AppId : uint8_t { Chat, Music, Books, Remote, Timer, Alarm, ScreenTime, Stopwatch, Wifi, Volume, Status, Language, Charging, Local, Changelog, System };
+struct HomeApp { AppId id; const char *english; const char *french; };
 // Pages of four, in order. A label fits a tile at 9 characters: see design-reference-cardputer.
-constexpr HomeApp kHomeApps[] = {{"SUPACHAT", "SUPACHAT"}, {"MUSIC", "MUSIQUE"}, {"BOOKS", "LIVRES"}, {"R/C", "R/C"},
-                                 {"WI-FI", "WI-FI"}, {"VOLUME", "VOLUME"}, {"STATUS", "ETAT"}, {"LANGUAGE", "LANGUE"},
-                                 {"CHARGING", "CHARGE"}, {"LOCAL OFF", "LOCAL NON"}, {"CHANGELOG", "VERSIONS"}, {"SYSTEM", "SYSTEME"}};
+constexpr HomeApp kHomeApps[] = {{AppId::Chat, "SUPACHAT", "SUPACHAT"}, {AppId::Music, "MUSIC", "MUSIQUE"}, {AppId::Books, "BOOKS", "LIVRES"}, {AppId::Remote, "R/C", "R/C"},
+                                 {AppId::Timer, "TIMER", "MINUTEUR"}, {AppId::Alarm, "ALARM", "REVEIL"}, {AppId::ScreenTime, "SCREEN", "ECRAN"}, {AppId::Stopwatch, "STOPWATCH", "CHRONO"},
+                                 {AppId::Wifi, "WI-FI", "WI-FI"}, {AppId::Volume, "VOLUME", "VOLUME"}, {AppId::Status, "STATUS", "ETAT"}, {AppId::Language, "LANGUAGE", "LANGUE"},
+                                 {AppId::Charging, "CHARGING", "CHARGE"}, {AppId::Local, "LOCAL OFF", "LOCAL NON"}, {AppId::Changelog, "CHANGELOG", "VERSIONS"}, {AppId::System, "SYSTEM", "SYSTEME"}};
 constexpr int kHomeAppCount = sizeof(kHomeApps) / sizeof(kHomeApps[0]);
 constexpr int kHomeAppsPerPage = 4;
 constexpr int kHomePageCount = kHomeAppCount / kHomeAppsPerPage;
-constexpr int kHomeLocalApp = 9;
+static_assert(kHomeAppCount % kHomeAppsPerPage == 0, "HOME's pages are full pages");
 int homeSelection = 0;
 // The bump at the end of the pages: the grid knocks against the edge it can't pass, then settles.
 constexpr uint32_t kHomeBumpMs = 240;
@@ -2308,6 +2360,7 @@ const library::Item *nowPlayingItem() {
   return queueIndex >= 0 && queueIndex < static_cast<int>(playQueue.size()) ? &playQueue[queueIndex] : nullptr;
 }
 
+String clockLine();
 void drawHome() {
   auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader("HOME");
   const int page = homeSelection / kHomeAppsPerPage;
@@ -2323,13 +2376,14 @@ void drawHome() {
     display.fillRoundRect(x, y, 111, 36, 4, selected ? TFT_GREEN : TFT_DARKGREY);
     display.setTextSize(2); display.setTextColor(selected ? TFT_BLACK : TFT_WHITE, selected ? TFT_GREEN : TFT_DARKGREY);
     const char *label = frenchUi ? kHomeApps[index].french : kHomeApps[index].english;
-    if (index == kHomeLocalApp && localOnlyMode) label = uiText("LOCAL ON", "LOCAL OUI");
+    if (kHomeApps[index].id == AppId::Local && localOnlyMode) label = uiText("LOCAL ON", "LOCAL OUI");
     display.setCursor(x + (111 - static_cast<int>(strlen(label)) * 12) / 2, y + 10); display.print(label);
   }
   for (int dot = 0; dot < kHomePageCount; dot++) display.fillCircle(120 + (dot * 2 - kHomePageCount + 1) * 7, 105, 3, dot == page ? TFT_GREEN : TFT_DARKGREY);
   display.setTextSize(1);
   const auto *playing = nowPlayingItem();
   if (homeNotice.length()) { display.setTextColor(TFT_RED, TFT_BLACK); display.setCursor(6, 112); display.print(homeNotice.substring(0, 38)); }
+  else if (clockLine().length()) { display.setTextColor(TFT_CYAN, TFT_BLACK); display.setCursor(6, 112); display.print(clockLine()); }
   else if (playing && media::active()) { display.setTextColor(TFT_YELLOW, TFT_BLACK); display.setCursor(6, 112); printFont0Text(utf8Head(playing->title, 37)); }
   display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 123); display.print(uiText("ARROWS MOVE       ENTER OPEN", "FLECHES           ENTER OUVRIR"));
 }
@@ -2423,10 +2477,326 @@ void drawRemote() {
   display.setCursor(6, 123); display.print(uiText("LEFT BACK", "GAUCHE RETOUR"));
 }
 
+// The clock apps. Their screens are navigation screens: the arrows need no Fn, and digits type times.
+enum class Ringing : uint8_t { None, Alarm, ScreenTime, Timer };
+Ringing ringingNow() {
+  if (alarmRinging) return Ringing::Alarm;
+  if (screenTime.countdown.state == clockapps::Countdown::State::Ringing) return Ringing::ScreenTime;
+  if (timerCountdown.state == clockapps::Countdown::State::Ringing) return Ringing::Timer;
+  return Ringing::None;
+}
+
+bool isClockScreen() {
+  return screenMode == ScreenMode::Timer || screenMode == ScreenMode::Alarm || screenMode == ScreenMode::ScreenTime || screenMode == ScreenMode::Stopwatch;
+}
+
+// The wall clock, only once a time server has set it.
+bool wallClock(struct tm &value) { return clockFromNtp && getLocalTime(&value, 10); }
+
+String alarmTimeText(uint8_t hour, uint8_t minute) {
+  char text[12];
+  if (frenchUi) snprintf(text, sizeof(text), "%02u:%02u", hour, minute);
+  else snprintf(text, sizeof(text), "%u:%02u %s", hour % 12 == 0 ? 12u : hour % 12u, minute, hour < 12 ? "AM" : "PM");
+  return text;
+}
+
+const char *repeatText(uint8_t repeat) {
+  if (repeat == clockapps::kWeekdays) return uiText("MON-FRI", "LUN-VEN");
+  if (repeat == clockapps::kEveryDay) return uiText("EVERY DAY", "CHAQUE JOUR");
+  return uiText("ONCE", "UNE FOIS");
+}
+
+String clockLine() {
+  const uint32_t now = millis();
+  if (screenTime.countdown.state == clockapps::Countdown::State::Running || screenTime.countdown.state == clockapps::Countdown::State::Paused)
+    return String(uiText("SCREEN TIME ", "TEMPS D'ECRAN ")) + clockText(screenTime.countdown.leftSeconds(now)) + uiText(" LEFT", "");
+  if (timerCountdown.state == clockapps::Countdown::State::Running) return String(uiText("TIMER ", "MINUTEUR ")) + clockText(timerCountdown.leftSeconds(now));
+  if (alarmClock.snoozed) return uiText("ALARM SNOOZED", "REVEIL REPORTE");
+  return "";
+}
+
+void centerText(const String &text, int y, uint8_t size, uint16_t colour, uint16_t background) {
+  auto &display = uiCanvas;
+  display.setTextSize(size); display.setTextColor(colour, background);
+  display.setCursor((240 - static_cast<int>(text.length()) * 6 * size) / 2, y); display.print(text); display.setTextSize(1);
+}
+
+void drawFooter(const char *first, const char *second) {
+  auto &display = uiCanvas; display.setTextSize(1); display.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  if (first && *first) { display.setCursor(6, 112); display.print(first); }
+  display.setCursor(6, 123); display.print(second);
+}
+
+void drawTimer() {
+  auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader(uiText("TIMER", "MINUTEUR"));
+  using State = clockapps::Countdown::State;
+  const State state = timerCountdown.state;
+  centerText(clockText(timerCountdown.leftSeconds(millis())), 30, 4, state == State::Running ? TFT_GREEN : state == State::Paused ? TFT_YELLOW : TFT_WHITE, TFT_BLACK);
+  if (state == State::Running) {
+    centerText(uiText("RUNNING", "EN COURS"), 72, 2, TFT_GREEN, TFT_BLACK);
+    drawFooter(uiText("KEEPS GOING IN OTHER APPS", "CONTINUE DANS LES AUTRES APPS"), uiText("ENTER PAUSE        DEL RESET", "ENTER PAUSE        DEL REMETTRE"));
+  } else if (state == State::Paused) {
+    centerText(uiText("PAUSED", "EN PAUSE"), 72, 2, TFT_YELLOW, TFT_BLACK);
+    drawFooter("", uiText("ENTER CONTINUE     DEL RESET", "ENTER REPRENDRE    DEL REMETTRE"));
+  } else {
+    centerText(timerCountdown.durationMs ? uiText("READY", "PRET") : uiText("TYPE A TIME", "TAPE UN TEMPS"), 72, 2, TFT_WHITE, TFT_BLACK);
+    drawFooter(uiText("0-9 TYPE   < > PRESET   ^v 1 MIN", "0-9 TAPER  < > CHOIX   ^v 1 MIN"), uiText("ENTER START        DEL CLEAR", "ENTER DEMARRER     DEL EFFACER"));
+  }
+}
+
+void drawScreenTime() {
+  auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader(uiText("SCREEN TIME", "TEMPS D'ECRAN"));
+  using State = clockapps::Countdown::State;
+  const State state = screenTime.countdown.state;
+  if (state == State::Idle) {
+    centerText(String(screenTime.countdown.durationMs / 60000) + " MIN", 30, 4, TFT_WHITE, TFT_BLACK);
+    centerText(uiText("ENTER TO START", "ENTER: DEMARRER"), 72, 2, TFT_GREEN, TFT_BLACK);
+    drawFooter("", uiText("ARROWS CHANGE THE TIME", "FLECHES: CHANGER LE TEMPS"));
+    return;
+  }
+  const uint32_t left = screenTime.countdown.leftMs(millis());
+  const uint16_t colour = state == State::Paused ? TFT_YELLOW : left <= 60000 ? TFT_RED : left <= 5 * 60000u ? TFT_YELLOW : TFT_GREEN;
+  centerText(clockText(screenTime.countdown.leftSeconds(millis())), 30, 4, colour, TFT_BLACK);
+  centerText(state == State::Paused ? uiText("PAUSED", "EN PAUSE") : uiText("TIME LEFT", "TEMPS RESTANT"), 72, 2, colour, TFT_BLACK);
+  drawFooter(uiText("KEEPS GOING IN OTHER APPS", "CONTINUE DANS LES AUTRES APPS"),
+             state == State::Paused ? uiText("ENTER CONTINUE     DEL STOP", "ENTER REPRENDRE    DEL ARRETER") : uiText("ENTER PAUSE        DEL STOP", "ENTER PAUSE        DEL ARRETER"));
+}
+
+void drawAlarm() {
+  auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader(uiText("ALARM", "REVEIL"));
+  centerText(alarmTimeText(alarmClock.hour, alarmClock.minute), 26, 4, alarmClock.enabled ? TFT_GREEN : TFT_DARKGREY, TFT_BLACK);
+  // ON or OFF in colour, then the repeat.
+  const String onOff = alarmClock.enabled ? uiText("ON", "OUI") : uiText("OFF", "NON");
+  const String repeat = repeatText(alarmClock.repeat);
+  const int x = (240 - static_cast<int>(onOff.length() + 2 + repeat.length()) * 12) / 2;
+  display.setTextSize(2); display.setCursor(x, 64);
+  display.setTextColor(alarmClock.enabled ? TFT_GREEN : TFT_RED, TFT_BLACK); display.print(onOff); display.print("  ");
+  display.setTextColor(TFT_WHITE, TFT_BLACK); display.print(repeat); display.setTextSize(1);
+  struct tm now{};
+  if (!wallClock(now)) {
+    centerText(uiText("CLOCK NOT SET", "HEURE INCONNUE"), 84, 2, TFT_RED, TFT_BLACK);
+    centerText(uiText("IT NEEDS WI-FI ONCE AFTER TURNING ON", "IL FAUT LE WI-FI APRES L'ALLUMAGE"), 102, 1, TFT_RED, TFT_BLACK);
+  } else if (alarmClock.snoozed) {
+    const uint32_t left = alarmClock.snoozeUntil - millis();
+    centerText(String(uiText("SNOOZED ", "REPORTE ")) + String((left + 59999) / 60000) + " MIN", 84, 2, TFT_YELLOW, TFT_BLACK);
+  } else if (alarmClock.enabled) {
+    const int32_t minutes = alarmClock.minutesUntil(now.tm_wday, now.tm_hour, now.tm_min);
+    char text[24];
+    if (minutes >= 60) snprintf(text, sizeof(text), "%s%d H %d MIN", uiText("IN ", "DANS "), static_cast<int>(minutes / 60), static_cast<int>(minutes % 60));
+    else snprintf(text, sizeof(text), "%s%d MIN", uiText("IN ", "DANS "), static_cast<int>(minutes));
+    centerText(text, 84, 2, TFT_WHITE, TFT_BLACK);
+  } else centerText(uiText("ALARM IS OFF", "REVEIL ETEINT"), 84, 2, TFT_DARKGREY, TFT_BLACK);
+  drawFooter(uiText("0-9 TIME  ^v 5 MIN  < > REPEAT", "0-9 HEURE ^v 5 MIN  < > REPETER"),
+             alarmClock.enabled ? uiText("ENTER TURN OFF", "ENTER ETEINDRE") : uiText("ENTER TURN ON", "ENTER ALLUMER"));
+}
+
+void drawStopwatch() {
+  auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader(uiText("STOPWATCH", "CHRONO"));
+  const uint32_t elapsed = stopwatch.elapsedMs(millis());
+  char text[16];
+  const unsigned seconds = elapsed / 1000;
+  if (seconds >= 3600) snprintf(text, sizeof(text), "%u:%02u:%02u", seconds / 3600, seconds / 60 % 60, seconds % 60);
+  else snprintf(text, sizeof(text), "%u:%02u.%u", seconds / 60, seconds % 60, static_cast<unsigned>(elapsed / 100 % 10));
+  centerText(text, 40, 4, stopwatch.running ? TFT_GREEN : TFT_WHITE, TFT_BLACK);
+  drawFooter(stopwatch.running ? uiText("KEEPS GOING IN OTHER APPS", "CONTINUE DANS LES AUTRES APPS") : "",
+             stopwatch.running ? uiText("ENTER STOP         DEL RESET", "ENTER ARRET        DEL ZERO") : uiText("ENTER START        DEL RESET", "ENTER DEPART       DEL ZERO"));
+}
+
+// The alert: the screen flashes, and the tone repeats until a key or the rear button stops it.
+void drawRinging() {
+  auto &display = uiCanvas;
+  const bool flash = (millis() - ringStartedAt) / 500 % 2 == 0;
+  const uint16_t background = flash ? TFT_RED : TFT_BLACK;
+  const uint16_t colour = flash ? TFT_WHITE : TFT_YELLOW;
+  display.fillScreen(background);
+  const Ringing what = ringingNow();
+  if (what == Ringing::Alarm) {
+    centerText(uiText("ALARM", "REVEIL"), 8, 3, colour, background);
+    centerText(alarmTimeText(alarmClock.hour, alarmClock.minute), 40, 4, colour, background);
+    centerText(uiText("ENTER = STOP", "ENTER = ARRET"), 86, 2, colour, background);
+    centerText(uiText("OTHER KEY: SNOOZE", "AUTRE: DANS 5 MIN"), 108, 2, colour, background);
+    return;
+  }
+  centerText(uiText("TIME'S UP!", "C'EST FINI !"), 14, 3, colour, background);
+  if (what == Ringing::ScreenTime) centerText(uiText("SCREEN TIME IS OVER", "TEMPS D'ECRAN FINI"), 54, 2, colour, background);
+  else centerText(String(uiText("TIMER ", "MINUTEUR ")) + clockText(timerCountdown.durationMs / 1000), 54, 2, colour, background);
+  centerText(uiText("ANY KEY = STOP", "UNE TOUCHE = ARRET"), 100, 2, colour, background);
+}
+
+struct RingNote { uint16_t frequency; uint16_t ms; uint16_t gapMs; };
+// Three different calls, so a kid can tell them apart from the next room.
+constexpr RingNote kAlarmRing[] = {{1760, 140, 60}, {1319, 140, 60}, {1760, 140, 60}, {1319, 140, 600}};
+constexpr RingNote kTimerRing[] = {{2093, 120, 90}, {2093, 120, 90}, {2093, 120, 700}};
+constexpr RingNote kScreenRing[] = {{1568, 180, 40}, {1319, 180, 40}, {1047, 300, 700}};
+
+void startRinging() {
+  const uint32_t now = millis();
+  // Charging mode has the speaker off and the screen dim; an alert brings the device back.
+  if (chargingModeActive) exitChargingMode();
+  if (media::active()) stopMediaNow();
+  if (audioPlaying) stopVoicePlayback();
+  messageNotificationPending = false; messageNotificationActive = false;
+  ringStartedAt = now; ringKeysFrom = now + 1000; nextRingToneAt = now; ringStep = 0;
+  renderDirty = true;
+  Serial.printf("CLOCK ringing %d\n", static_cast<int>(ringingNow()));
+}
+
+void dismissRinging(bool stop) {
+  const Ringing what = ringingNow();
+  if (what == Ringing::Alarm) { alarmRinging = false; if (!stop) alarmClock.snooze(millis()); }
+  else if (what == Ringing::ScreenTime) screenTime.countdown.reset();
+  else if (what == Ringing::Timer) timerCountdown.reset();
+  M5Cardputer.Speaker.stop(0);
+  if (ringingNow() != Ringing::None) startRinging();
+  Serial.printf("CLOCK dismissed %d %s\n", static_cast<int>(what), stop ? "stop" : "snooze");
+  renderDirty = true;
+}
+
+// Louder over time: from the volume setting (at least the middle step) up to full in 30 seconds.
+void serviceRingTone(uint32_t now) {
+  const Ringing what = ringingNow();
+  if (what == Ringing::None || !clockapps::reached(now, nextRingToneAt)) return;
+  const RingNote *notes = what == Ringing::Alarm ? kAlarmRing : what == Ringing::Timer ? kTimerRing : kScreenRing;
+  const uint8_t count = what == Ringing::Alarm ? 4 : 3;
+  const RingNote note = notes[ringStep % count];
+  ringStep++;
+  nextRingToneAt = now + note.ms + note.gapMs;
+  messageNotificationPending = false; messageNotificationActive = false;
+  if (voiceRecording) return;  // The microphone has the codec; the screen still flashes.
+  const uint8_t level = std::min<uint8_t>(4, std::max<uint8_t>(volumeLevel, 2) + (now - ringStartedAt) / 10000);
+  M5Cardputer.Speaker.setVolume(kVolumeValues[level]); M5Cardputer.Speaker.setChannelVolume(0, 255);
+  M5Cardputer.Speaker.tone(note.frequency, note.ms, 0, true);
+  lastToneAt = now;
+}
+
+void serviceClockApps() {
+  const uint32_t now = millis();
+  static bool clockReported = false;
+  if (clockFromNtp && !clockReported) {
+    clockReported = true; struct tm wall{};
+    if (getLocalTime(&wall, 10)) Serial.printf("CLOCK set by NTP %04d-%02d-%02d %02d:%02d:%02d\n", wall.tm_year + 1900, wall.tm_mon + 1, wall.tm_mday, wall.tm_hour, wall.tm_min, wall.tm_sec);
+  }
+  bool ring = timerCountdown.expire(now);
+  const clockapps::Warning warning = screenTime.warning(now);
+  if (screenTime.countdown.expire(now)) ring = true;
+  if (alarmClock.snoozeDue(now)) { alarmRinging = true; ring = true; }
+  if (now - lastAlarmCheckAt >= 1000) {
+    lastAlarmCheckAt = now;
+    struct tm wall{};
+    if (wallClock(wall) && alarmClock.due(wall.tm_wday, wall.tm_yday, wall.tm_hour, wall.tm_min)) {
+      alarmRinging = true; ring = true;
+      if (!alarmClock.enabled) saveClockSettings();  // A one-time alarm turned itself off.
+    }
+  }
+  if (ring) startRinging();
+  if (warning != clockapps::Warning::None && !ring) {
+    Serial.printf("CLOCK warning %s\n", warning == clockapps::Warning::OneMinute ? "1 min" : "5 min");
+    if (!chargingModeActive) {
+      bannerWarning = warning; bannerUntil = now + 10000; renderDirty = true;
+      if (!voiceRecording) {
+        M5Cardputer.Speaker.setVolume(kVolumeValues[std::max<uint8_t>(volumeLevel, 2)]); M5Cardputer.Speaker.setChannelVolume(0, 255);
+        M5Cardputer.Speaker.tone(1319, 150, 0, true); M5Cardputer.Speaker.tone(1760, 250, 0, false);
+        lastToneAt = now;
+      }
+    }
+  }
+  if (bannerWarning != clockapps::Warning::None && clockapps::reached(now, bannerUntil)) { bannerWarning = clockapps::Warning::None; renderDirty = true; }
+  serviceRingTone(now);
+  // Redraws: the flash, the counting screens, and HOME's line while something counts.
+  const uint32_t since = now - lastRenderAt;
+  if (ringingNow() != Ringing::None) { if (since >= 250) renderDirty = true; return; }
+  if (screenMode == ScreenMode::Stopwatch && stopwatch.running && since >= 100) renderDirty = true;
+  else if ((screenMode == ScreenMode::Timer || screenMode == ScreenMode::ScreenTime) && since >= 250) renderDirty = true;
+  else if ((screenMode == ScreenMode::Alarm || (screenMode == ScreenMode::Home && clockLine().length())) && since >= 1000) renderDirty = true;
+}
+
+constexpr uint16_t kTimerPresetMinutes[] = {1, 2, 3, 5, 10, 15, 20, 30, 45, 60};
+constexpr uint16_t kScreenTimeMinutes[] = {15, 30, 45, 60, 90, 120};
+
+void editAlarm(uint8_t hour, uint8_t minute) {
+  alarmClock.hour = hour; alarmClock.minute = minute; alarmClock.enabled = true; alarmClock.snoozed = false;
+  // The minute it is now can't ring because of typing: 0, 7, 3, 0 passes through 0:07.
+  struct tm wall{};
+  if (wallClock(wall)) alarmClock.lastFired = clockapps::Alarm::minuteKey(wall.tm_yday, wall.tm_hour, wall.tm_min);
+  saveClockSettings();
+}
+
+void handleClockKeys(const Keyboard_Class::KeysState &keys, bool goUp, bool goDown, bool goLeft, bool goRight) {
+  const uint32_t now = millis();
+  using State = clockapps::Countdown::State;
+  int digit = -1;
+  for (const auto character : keys.word) if (character >= '0' && character <= '9') digit = character - '0';
+  if (screenMode == ScreenMode::Timer) {
+    const State state = timerCountdown.state;
+    if (keys.enter) {
+      if (state == State::Running) timerCountdown.pause(now);
+      else if (timerCountdown.start(now)) saveClockSettings();
+      timerTyped = 0;
+    } else if (keys.del) {
+      if (state == State::Idle) timerCountdown.set(0);
+      else timerCountdown.reset();
+      timerTyped = 0;
+    } else if (state != State::Idle) return;
+    else if (digit >= 0) { timerTyped = clockapps::timerPushDigit(timerTyped, digit); timerCountdown.set(clockapps::timerDigitsMs(timerTyped)); }
+    else if (goUp || goDown) {
+      const uint32_t minute = 60000, most = (99 * 60 + 59) * 1000u;
+      const uint32_t current = timerCountdown.durationMs;
+      timerCountdown.set(goUp ? std::min(most, current + minute) : current > minute ? current - minute : 0);
+      timerTyped = 0;
+    } else if (goLeft || goRight) {
+      const uint32_t current = timerCountdown.durationMs;
+      uint32_t next = current;
+      if (goRight) { for (const uint16_t preset : kTimerPresetMinutes) if (preset * 60000u > current) { next = preset * 60000u; break; } }
+      else { for (const uint16_t preset : kTimerPresetMinutes) if (preset * 60000u < current) next = preset * 60000u; }
+      timerCountdown.set(next); timerTyped = 0;
+    }
+    return;
+  }
+  if (screenMode == ScreenMode::ScreenTime) {
+    clockapps::Countdown &countdown = screenTime.countdown;
+    if (keys.enter) {
+      if (countdown.state == State::Running) countdown.pause(now);
+      else if (screenTime.start(now)) saveClockSettings();
+    } else if (keys.del) countdown.reset();
+    else if (countdown.state == State::Idle && (goUp || goDown || goLeft || goRight)) {
+      const int count = sizeof(kScreenTimeMinutes) / sizeof(kScreenTimeMinutes[0]);
+      int index = 0;
+      for (int choice = 0; choice < count; choice++) if (kScreenTimeMinutes[choice] * 60000u == countdown.durationMs) index = choice;
+      index = (index + ((goUp || goRight) ? 1 : count - 1)) % count;
+      countdown.set(kScreenTimeMinutes[index] * 60000u);
+    }
+    return;
+  }
+  if (screenMode == ScreenMode::Alarm) {
+    if (keys.enter) { alarmClock.enabled = !alarmClock.enabled; alarmClock.snoozed = false; alarmTyped = 0; saveClockSettings(); }
+    else if (digit >= 0) {
+      alarmTyped = clockapps::Alarm::pushDigit(alarmTyped, digit);
+      if (clockapps::Alarm::isTime(alarmTyped)) editAlarm(alarmTyped / 100, alarmTyped % 100);
+    } else if (goUp || goDown) {
+      const int total = alarmClock.hour * 60 + alarmClock.minute;
+      const int next = ((goUp ? (total / 5 + 1) * 5 : ((total + 4) / 5 - 1) * 5) + 1440) % 1440;
+      editAlarm(next / 60, next % 60); alarmTyped = 0;
+    } else if (goLeft || goRight) {
+      constexpr uint8_t kRepeats[] = {clockapps::kOnce, clockapps::kWeekdays, clockapps::kEveryDay};
+      int index = 0;
+      for (int choice = 0; choice < 3; choice++) if (kRepeats[choice] == alarmClock.repeat) index = choice;
+      alarmClock.repeat = kRepeats[(index + (goRight ? 1 : 2)) % 3];
+      editAlarm(alarmClock.hour, alarmClock.minute); alarmTyped = 0;
+    }
+    return;
+  }
+  // Stopwatch.
+  if (keys.enter) stopwatch.toggle(now);
+  else if (keys.del) stopwatch.reset();
+}
+
 void drawLanguage();
 void drawChangelog();
 void render() {
-  if (screenMode == ScreenMode::Chat) drawChat(); else if (screenMode == ScreenMode::Menu) drawMenu(); else if (screenMode == ScreenMode::Rooms) drawRooms();
+  if (ringingNow() != Ringing::None) drawRinging();
+  else if (screenMode == ScreenMode::Timer) drawTimer(); else if (screenMode == ScreenMode::Alarm) drawAlarm();
+  else if (screenMode == ScreenMode::ScreenTime) drawScreenTime(); else if (screenMode == ScreenMode::Stopwatch) drawStopwatch();
+  else if (screenMode == ScreenMode::Chat) drawChat(); else if (screenMode == ScreenMode::Menu) drawMenu(); else if (screenMode == ScreenMode::Rooms) drawRooms();
   else if (screenMode == ScreenMode::Volume) drawVolume(); else if (screenMode == ScreenMode::Language) drawLanguage(); else if (screenMode == ScreenMode::Changelog) drawChangelog();
   else if (screenMode == ScreenMode::EmojiRecipes) drawEmojiRecipes();
   else if (screenMode == ScreenMode::VoiceMessages || screenMode == ScreenMode::Walkie) drawWalkie();
@@ -2442,6 +2812,7 @@ void render() {
   else if (screenMode == ScreenMode::Remote) drawRemote();
   else if (screenMode == ScreenMode::System) drawSystem();
   else drawNetworks();
+  if (ringingNow() == Ringing::None) drawWarningBanner();
   if (uiCanvasReady) uiCanvas.pushSprite(0, 0);
   renderDirty = false; lastRenderAt = millis();
 }
@@ -2809,21 +3180,26 @@ void bumpHome(int direction) {
 
 void openHomeApp(int index) {
   library::forget();
-  if (index == 0) screenMode = ScreenMode::Chat;
-  else if (index == 1) openMusicRoot();
-  else if (index == 2) openBooks();
-  else if (index == 3) screenMode = ScreenMode::Remote;
-  else if (index == 4) {
+  const AppId app = kHomeApps[index].id;
+  if (app == AppId::Chat) screenMode = ScreenMode::Chat;
+  else if (app == AppId::Music) openMusicRoot();
+  else if (app == AppId::Books) openBooks();
+  else if (app == AppId::Remote) screenMode = ScreenMode::Remote;
+  else if (app == AppId::Timer) { timerTyped = 0; screenMode = ScreenMode::Timer; }
+  else if (app == AppId::Alarm) { alarmTyped = 0; screenMode = ScreenMode::Alarm; }
+  else if (app == AppId::ScreenTime) screenMode = ScreenMode::ScreenTime;
+  else if (app == AppId::Stopwatch) screenMode = ScreenMode::Stopwatch;
+  else if (app == AppId::Wifi) {
     // Wi-Fi is off while local mode is on, and joining a network would have nowhere to go.
     if (localOnlyMode) { homeNotice = uiText("TURN LOCAL OFF FIRST", "COUPER LOCAL D'ABORD"); homeNoticeAt = millis(); bumpHome(0); return; }
     screenMode = ScreenMode::Networks; scanForNetworks();
   }
-  else if (index == 5) screenMode = ScreenMode::Volume;
-  else if (index == 6) screenMode = ScreenMode::Status;
-  else if (index == 7) screenMode = ScreenMode::Language;
-  else if (index == 8) screenMode = ScreenMode::ChargingConfirm;
-  else if (index == kHomeLocalApp) setLocalOnlyMode(!localOnlyMode);
-  else if (index == 10) screenMode = ScreenMode::Changelog;
+  else if (app == AppId::Volume) screenMode = ScreenMode::Volume;
+  else if (app == AppId::Status) screenMode = ScreenMode::Status;
+  else if (app == AppId::Language) screenMode = ScreenMode::Language;
+  else if (app == AppId::Charging) screenMode = ScreenMode::ChargingConfirm;
+  else if (app == AppId::Local) setLocalOnlyMode(!localOnlyMode);
+  else if (app == AppId::Changelog) screenMode = ScreenMode::Changelog;
   else screenMode = ScreenMode::System;
   renderDirty = true;
 }
@@ -2842,7 +3218,7 @@ void leaveSettingsScreen() {
 // One level back within HOME's apps. False when the screen is not one of them.
 bool goBackFromApp() {
   if (screenMode == ScreenMode::Home) return true;
-  if (screenMode == ScreenMode::Remote || screenMode == ScreenMode::System) { screenMode = ScreenMode::Home; return true; }
+  if (screenMode == ScreenMode::Remote || screenMode == ScreenMode::System || isClockScreen()) { screenMode = ScreenMode::Home; return true; }
   if (isSettingsScreen()) { leaveSettingsScreen(); return true; }
   if (screenMode == ScreenMode::LibrarySearch) { openMusicRoot(); return true; }
   if (screenMode == ScreenMode::NowPlaying) {
@@ -2926,7 +3302,8 @@ os::Owner frontApp() {
   switch (screenMode) {
     case ScreenMode::Home: case ScreenMode::System: case ScreenMode::Remote:
     case ScreenMode::Networks: case ScreenMode::NetworkPassword: case ScreenMode::Volume: case ScreenMode::Status:
-    case ScreenMode::Language: case ScreenMode::ChargingConfirm: case ScreenMode::Changelog: return os::Owner::Ui;
+    case ScreenMode::Language: case ScreenMode::ChargingConfirm: case ScreenMode::Changelog:
+    case ScreenMode::Timer: case ScreenMode::Alarm: case ScreenMode::ScreenTime: case ScreenMode::Stopwatch: return os::Owner::Ui;
     case ScreenMode::Library: case ScreenMode::LibrarySearch: case ScreenMode::NowPlaying: return os::mediaOwner();
     default: return os::Owner::Chat;
   }
@@ -3017,9 +3394,10 @@ bool handleAppKeys(const Keyboard_Class::KeysState &keys, bool goUp, bool goDown
   if (escape && (screenMode == ScreenMode::Chat || screenMode == ScreenMode::Menu)) { screenMode = ScreenMode::Home; playNextTone(); renderDirty = true; return true; }
   if (escape && isSettingsScreen()) { leaveSettingsScreen(); playNextTone(); renderDirty = true; return true; }
   const bool ownScreen = screenMode == ScreenMode::Home || screenMode == ScreenMode::Library || screenMode == ScreenMode::LibrarySearch ||
-                         screenMode == ScreenMode::NowPlaying || screenMode == ScreenMode::Remote || screenMode == ScreenMode::System;
+                         screenMode == ScreenMode::NowPlaying || screenMode == ScreenMode::Remote || screenMode == ScreenMode::System || isClockScreen();
   if (!ownScreen) return false;
   if (escape) { goBackFromApp(); playNextTone(); renderDirty = true; return true; }
+  if (isClockScreen()) { handleClockKeys(keys, goUp, goDown, goLeft, goRight); playNextTone(); renderDirty = true; return true; }
   if (screenMode == ScreenMode::Home) {
     const int page = homeSelection / kHomeAppsPerPage; const int slot = homeSelection % kHomeAppsPerPage;
     const bool onLeft = slot % 2 == 0;
@@ -3099,6 +3477,8 @@ void handleKeyboard() {
   if (!M5Cardputer.Keyboard.isChange() || !M5Cardputer.Keyboard.isPressed()) return;
   lastUserInputAt = millis();
   const auto keys = M5Cardputer.Keyboard.keysState();
+  // A ringing alert takes every key, and none for its first second, so typing that was under way can't stop it.
+  if (ringingNow() != Ringing::None) { if (clockapps::reached(millis(), ringKeysFrom)) dismissRinging(keys.enter); return; }
   if (screenMode == ScreenMode::Charging && chargingDimmed) {
     chargingDimmed = false;
     M5Cardputer.Display.setBrightness(kChargeBrightness);
@@ -3311,7 +3691,11 @@ void loop() {
 static void loopBody() {
   M5Cardputer.update();
   if (M5Cardputer.BtnA.isPressed()) lastUserInputAt = millis();
-  sampleBattery(); handleKeyboard(); serviceFoxFinding();
+  sampleBattery(); handleKeyboard(); serviceFoxFinding(); serviceClockApps();
+  if (ringingNow() != Ringing::None && M5Cardputer.BtnA.wasClicked()) {
+    if (clockapps::reached(millis(), ringKeysFrom)) dismissRinging(true);
+    delay(2); return;
+  }
   if (chargingModeActive) {
     serviceChargingMode();
     if (!inputQuarantined && M5Cardputer.BtnA.wasClicked()) {

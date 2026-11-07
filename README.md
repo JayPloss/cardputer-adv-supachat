@@ -43,13 +43,42 @@ issues and their acceptance criteria are tracked in
 
 ## HOME screen and apps
 
-The device boots through the SupaChat splash to a HOME screen of apps, four to a page. Page 1 has SUPACHAT, MUSIC, BOOKS and R/C. Page 2 has the settings: WI-FI, VOLUME, STATUS and LANGUAGE. Page 3 has CHARGING, LOCAL, CHANGELOG and SYSTEM. The arrows move between apps and on to the next page; going past the first or last page gives a bump and a falling tone. Enter or keys 1-4 open an app on the page, and key 0 opens SYSTEM. The rear button goes back one level; the top-left key does too (Fn + that key while typing).
+The device boots through the SupaChat splash to a HOME screen of apps, four to a page. Page 1 has SUPACHAT, MUSIC, BOOKS and R/C. Page 2 has the clock apps: TIMER, ALARM, SCREEN (screen time) and STOPWATCH. Page 3 has the settings: WI-FI, VOLUME, STATUS and LANGUAGE. Page 4 has CHARGING, LOCAL, CHANGELOG and SYSTEM. The arrows move between apps and on to the next page; going past the first or last page gives a bump and a falling tone. Enter or keys 1-4 open an app on the page, and key 0 opens SYSTEM. The rear button goes back one level; the top-left key does too (Fn + that key while typing).
 
 MUSIC and BOOKS stream from Navidrome on the home LAN over the Subsonic API: plain HTTP, MP3 only, decoded with libhelix on a dedicated task (`firmware/src/media_player.cpp`, `firmware/src/music_library.cpp`). The Cardputer ADV has no PSRAM, so all audio buffers live in internal RAM and are released when playback stops. While media plays, the walkie socket closes and chat polls once a minute. Starting a walkie recording, charging mode or ESP-NOW local mode stops playback first.
 
 BOOKS is the Navidrome library named `Books`. Its place is saved on the server as a Subsonic bookmark every 30 seconds and on pause, and a book reopens on the chapter holding its bookmark.
 
 Server address and login come from `firmware/include/music_secrets.h` (gitignored; see the `.example.h`). Without it, both apps show NOT SET UP and everything else works.
+
+## Clock apps
+
+Since `v0.56`. All four keep running whatever app is on the screen, and HOME's bottom line shows what is counting.
+
+- **TIMER.** Type minutes and seconds (5, 0, 0 is 5:00; up to 99:59), or Left/Right for presets (1 to 60 minutes), Up/Down for a minute more or less. Enter starts and pauses, Del resets (or clears when stopped).
+- **ALARM.** One alarm. Type the time as 24-hour digits (0, 7, 3, 0 is 7:30), Up/Down moves it by 5 minutes, Left/Right picks ONCE, MON-FRI or EVERY DAY; changing it turns it on, Enter turns it on or off. It is kept in NVS across restarts. When it rings, Enter or the rear button stops it and any other key snoozes it for 5 minutes. A ONCE alarm turns itself off after ringing.
+- **SCREEN** (screen time). Arrows choose 15, 30, 45, 60, 90 or 120 minutes, Enter starts and pauses, Del stops. At 5 and 1 minutes left the header of whatever app is open turns into a warning for 10 seconds with a short chime; at zero it rings.
+- **STOPWATCH.** Enter starts and stops, Del resets.
+
+When something rings, the screen flashes red and a tone repeats until a key or the rear button stops it; the first second ignores keys so typing in progress can't stop it by accident. The tone starts at the volume setting (at least the middle step, so volume 0 doesn't silence an alarm) and climbs to full over 30 seconds. Ringing stops music or a book (its place is saved first) and brings the device out of charging mode. Three different tone patterns tell the alarm, timer and screen time apart.
+
+What the alarm depends on:
+
+- **The clock comes from the internet.** The Cardputer ADV has no battery-backed clock chip; until a time server answers over Wi-Fi after turning on, the device only knows its build time. The alarm then shows CLOCK NOT SET and does not ring. After one sync it keeps time without Wi-Fi (the chip's own crystal) until it is turned off or restarts. Times are Eastern (`EST5EDT`, set in `ensureTime`).
+- **It rings only while the device is on.** The firmware never uses light or deep sleep, so a dark screen or charging mode doesn't stop it; the power switch, a flat battery or a restart before Wi-Fi does. A missed alarm is not rung later.
+- Timers, screen time and the stopwatch run on the chip's millisecond counter and don't need the clock, but they are lost if the device restarts.
+
+The arithmetic lives in `firmware/include/clock_apps.h`, tested on the PC by `firmware/tools/clock-apps-test.cpp`. The runtime emulator's `clock-timer`, `clock-screen`, `clock-alarm` and `clock-noclock` scenarios run the real firmware through each app.
+
+### Putting it on the devices
+
+Each device has its own PlatformIO environment (`cardputer-adv` is Albie, `juju`, `papa`, `mama`, `emmanuelle`, `naomie`, `andrew`). Follow `skills/flash-cardputer-safely`: identify the device by MAC first, then from `firmware/`:
+
+```
+pio run -e <environment> -t upload --upload-port <port>
+```
+
+On Linux the port is `/dev/ttyACM0`; on Windows use the `COM` port that `resolve-device.ps1` returns. The upload runs the emulator gate first and doesn't touch NVS, so Wi-Fi, volume and identity stay. A device needs Wi-Fi once after it is turned on before its alarm can ring.
 
 ## Charging mode
 

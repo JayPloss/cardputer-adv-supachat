@@ -28,7 +28,12 @@ Each item says where it came from. Add to this list; don't delete from it unless
 - **The 2x2 Home grid at `Font0` x2 tested well on the device.** Jay, on the first build with apps: "okay, menu worked well." A tile is 111 px wide, so a label is at most 9 characters at x2. Plan shorter French words, not smaller type.
 - **Most secondary screens are still at `Font0` x1**, the smallest thing that can be drawn. That's history, not a decision to copy.
 
+- **Font0 x4 for a number read across a room.** The clock apps' countdowns are Font0 x4 (28 px capitals): "7:00 AM" is 168 px, "99:59" 120 px. Status words under them are x2 and key hints x1 (`clock_apps` commit, 2026-11-07).
+- **An overlay on the header is drawn last.** The screen-time warning first went in `drawHeader`, and chat then drew its room names over it ("Family" on top of "SCREEN: 5 MIN LEFT", runtime emulator shot, 2026-11-07). It now draws after the whole screen, in `render`.
+
 ## Memory and time
+
+- **The clock is seeded from the build time, so a plausible year proves nothing.** `ensureTime` used to call the clock synced when the year looked right, which the seed always makes true. Anything that acts on the time of day (the alarm) waits for SNTP's callback, `clockFromNtp` (2026-11-07).
 
 - **No PSRAM.** Lists and strings on a screen cost real heap beside the player: a 200-song list ran out of memory, and opening a card folder now stops playback for that reason (commit "whole library on the card").
 - **Keep drawing off the key path.** Rendering is throttled to about 20 fps so typing and tones stay responsive (README). A long flourish must be stepped by time in the loop, never with `delay()`.

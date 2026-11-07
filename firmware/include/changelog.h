@@ -9,6 +9,7 @@ struct SupaChatChangelogEntry {
 // Canonical on-device release notes. The emulator reads this file directly so
 // its Changelog screen cannot silently drift from the firmware.
 constexpr SupaChatChangelogEntry kSupaChatChangelog[] = {
+  {"v0.56", {"Timer and stopwatch", "Alarm clock", "Screen time countdown"}, 3},
   {"v0.55", {"Settings moved to Home", "Pages of apps on Home", "Bump at the last page"}, 3},
   {"v0.54", {"Home screen with apps", "Music player", "Audiobook player", "Current server pin"}, 4},
   {"v0.53", {"Reliable Fox peer discovery", "Shared ESP-NOW hunt channel", "Newest-first history pages", "Compact device sync payload", "Unified feature release"}, 5},
