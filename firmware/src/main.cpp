@@ -6,6 +6,8 @@
 #include "changelog.h"
 #include "clock_apps.h"
 #include "fox_finding.h"
+#include "outbox.h"
+#include "voice_codec.h"
 #include <WebSocketsClient.h>
 #include <SD.h>
 #include <SPI.h>
@@ -42,8 +44,11 @@
 namespace {
 constexpr char kApiBase[] = "https://supachat.net";
 constexpr char kApiHost[] = "supachat.net";
-// SHA-256 fingerprint for supachat.net's current leaf certificate.
-// Renew this pin when Caddy rotates the certificate.
+// SHA-256 fingerprint of supachat.net's leaf certificate, issued 2026-10-09, expiring 2027-01-07.
+// Since v0.57 this is only the fallback: connections first check the certificate chain against
+// ISRG Root X1 (kRootCa), which survives Caddy's renewals. A leaf pin breaks at every renewal:
+// v0.48 pinned the August certificate and has reached no server since Caddy replaced it on Oct 9.
+// The pin still helps while the clock is unset (chain checks need the date).
 constexpr char kTlsFingerprint[] = "B1 42 A0 82 80 8D CD A1 41 AC 56 43 65 E3 18 E7 96 EB D0 38 DB 01 1B 56 87 19 3A 0E 5D DC 31 6D";
 constexpr char kDeviceName[] = SUPACHAT_DEVICE_NAME;
 constexpr char kDeviceId[] = SUPACHAT_DEVICE_ID;
@@ -55,7 +60,7 @@ constexpr bool kBuildFrenchDefault = false;
 bool frenchUi = kBuildFrenchDefault;
 SharedText<8> languageOverride{"auto"};
 const char *uiText(const char *english, const char *french) { return frenchUi ? french : english; }
-constexpr char kFirmwareVersion[] = "v0.56";
+constexpr char kFirmwareVersion[] = "v0.57";
 constexpr size_t kMessageLimit = 140;
 constexpr size_t kHistoryLimit = 100;  // What the first sync fetches; older pages go to the card.
 constexpr size_t kRamMessageLimit = 40;
@@ -227,7 +232,10 @@ struct ChatLine {
   bool mine;
   bool showSender;
   bool selected;
+  int8_t mark;  // -1, or on the last line of a message of ours: see MessageMark.
 };
+// How far a message of ours has got, drawn at the right of its last line.
+enum MessageMark : int8_t { MarkSending, MarkHeardNearby, MarkOnServer, MarkDelivered, MarkRead, MarkFailed };
 struct ChatRoom { String id; String name; String groupId; String groupName; String defaultLanguage; int64_t latestMessageId; int64_t seenMessageId; };
 enum class ChargeTrend : uint8_t { Waiting, Rising, Flat, Falling, Unstable };
 struct ChargePlotPoint {
@@ -355,6 +363,45 @@ size_t lastSyncResponseBytes = 0;
 uint32_t lastSyncErrorHeap = 0;
 uint32_t lastSyncErrorAt = 0;
 bool lastSyncErrorInitial = false;
+
+// The outbox (outbox.h): typed messages the server hasn't confirmed. Kept in NVS. Guarded by stateMutex.
+std::vector<outbox::Entry> outboxEntries;
+SharedText<40> chatNotice;            // One line over the composer, e.g. "OUTBOX FULL".
+uint32_t chatNoticeAt = 0;
+
+// How the last attempt to reach the server went, step by step, for STATUS and the header.
+enum class ServerStage : uint8_t { Unknown, NoWifi, Dns, Tcp, Tls, Cert, Auth, Http, Ok };
+volatile ServerStage serverStage = ServerStage::Unknown;
+volatile int serverStageStatus = 0;       // HTTP status for Auth/Http.
+SharedText<48> serverStageDetail;          // mbedTLS's words, "via pin", the DNS answer.
+volatile uint32_t serverStageAt = 0;
+volatile uint32_t serverOkAt = 0;          // millis() of the last answer from the server.
+volatile bool tlsChainWorks = false;       // The last good connection passed the chain check.
+volatile int8_t wifiRssi = 0;
+constexpr uint32_t kOnlineFreshMs = 120000;
+
+// Nearby (ESP-NOW) copies of typed messages, rebroadcast until a nearby device acknowledges.
+struct NearbySend { String clientId; uint32_t firstAt; uint32_t nextAt; uint8_t tries; uint8_t heardBy; };
+std::vector<NearbySend> nearbySends;       // Guarded by stateMutex.
+std::vector<String> pendingNearbyAcks;     // Guarded by stateMutex.
+volatile bool radioAwake = false;         // Modem sleep off; see applyRadioSleep().
+constexpr uint8_t kNearbyTries = 7;        // At 0, 1, 2, 4, 8, 16 and 30 s.
+
+// Walkie playback: ESP-NOW frames go through a jitter buffer; walkie-socket audio (in order, over
+// TCP) through a plain FIFO that waits for a cushion before it plays.
+voice::JitterBuffer nearbyJitter;          // Guarded by stateMutex.
+std::deque<int16_t> socketAudio;           // Guarded by stateMutex.
+bool socketAudioPlaying = false;
+constexpr size_t kSocketCushionSamples = 1920;  // 240 ms: TLS over Wi-Fi arrives in bursts.
+constexpr size_t kSocketAudioMax = 8000;        // 1 s; older audio is dropped beyond this.
+constexpr size_t kPlayBlockSamples = 480;       // 60 ms handed to the speaker at a time.
+voice::Agc micAgc;
+voice::AdpcmState nearbyEncoder;
+int16_t nearbyPending[voice::kFrameSamples];
+size_t nearbyPendingCount = 0;
+uint16_t nearbySequence = 0;
+uint16_t nearbyTalk = 0;
+std::vector<uint8_t> nearbyLastPacket;     // Sent again with the next frame: a lost packet gets a second chance.
 int batteryLevel = -1;
 int batteryVoltageMv = 0;
 float batteryFilteredMv = 0.0f;
@@ -469,7 +516,8 @@ uint32_t nextMessageNotificationAt = 0;
 volatile uint32_t lastNearbyAt = 0;
 
 constexpr uint32_t kEspNowMagic = 0x53555041;
-enum class EspNowType : uint8_t { Beacon = 1, Text = 2, Audio = 3, FoxBeacon = 4, FindStart = 5, FindAck = 6, PlacePrintRequest = 7, PlacePrintResult = 8, FindEnd = 9, PackObservation = 10 };
+// Types 11 and 12 are new in v0.57. Older firmware decrypts and ignores them, and still sends type 3.
+enum class EspNowType : uint8_t { Beacon = 1, Text = 2, Audio = 3, FoxBeacon = 4, FindStart = 5, FindAck = 6, PlacePrintRequest = 7, PlacePrintResult = 8, FindEnd = 9, PackObservation = 10, TextAck = 11, AudioAdpcm = 12 };
 struct __attribute__((packed)) EspNowPacket {
   uint32_t magic;
   uint8_t type;
@@ -709,8 +757,68 @@ String jsonEscape(const String &value) {
   return result;
 }
 
+// Keeps the newest messages in RAM. Unsent ones of this device's are never dropped here: until
+// v0.57 forty newer messages pushed an unsent one off the list, and it was gone.
 void trimHistory() {
-  if (messages.size() > kRamMessageLimit) messages.erase(messages.begin(), messages.begin() + (messages.size() - kRamMessageLimit));
+  for (auto item = messages.begin(); messages.size() > kRamMessageLimit && item != messages.end();) {
+    if (item->queued) ++item; else item = messages.erase(item);
+  }
+}
+
+// --- The outbox: NVS copy, and keeping chat's list in step with it. Callers hold stateMutex. ---
+void saveOutboxLocked() {
+  std::vector<outbox::Entry> copy = outboxEntries;
+  const std::string text = outbox::serialize(copy);
+  preferences.begin("supachat", false);
+  if (text.empty()) preferences.remove("outbox"); else preferences.putString("outbox", text.c_str());
+  preferences.end();
+}
+
+void loadOutboxLocked() {
+  preferences.begin("supachat", true);
+  const String text = preferences.getString("outbox", "");
+  preferences.end();
+  outboxEntries = outbox::parse(std::string(text.c_str()));
+}
+
+outbox::Entry *findOutboxLocked(const String &clientId) {
+  for (auto &entry : outboxEntries) if (clientId == entry.clientId.c_str()) return &entry;
+  return nullptr;
+}
+
+String outboxStateName(const outbox::Entry &entry) { return entry.state == outbox::State::Failed ? "failed" : "queued"; }
+
+// After a room's history loads: unsent messages from the card that the outbox doesn't know (sent
+// from firmware before v0.57, or the card was swapped) join the outbox, and outbox messages the
+// card lacks (no card, or a write that failed) join the list.
+void reconcileOutboxLocked() {
+  bool changed = false;
+  const String roomId = currentRoomId.get();
+  for (auto &message : messages) {
+    if (!message.queued || message.authorId != kDeviceId || message.body.isEmpty()) continue;
+    if (outbox::Entry *entry = findOutboxLocked(message.clientId)) { message.state = outboxStateName(*entry); continue; }
+    if (outboxEntries.size() >= outbox::kMaxEntries) continue;
+    outbox::Entry entry; entry.clientId = message.clientId.c_str(); entry.roomId = roomId.c_str(); entry.body = message.body.c_str();
+    entry.replyToId = message.replyToId; entry.createdAt = message.createdAt;
+    outboxEntries.push_back(entry); message.state = "queued"; changed = true;
+  }
+  for (const auto &entry : outboxEntries) {
+    if (roomId != entry.roomId.c_str()) continue;
+    const String clientId = entry.clientId.c_str();
+    if (std::any_of(messages.begin(), messages.end(), [&](const ChatMessage &m) { return m.clientId == clientId; })) continue;
+    ChatMessage message; message.roomId = roomId; message.clientId = clientId; message.authorId = kDeviceId; message.authorName = kDeviceName;
+    message.body = entry.body.c_str(); message.createdAt = entry.createdAt; message.queued = true; message.replyToId = entry.replyToId;
+    message.state = outboxStateName(entry);
+    messages.push_back(message);
+  }
+  if (changed) saveOutboxLocked();
+}
+
+void setMessageStateLocked(const String &clientId, const String &state) {
+  for (auto &message : messages) {
+    if (message.clientId != clientId || (state == "queued" && message.state == "heard")) continue;
+    message.state = state; renderDirty = true;
+  }
 }
 
 String roomHistoryPath(const String &roomId, bool temporary = false) {
@@ -738,7 +846,9 @@ void saveHistoryLocked() {
   SD.rename(temporaryPath, path);
 }
 
-void loadHistory() {
+void loadHistoryFile();
+void loadHistory() { loadHistoryFile(); reconcileOutboxLocked(); }
+void loadHistoryFile() {
   if (!sdReady) return;
   String path = roomHistoryPath(currentRoomId);
   // Power lost between the save's remove and rename leaves only the new copy, which is whole.
@@ -892,8 +1002,12 @@ void serviceMessageNotification() {
 
 String nextClientId();
 void sendEspNowAudio(const int16_t *samples, size_t count);
-void processVoiceBlock(const int16_t *samples) {
+void flushNearbyFrame(bool last);
+void processVoiceBlock(const int16_t *rawSamples) {
   if (chargingModeActive) return;
+  // The level control works on a copy: the DMA block is the recorder's.
+  int16_t samples[kVoiceCaptureBlock]; memcpy(samples, rawSamples, sizeof(samples));
+  micAgc.process(samples, kVoiceCaptureBlock);
   if (retainCurrentVoice && voiceSampleCount + kVoiceCaptureBlock <= kVoiceMaxSamples) {
     if (voiceUsesSd && voiceCaptureFile) {
       xSemaphoreTake(stateMutex, portMAX_DELAY);
@@ -928,10 +1042,14 @@ void startVoiceRecording() {
     }
   }
   voiceCapturedTotal = 0; voiceDmaRecordIndex = 2; voiceDmaQueued = 0;
+  micAgc.reset(); nearbyEncoder = voice::AdpcmState(); nearbyPendingCount = 0; nearbySequence = 0; nearbyTalk = static_cast<uint16_t>(esp_random());
+  nearbyLastPacket.clear();
   memset(voiceDmaBlocks, 0, sizeof(voiceDmaBlocks));
   M5Cardputer.Speaker.stop(); M5Cardputer.Speaker.end();
   auto micConfig = M5Cardputer.Mic.config(); micConfig.sample_rate = kVoiceSampleRate;
-  micConfig.magnification = 48; micConfig.noise_filter_level = 8;
+  // Was 48 (three times M5's default) until v0.57, which clips a voice close to the microphone
+  // before anything here can help. The level control (voice::Agc) adds up to 6x for a quiet voice.
+  micConfig.magnification = 16; micConfig.noise_filter_level = 8;
   M5Cardputer.Mic.config(micConfig);
   if (!M5Cardputer.Mic.begin()) {
     if (voiceCaptureFile) voiceCaptureFile.close();
@@ -957,6 +1075,7 @@ void stopVoiceRecording() {
     xSemaphoreTake(stateMutex, portMAX_DELAY); voiceCaptureFile.flush(); voiceCaptureFile.close(); xSemaphoreGive(stateMutex);
   }
   M5Cardputer.Mic.end(); M5Cardputer.Speaker.begin(); M5Cardputer.Speaker.setVolume(kVolumeValues[volumeLevel]);
+  if (voiceLiveMode && kEspNowEnabled && !walkieConnected) flushNearbyFrame(true);
   voiceRecording = false;
   if (retainCurrentVoice) {
     voiceClipReady = voiceSampleCount > 0; voiceUploadPending = voiceClipReady;
@@ -970,18 +1089,39 @@ void stopVoiceRecording() {
   renderDirty = true;
 }
 
+bool sendEspNowRaw(const std::vector<uint8_t> &bytes) {
+  static const uint8_t broadcast[] = {0xff,0xff,0xff,0xff,0xff,0xff};
+  return !bytes.empty() && esp_now_send(broadcast, bytes.data(), bytes.size()) == ESP_OK;
+}
+
+// One 30 ms ADPCM frame per packet (voice_codec.h). Each packet goes out again with the next one,
+// so a frame is lost only if both copies are; the receiver's replay check drops the copy it already has.
+void flushNearbyFrame(bool last) {
+  if (!meshReady || !espNowActive) { nearbyPendingCount = 0; return; }
+  if (nearbyPendingCount == 0 && !last) return;
+  if (nearbyPendingCount < voice::kFrameSamples) memset(nearbyPending + nearbyPendingCount, 0, (voice::kFrameSamples - nearbyPendingCount) * sizeof(int16_t));
+  voice::Frame frame{}; frame.sequence = nearbySequence++; frame.talk = nearbyTalk; frame.flags = last ? 1 : 0;
+  voice::encodeFrame(nearbyEncoder, nearbyPending, frame);
+  nearbyPendingCount = 0;
+  EspNowPacket packet{}; packet.magic = kEspNowMagic; packet.type = static_cast<uint8_t>(EspNowType::AudioAdpcm); packet.sequence = ++espNowSequence;
+  strncpy(packet.senderId, kDeviceId, sizeof(packet.senderId) - 1); strncpy(packet.senderName, kDeviceName, sizeof(packet.senderName) - 1);
+  currentRoomId.copyTo(packet.roomId, sizeof(packet.roomId));
+  if (!encryptMeshPacket(packet, reinterpret_cast<const uint8_t *>(&frame), sizeof(frame))) return;
+  const uint8_t *bytes = reinterpret_cast<const uint8_t *>(&packet);
+  std::vector<uint8_t> current(bytes, bytes + offsetof(EspNowPacket, payload) + packet.payloadLength);
+  sendEspNowRaw(current);
+  sendEspNowRaw(nearbyLastPacket);
+  if (last) sendEspNowRaw(current);  // The last frame has no next packet to ride with.
+  nearbyLastPacket.swap(current);
+}
+
 void sendEspNowAudio(const int16_t *samples, size_t count) {
   if (!meshReady) return;
-  static const uint8_t broadcast[] = {0xff,0xff,0xff,0xff,0xff,0xff};
-  size_t offset = 0;
-  while (offset < count) {
-    EspNowPacket packet{}; packet.magic = kEspNowMagic; packet.type = static_cast<uint8_t>(EspNowType::Audio); packet.sequence = ++espNowSequence;
-    strncpy(packet.senderId, kDeviceId, sizeof(packet.senderId) - 1); strncpy(packet.senderName, kDeviceName, sizeof(packet.senderName) - 1);
-    currentRoomId.copyTo(packet.roomId, sizeof(packet.roomId));
-    const size_t take = std::min<size_t>((sizeof(packet.payload) / 2), count - offset);
-    if (encryptMeshPacket(packet, reinterpret_cast<const uint8_t *>(samples + offset), take * 2))
-      esp_now_send(broadcast, reinterpret_cast<uint8_t *>(&packet), offsetof(EspNowPacket, payload) + packet.payloadLength);
-    offset += take;
+  for (size_t offset = 0; offset < count;) {
+    const size_t take = std::min(count - offset, voice::kFrameSamples - nearbyPendingCount);
+    memcpy(nearbyPending + nearbyPendingCount, samples + offset, take * sizeof(int16_t));
+    nearbyPendingCount += take; offset += take;
+    if (nearbyPendingCount == voice::kFrameSamples) flushNearbyFrame(false);
   }
 }
 
@@ -1011,10 +1151,35 @@ void playSamples(const int16_t *samples, size_t count) {
   queuePlaybackSamples(std::vector<int16_t>(samples, samples + count));
 }
 
+// Live walkie audio, whichever way it came, goes to the speaker 60 ms at a time with two blocks
+// queued, so a slow screen redraw doesn't leave the speaker empty.
+bool serviceLiveAudio() {
+  std::vector<int16_t> block;
+  xSemaphoreTake(stateMutex, portMAX_DELAY);
+  if (nearbyJitter.active()) {
+    block.resize(kPlayBlockSamples);
+    size_t filled = 0;
+    while (filled < kPlayBlockSamples && nearbyJitter.pull(block.data() + filled, millis())) filled += voice::kFrameSamples;
+    block.resize(filled);
+  } else if (!socketAudio.empty()) {
+    if (!socketAudioPlaying && socketAudio.size() >= kSocketCushionSamples) socketAudioPlaying = true;
+    if (socketAudioPlaying) {
+      const size_t take = std::min(kPlayBlockSamples, socketAudio.size());
+      block.assign(socketAudio.begin(), socketAudio.begin() + take);
+      socketAudio.erase(socketAudio.begin(), socketAudio.begin() + take);
+    }
+  }
+  if (socketAudio.empty()) socketAudioPlaying = false;  // Ran dry: wait for a fresh cushion.
+  xSemaphoreGive(stateMutex);
+  if (block.empty()) return false;
+  return queuePlaybackSamples(std::move(block));
+}
+
 void serviceAudioPlayback() {
   if (chargingModeActive) return;
   audioPlaying = M5Cardputer.Speaker.isPlaying(0) > 0;
   if (voiceRecording) return;
+  while (M5Cardputer.Speaker.isPlaying(0) < 2 && serviceLiveAudio()) {}
   while (M5Cardputer.Speaker.isPlaying(0) < 2 && !incomingAudio.empty()) {
     xSemaphoreTake(stateMutex, portMAX_DELAY); auto samples = std::move(incomingAudio.front()); incomingAudio.pop_front(); xSemaphoreGive(stateMutex);
     if (!queuePlaybackSamples(std::move(samples))) break;
@@ -1035,7 +1200,7 @@ void serviceAudioPlayback() {
 void stopVoicePlayback() {
   voicePlaybackCancelled = true; voiceDownloadRequestedId = 0;
   M5Cardputer.Speaker.stop(0); audioPlaying = false;
-  xSemaphoreTake(stateMutex, portMAX_DELAY); incomingAudio.clear(); xSemaphoreGive(stateMutex);
+  xSemaphoreTake(stateMutex, portMAX_DELAY); incomingAudio.clear(); socketAudio.clear(); socketAudioPlaying = false; nearbyJitter.reset(); xSemaphoreGive(stateMutex);
   for (auto &buffer : playbackBuffers) buffer.clear();
   voicePlayingMessageId = 0; walkieStatus = "STOPPED"; renderDirty = true;
 }
@@ -1086,8 +1251,10 @@ void onWalkieEvent(WStype_t type, uint8_t *payload, size_t length) {
     renderDirty = true; return;
   }
   if (type == WStype_BIN && length >= 2 && length % 2 == 0) {
-    std::vector<int16_t> samples(length / 2); memcpy(samples.data(), payload, length);
-    xSemaphoreTake(stateMutex, portMAX_DELAY); if (incomingAudio.size() < 12) incomingAudio.push_back(std::move(samples)); xSemaphoreGive(stateMutex);
+    xSemaphoreTake(stateMutex, portMAX_DELAY);
+    for (size_t at = 0; at + 1 < length; at += 2) { int16_t sample; memcpy(&sample, payload + at, 2); socketAudio.push_back(sample); }
+    while (socketAudio.size() > kSocketAudioMax) socketAudio.pop_front();
+    xSemaphoreGive(stateMutex);
   }
 }
 
@@ -1157,11 +1324,30 @@ void onEspNowReceive(const uint8_t *mac, const uint8_t *data, int length) {
     renderDirty = true; return;
   }
   if (packet->type == static_cast<uint8_t>(EspNowType::Audio) && plain.size() % 2 == 0) {
-    std::vector<int16_t> samples(plain.size() / 2); memcpy(samples.data(), plain.data(), plain.size());
-    if (stateMutex) { xSemaphoreTake(stateMutex, portMAX_DELAY); if (incomingAudio.size() < 12) incomingAudio.push_back(std::move(samples)); xSemaphoreGive(stateMutex); }
+    // Raw PCM from firmware before v0.57: it gets the same cushion as walkie-socket audio.
+    if (stateMutex) {
+      xSemaphoreTake(stateMutex, portMAX_DELAY);
+      for (size_t at = 0; at + 1 < plain.size(); at += 2) { int16_t sample; memcpy(&sample, plain.data() + at, 2); socketAudio.push_back(sample); }
+      while (socketAudio.size() > kSocketAudioMax) socketAudio.pop_front();
+      xSemaphoreGive(stateMutex);
+    }
+  } else if (packet->type == static_cast<uint8_t>(EspNowType::AudioAdpcm) && plain.size() == sizeof(voice::Frame)) {
+    voice::Frame frame; memcpy(&frame, plain.data(), sizeof(frame));
+    if (stateMutex) { xSemaphoreTake(stateMutex, portMAX_DELAY); nearbyJitter.push(frame, millis()); xSemaphoreGive(stateMutex); }
+  } else if (packet->type == static_cast<uint8_t>(EspNowType::TextAck)) {
+    char clientId[sizeof(packet->clientId) + 1]{}; memcpy(clientId, packet->clientId, sizeof(packet->clientId));
+    if (stateMutex) {
+      xSemaphoreTake(stateMutex, portMAX_DELAY);
+      for (auto &send : nearbySends) if (send.clientId == clientId && send.heardBy < 255) send.heardBy++;
+      for (auto &message : messages)
+        if (message.clientId == clientId && message.authorId == kDeviceId && message.queued) { message.state = message.state == "failed" ? message.state : String("heard"); renderDirty = true; }
+      xSemaphoreGive(stateMutex);
+    }
   } else if (packet->type == static_cast<uint8_t>(EspNowType::Text) && packet->payloadLength > 0) {
-    ChatMessage message; message.roomId = currentRoomId; message.clientId = packet->clientId; message.authorId = packet->senderId; message.authorName = packet->senderName;
-    message.body = String(reinterpret_cast<const char *>(plain.data())).substring(0, plain.size()); message.state = "nearby";
+    char clientId[sizeof(packet->clientId) + 1]{}; memcpy(clientId, packet->clientId, sizeof(packet->clientId));
+    char text[sizeof(packet->payload) + 1]{}; memcpy(text, plain.data(), std::min(plain.size(), sizeof(packet->payload)));
+    ChatMessage message; message.roomId = currentRoomId; message.clientId = clientId; message.authorId = packet->senderId; message.authorName = packet->senderName;
+    message.body = text; message.state = "nearby";
     if (stateMutex) {
       bool inserted = false;
       xSemaphoreTake(stateMutex, portMAX_DELAY);
@@ -1170,6 +1356,9 @@ void onEspNowReceive(const uint8_t *mac, const uint8_t *data, int length) {
       }
       xSemaphoreGive(stateMutex);
       if (inserted) messageNotificationPending = true;
+      // Acknowledge every copy, so a sender whose first answer was lost still hears one. Sent from
+      // the main loop: this runs on the Wi-Fi task.
+      xSemaphoreTake(stateMutex, portMAX_DELAY); if (pendingNearbyAcks.size() < 8) pendingNearbyAcks.push_back(String(clientId)); xSemaphoreGive(stateMutex);
       renderDirty = true;
     }
   }
@@ -1250,7 +1439,7 @@ bool connectKnownWifi() {
   if (chargingModeActive) return false;
   if (WiFi.status() == WL_CONNECTED) return true;
   WiFi.mode(WIFI_STA);
-  WiFi.setSleep(true);
+  radioAwake = false; WiFi.setSleep(true);  // applyRadioSleep() decides once joined.
   networkStatus = "SCANNING"; renderDirty = true;
   const int count = WiFi.scanNetworks(false, true);
   int bestProfile = -1; int bestRssi = -1000;
@@ -1543,13 +1732,66 @@ void serviceChargingMode() {
   }
 }
 
+void noteServerStage(ServerStage stage, int status, const String &detail) {
+  serverStage = stage; serverStageStatus = status; serverStageDetail = detail; serverStageAt = millis();
+  if (stage == ServerStage::Ok) serverOkAt = millis();
+  renderDirty = true;
+}
+
+bool chainFailedWithoutClock = false;
+
+// After a failed TLS connection: was it the network, or TLS? A plain TCP connection answers that.
+bool portOpen(const IPAddress &address, uint32_t) {
+  // Short: a TLS attempt has just waited its full time, and chat holds the secure slot meanwhile.
+  WiFiClient probe;
+  if (probe.connect(address, 443, 3000)) { probe.stop(); return true; }
+  noteServerStage(ServerStage::Tcp, 0, address.toString() + ":443");
+  return false;
+}
+
+// Opens a TLS connection to the server, recording which step failed. The certificate chain is
+// checked against ISRG Root X1 first; if that fails, the leaf pin is tried, so a device whose
+// clock isn't set yet still connects, and a renewed certificate doesn't cut every device off.
+bool openServer(WiFiClientSecure &client, uint32_t timeoutMs) {
+  if (WiFi.status() != WL_CONNECTED) { noteServerStage(ServerStage::NoWifi, 0, ""); return false; }
+  wifiRssi = static_cast<int8_t>(WiFi.RSSI());
+  IPAddress address;
+  if (!WiFi.hostByName(kApiHost, address)) { noteServerStage(ServerStage::Dns, 0, "no address for supachat.net"); return false; }
+  client.setTimeout(35); client.setHandshakeTimeout(20);
+  String chainError;
+  // Without the date the chain check fails every time; don't pay for it twice a sync.
+  if (!(chainFailedWithoutClock && !clockFromNtp)) {
+    client.setCACert(kRootCa);
+    if (client.connect(kApiHost, 443, timeoutMs)) { tlsChainWorks = true; chainFailedWithoutClock = false; return true; }
+    char tlsError[64]{}; client.lastError(tlsError, sizeof(tlsError)); chainError = tlsError;
+    client.stop();
+    chainFailedWithoutClock = !clockFromNtp;
+    if (!portOpen(address, timeoutMs)) return false;
+  } else chainError = "chain not tried";
+  WiFiClientSecure &pinned = client;
+  pinned.setInsecure();
+  if (!pinned.connect(kApiHost, 443, timeoutMs)) {
+    char tlsError[64]{}; pinned.lastError(tlsError, sizeof(tlsError)); pinned.stop();
+    if (portOpen(address, timeoutMs)) noteServerStage(ServerStage::Tls, 0, tlsError[0] ? String(tlsError) : chainError);
+    return false;
+  }
+  if (!pinned.verify(kTlsFingerprint, kApiHost)) {
+    pinned.stop();
+    noteServerStage(ServerStage::Cert, 0, (clockFromNtp ? "" : "clock not set; ") + chainError);
+    return false;
+  }
+  tlsChainWorks = false;
+  serverStageDetail = "via pin; chain: " + (clockFromNtp ? chainError : String("clock not set"));
+  return true;
+}
+
 bool requestJson(const String &path, const char *method, const String &requestBody, String &responseBody, int &status) {
   if (chargingModeActive) { status = HTTPC_ERROR_CONNECTION_REFUSED; return false; }
   const os::SecureLease lease(os::Priority::Background);
   if (!lease.held) { status = HTTPC_ERROR_CONNECTION_REFUSED; return false; }
-  WiFiClientSecure client; client.setInsecure(); client.setTimeout(35); client.setHandshakeTimeout(20);
-  if (!client.connect(kApiHost, 443, kSecureConnectTimeoutMs)) { status = HTTPC_ERROR_CONNECTION_REFUSED; return false; }
-  if (!client.verify(kTlsFingerprint, kApiHost)) { client.stop(); status = HTTPC_ERROR_CONNECTION_LOST; return false; }
+  WiFiClientSecure client;
+  if (!openServer(client, kSecureConnectTimeoutMs)) { status = HTTPC_ERROR_CONNECTION_REFUSED; lastHttpStatus = status; return false; }
+  const String viaPin = tlsChainWorks ? String() : serverStageDetail.get();
   HTTPClient http; http.setTimeout(35000); http.setReuse(false);
   if (!http.begin(client, String(kApiBase) + path)) return false;
   http.addHeader("Authorization", "Bearer " + deviceToken);
@@ -1558,7 +1800,10 @@ bool requestJson(const String &path, const char *method, const String &requestBo
   if (status < 0) {
     char tlsError[96]{}; const int error = client.lastError(tlsError, sizeof(tlsError));
     Serial.printf("https status=%d tls=%d detail=%s heap=%u\n", status, error, tlsError, ESP.getFreeHeap());
-  }
+    noteServerStage(ServerStage::Tls, status, String("lost after connect ") + status);
+  } else if (status == 401) noteServerStage(ServerStage::Auth, status, "device token refused");
+  else if (status >= 200 && status < 300) noteServerStage(ServerStage::Ok, status, viaPin);
+  else noteServerStage(ServerStage::Http, status, path.substring(0, 24));
   lastHttpStatus = status;
   if (status > 0) responseBody = http.getString();
   http.end(); return status > 0;
@@ -1568,8 +1813,8 @@ bool uploadVoiceClip() {
   const os::SecureLease lease(os::Priority::Foreground, 5000);
   if (!lease.held) return false;
   if (!voiceUploadPending || !voiceSampleCount || WiFi.status() != WL_CONNECTED) return false;
-  WiFiClientSecure client; client.setInsecure(); client.setTimeout(35); client.setHandshakeTimeout(20);
-  if (!client.connect(kApiHost, 443) || !client.verify(kTlsFingerprint, kApiHost)) { client.stop(); return false; }
+  WiFiClientSecure client;
+  if (!openServer(client, kSecureConnectTimeoutMs)) return false;
   HTTPClient http; http.setTimeout(35000); http.setReuse(false);
   if (!http.begin(client, String(kApiBase) + "/api/voice")) return false;
   http.addHeader("Authorization", "Bearer " + deviceToken);
@@ -1595,7 +1840,8 @@ bool uploadVoiceClip() {
 bool downloadVoiceClip(int64_t messageId) {
   const os::SecureLease lease(os::Priority::Foreground, 5000);
   if (!lease.held) return false;
-  WiFiClientSecure client; client.setCACert(kRootCa); client.setTimeout(35);
+  WiFiClientSecure client;
+  if (!openServer(client, kSecureConnectTimeoutMs)) return false;
   HTTPClient http; http.setTimeout(35000); http.setReuse(false);
   if (!http.begin(client, String(kApiBase) + "/api/voice/" + String(messageId) + "/audio")) return false;
   http.addHeader("Authorization", "Bearer " + deviceToken);
@@ -1626,6 +1872,9 @@ String nextClientId() {
   return String(kDeviceId) + "-" + String(bootNonce, HEX) + "-" + String(++clientSequence);
 }
 
+// How far a message of this device's has got: on the server, on someone's device, read.
+int deliveryRank(const String &state) { return state == "read" ? 3 : state == "delivered" ? 2 : state == "server" || state == "saved" ? 1 : 0; }
+
 void mergeServerMessage(JsonObjectConst object) {
   const String messageRoomId = String(object["conversation_id"] | "");
   // A room switch can happen while an HTTPS sync is in flight. Never merge
@@ -1655,36 +1904,61 @@ void mergeServerMessage(JsonObjectConst object) {
       return message.id > 0 && message.id > id;
     });
     messages.insert(position, serverMessage);
-  } else *existing = serverMessage;
+  } else {
+    // A later copy of the message (a re-sync, a restart) never takes back how far it had got.
+    if (existing->authorId == kDeviceId && deliveryRank(existing->state) > deliveryRank(serverMessage.state)) serverMessage.state = existing->state;
+    *existing = serverMessage;
+  }
   lastServerId = std::max(lastServerId, id); trimHistory(); renderDirty = true;
 }
 
+// Sends every due outbox message, whatever room is on screen. Only the server's answer that it has
+// the message takes it out of the outbox; a refusal marks it FAILED; anything else retries later.
 void sendQueuedMessages() {
-  std::vector<String> queuedIds;
+  struct Due { String clientId, roomId, body; int64_t replyToId; };
+  std::vector<Due> due;
+  const uint32_t now = millis();
   xSemaphoreTake(stateMutex, portMAX_DELAY);
-  for (const auto &message : messages) if (message.queued) queuedIds.push_back(message.clientId);
+  for (const auto &entry : outboxEntries)
+    if (entry.state == outbox::State::Sending && outbox::due(now, entry.nextAttemptAt))
+      due.push_back({entry.clientId.c_str(), entry.roomId.c_str(), entry.body.c_str(), entry.replyToId});
   xSemaphoreGive(stateMutex);
-  for (const auto &clientId : queuedIds) {
-    String text; int64_t replyToId = 0;
-    xSemaphoreTake(stateMutex, portMAX_DELAY);
-    auto item = std::find_if(messages.begin(), messages.end(), [&](const ChatMessage &message) { return message.clientId == clientId; });
-    if (item != messages.end()) { text = item->body; replyToId = item->replyToId; }
-    xSemaphoreGive(stateMutex);
-    if (text.isEmpty()) continue;
+  for (const auto &item : due) {
+    const String payload = "{\"client_id\":\"" + jsonEscape(item.clientId) + "\",\"body\":\"" + jsonEscape(item.body) + "\",\"room_id\":\"" + jsonEscape(item.roomId) + "\"" + (item.replyToId > 0 ? ",\"reply_to_id\":" + String(item.replyToId) : "") + "}";
     String response; int status = 0;
-    String queuedRoomId;
+    requestJson("/api/messages", "POST", payload, response, status);
+    JsonDocument document;
+    const bool parsed = (status == 200 || status == 201) && !deserializeJson(document, response) && !document["message"].isNull();
+    if ((status == 200 || status == 201) && !parsed) status = -100;  // An answer we can't read is no proof: try again.
     xSemaphoreTake(stateMutex, portMAX_DELAY);
-    item = std::find_if(messages.begin(), messages.end(), [&](const ChatMessage &message) { return message.clientId == clientId; });
-    if (item != messages.end()) queuedRoomId = item->roomId;
+    auto entry = std::find_if(outboxEntries.begin(), outboxEntries.end(), [&](const outbox::Entry &e) { return item.clientId == e.clientId.c_str(); });
+    if (entry != outboxEntries.end()) {
+      if (parsed) {
+        outboxEntries.erase(entry);
+        mergeServerMessage(document["message"].as<JsonObjectConst>());  // Only lands if its room is on screen.
+        saveHistoryLocked();
+      } else {
+        outbox::recordAttempt(*entry, status, millis());
+        setMessageStateLocked(item.clientId, outboxStateName(*entry));
+        Serial.printf("outbox %s status=%d attempts=%u state=%s\n", item.clientId.c_str(), status, entry->attempts, outboxStateName(*entry).c_str());
+      }
+      saveOutboxLocked();
+    }
     xSemaphoreGive(stateMutex);
-    if (queuedRoomId != currentRoomId) continue;
-    const String payload = "{\"client_id\":\"" + jsonEscape(clientId) + "\",\"body\":\"" + jsonEscape(text) + "\",\"room_id\":\"" + jsonEscape(queuedRoomId) + "\"" + (replyToId > 0 ? ",\"reply_to_id\":" + String(replyToId) : "") + "}";
-    if (!requestJson("/api/messages", "POST", payload, response, status) || (status != 200 && status != 201)) continue;
-    JsonDocument document; if (deserializeJson(document, response)) continue;
-    xSemaphoreTake(stateMutex, portMAX_DELAY);
-    mergeServerMessage(document["message"].as<JsonObjectConst>()); saveHistoryLocked();
-    xSemaphoreGive(stateMutex);
+    if (!parsed && outbox::classify(status) == outbox::Outcome::Retry) break;  // The server is out of reach: the rest wait too.
   }
+}
+
+// Enter on a FAILED message of this device's sends it again.
+bool retryFailedMessage(const String &clientId) {
+  bool found = false;
+  xSemaphoreTake(stateMutex, portMAX_DELAY);
+  if (outbox::Entry *entry = findOutboxLocked(clientId)) {
+    if (entry->state == outbox::State::Failed) { outbox::retry(*entry, millis()); setMessageStateLocked(clientId, "queued"); saveOutboxLocked(); found = true; }
+  }
+  xSemaphoreGive(stateMutex);
+  if (found) syncOverride = true;
+  return found;
 }
 
 void postReadReceipt(int64_t messageId) {
@@ -1799,10 +2073,12 @@ void synchronize() {
     const int64_t messageId = receipt["message_id"] | 0;
     const int64_t updatedAt = receipt["updated_at"] | 0;
     lastReceiptAt = std::max(lastReceiptAt, updatedAt);
-    if (String(receipt["user_id"] | "") == kDeviceId) {
-      auto item = std::find_if(messages.begin(), messages.end(), [&](const ChatMessage &message) { return message.id == messageId; });
-      if (item != messages.end()) item->state = String(receipt["state"] | item->state);
-    }
+    auto item = std::find_if(messages.begin(), messages.end(), [&](const ChatMessage &message) { return message.id == messageId; });
+    if (item == messages.end()) continue;
+    const String receiptState = String(receipt["state"] | "");
+    if (String(receipt["user_id"] | "") == kDeviceId) { if (item->authorId != kDeviceId) item->state = receiptState; }
+    // Someone else's receipt on a message of ours: it reached their device, or they read it.
+    else if (item->authorId == kDeviceId && deliveryRank(receiptState) > deliveryRank(item->state)) item->state = receiptState;
   }
   saveHistoryLocked(); xSemaphoreGive(stateMutex);
   // Initial history hydration is silent. Only messages arriving after the
@@ -1832,6 +2108,51 @@ void synchronize() {
     auto activeRoom = std::find_if(rooms.begin(), rooms.end(), [&](const ChatRoom &room) { return room.id == currentRoomId; });
     if (activeRoom != rooms.end()) activeRoom->seenMessageId = std::max(activeRoom->latestMessageId, lastServerId);
   }
+}
+
+// Which way a typed message travels right now. ONLINE: through the server, to everyone in the
+// room. NEARBY: by ESP-NOW only, to devices in radio range on the same channel, until the server
+// is back. Until v0.57 nothing on screen said which, so a device that had lost the server looked
+// the same as one that hadn't.
+enum class LinkMode : uint8_t { Starting, Online, Nearby, Offline };
+LinkMode linkMode() {
+  const bool fresh = serverOkAt && millis() - serverOkAt < kOnlineFreshMs;
+  if (!localOnlyMode && fresh && WiFi.status() == WL_CONNECTED) return LinkMode::Online;
+  if (!kEspNowEnabled || !meshReady || chargingModeActive) return serverStage == ServerStage::Unknown ? LinkMode::Starting : LinkMode::Offline;
+  if (!localOnlyMode && serverStage == ServerStage::Unknown && millis() < 90000) return LinkMode::Starting;
+  return LinkMode::Nearby;
+}
+const char *linkModeWord(LinkMode mode) {
+  switch (mode) {
+    case LinkMode::Online: return uiText("ONLINE", "EN LIGNE");
+    case LinkMode::Nearby: return uiText("NEARBY", "PROXIMITE");
+    case LinkMode::Offline: return uiText("OFFLINE", "HORS LIGNE");
+    default: return nullptr;
+  }
+}
+String serverStageText() {
+  switch (serverStage) {
+    case ServerStage::NoWifi: return uiText("NO WI-FI", "PAS DE WI-FI");
+    case ServerStage::Dns: return uiText("DNS FAILED", "ECHEC DNS");
+    case ServerStage::Tcp: return uiText("PORT 443 BLOCKED", "PORT 443 BLOQUE");
+    case ServerStage::Tls: return uiText("TLS FAILED", "ECHEC TLS");
+    case ServerStage::Cert: return uiText("CERT REJECTED", "CERTIFICAT REFUSE");
+    case ServerStage::Auth: return uiText("LOGIN REFUSED", "CONNEXION REFUSEE");
+    case ServerStage::Http: return String(uiText("SERVER HTTP ", "SERVEUR HTTP ")) + serverStageStatus;
+    case ServerStage::Ok: return uiText("SERVER OK", "SERVEUR OK");
+    default: return uiText("NOT TRIED YET", "PAS ENCORE ESSAYE");
+  }
+}
+
+// Modem sleep saves power but leaves the radio deaf between the access point's beacons, and
+// ESP-NOW packets that arrive then are lost. The radio stays awake whenever ESP-NOW is how
+// messages travel (no server) and while the walkie is open.
+void applyRadioSleep() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  const bool awake = linkMode() != LinkMode::Online || screenMode == ScreenMode::Walkie;
+  if (awake == radioAwake) return;
+  WiFi.setSleep(!awake); radioAwake = awake;
+  Serial.printf("radio sleep %s\n", awake ? "off" : "on");
 }
 
 void networkTask(void *) {
@@ -1878,12 +2199,14 @@ void networkTask(void *) {
     const uint32_t now = millis();
     if (WiFi.status() != WL_CONNECTED && now < nextWifiAttempt) { vTaskDelay(pdMS_TO_TICKS(250)); continue; }
     if (!connectKnownWifi()) {
+      noteServerStage(ServerStage::NoWifi, 0, "");
       if (!os::bootSettled()) os::setBoot(os::Boot::NoNetwork);
       // Scanning costs battery and blocks ESP-NOW's channel, so away from known networks it slows down.
       wifiRetryMs = std::min<uint32_t>(wifiRetryMs ? wifiRetryMs * 2 : kWifiRetryMs, kWifiRetryMaxMs);
       nextWifiAttempt = millis() + wifiRetryMs; vTaskDelay(pdMS_TO_TICKS(500)); continue;
     }
     wifiRetryMs = 0;
+    applyRadioSleep();
     if (os::boot() == os::Boot::Joining) os::setBoot(os::Boot::Syncing);
     ensureTime();
     if (localBlackout() && !syncOverride) {
@@ -1955,7 +2278,10 @@ void walkieTask(void *) {
         walkieHeaders = "Authorization: Bearer " + deviceToken + "\r\n";
         walkieSocket.setExtraHeaders(walkieHeaders.c_str()); walkieSocket.onEvent(onWalkieEvent); walkieSocket.setReconnectInterval(2000);
         const String walkiePath = "/walkie?room=" + currentRoomId;
-        walkieSocket.beginSSL(kApiHost, 443, walkiePath.c_str(), kTlsFingerprint); walkieInitialized = true;
+        // The same trust as chat's last good connection: the chain when that worked, else the pin.
+        if (tlsChainWorks) walkieSocket.beginSslWithCA(kApiHost, 443, walkiePath.c_str(), kRootCa);
+        else walkieSocket.beginSSL(kApiHost, 443, walkiePath.c_str(), kTlsFingerprint);
+        walkieInitialized = true;
       }
       walkieSocket.loop();
     }
@@ -1977,7 +2303,14 @@ void drawHeader(const char *title) {
   if (strcmp(title, "FAMLY") == 0) { display.setCursor(40, 6); display.print(easternClockText()); }
   if (!keyboardReady) { display.setTextColor(TFT_RED, TFT_DARKGREEN); display.setCursor(88, 6); display.print("K!"); }
   if (screenMode != ScreenMode::Charging && screenMode != ScreenMode::ChargingConfirm) {
-    display.setCursor(106, 6); display.print(networkStatus.substring(0, 10));
+    const LinkMode mode = linkMode();
+    const char *word = linkModeWord(mode);
+    display.setTextColor(mode == LinkMode::Online ? TFT_WHITE : mode == LinkMode::Nearby ? TFT_YELLOW : mode == LinkMode::Offline ? TFT_ORANGE : TFT_LIGHTGREY, TFT_DARKGREEN);
+    // The Wi-Fi screens report their own progress (SCANNING, JOINING, SAVED, FAILED) here.
+    const bool wifiScreen = screenMode == ScreenMode::Networks || screenMode == ScreenMode::NetworkPassword;
+    if (wifiScreen) display.setTextColor(TFT_WHITE, TFT_DARKGREEN);
+    display.setCursor(106, 6); display.print(word && !wifiScreen ? String(word) : networkStatus.substring(0, 10));
+    display.setTextColor(TFT_WHITE, TFT_DARKGREEN);
   }
   if (screenMode != ScreenMode::Charging) {
     const String batteryText = batteryLevel < 0 ? String("?%") : String(batteryLevel) + "%";
@@ -2008,6 +2341,25 @@ size_t utf8CharacterCount(const String &text);
 String utf8Tail(const String &text, size_t maximumCharacters);
 void printFont0Text(const String &text);
 
+// Ticks drawn with lines, not a font: Font0 has no check mark that reads at this size.
+void drawMessageMark(int8_t mark, int y) {
+  if (mark < 0) return;
+  auto &display = uiCanvas;
+  auto tick = [&](int x, uint16_t colour) {
+    display.drawLine(x, y + 5, x + 2, y + 8, colour); display.drawLine(x, y + 6, x + 2, y + 9, colour);
+    display.drawLine(x + 2, y + 8, x + 6, y + 1, colour); display.drawLine(x + 2, y + 9, x + 6, y + 2, colour);
+  };
+  switch (mark) {
+    case MarkSending:  // A small clock: waiting. Three dots read as text cut short.
+      display.drawCircle(232, y + 5, 4, TFT_LIGHTGREY); display.drawFastVLine(232, y + 2, 4, TFT_LIGHTGREY); display.drawFastHLine(232, y + 5, 3, TFT_LIGHTGREY); break;
+    case MarkHeardNearby: tick(230, TFT_YELLOW); break;
+    case MarkOnServer: tick(230, TFT_LIGHTGREY); break;
+    case MarkDelivered: tick(227, TFT_LIGHTGREY); tick(232, TFT_LIGHTGREY); break;
+    case MarkRead: tick(227, TFT_CYAN); tick(232, TFT_CYAN); break;
+    case MarkFailed: display.fillRect(232, y, 3, 7, TFT_RED); display.fillRect(232, y + 9, 3, 3, TFT_RED); break;
+  }
+}
+
 void drawChat() {
   auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader("");
   bool leftNew = false, rightNew = false;
@@ -2024,7 +2376,9 @@ void drawChat() {
   const String roomTitle = currentRoomName.substring(0, 10); display.setTextColor(TFT_WHITE, TFT_DARKGREEN); display.setCursor(50 - roomTitle.length() * 3, 6); display.print(roomTitle);
   display.setTextColor(rightNew ? TFT_YELLOW : TFT_DARKGREY, TFT_DARKGREEN); display.setCursor(91, 6); display.print(rightNew ? "*>" : " >");
   xSemaphoreTake(stateMutex, portMAX_DELAY);
-  const int end = std::max(0, static_cast<int>(messages.size()) - static_cast<int>(historyOffset));
+  // Up once selects the newest message (since v0.57; before, the newest couldn't be selected), and
+  // each Up after that one older, scrolling the list with it.
+  const int end = std::max(0, static_cast<int>(messages.size()) - std::max(0, static_cast<int>(historyOffset) - 1));
   const int first = std::max(0, end - 10);
   std::vector<ChatLine> lines;
   lines.reserve(10);
@@ -2042,10 +2396,25 @@ void drawChat() {
       String line = text.substring(0, split);
       text = text.substring(split);
       while (text.startsWith(" ")) text.remove(0, 1);
-      lines.push_back({line, sender, colour, mine, firstChunk, historyOffset > 0 && index == end - 1});
+      lines.push_back({line, sender, colour, mine, firstChunk, historyOffset > 0 && index == end - 1, -1});
       firstChunk = false;
     }
+    if (mine && !lines.empty()) {
+      const String &state = message.state;
+      lines.back().mark = state == "failed" ? MarkFailed : state == "heard" ? MarkHeardNearby : message.queued ? MarkSending
+          : state == "read" ? MarkRead : state == "delivered" ? MarkDelivered : MarkOnServer;
+    }
   }
+  // The hint over the composer: what a selected unsent message needs, a notice, or how many are unsent.
+  String hint; uint16_t hintColour = TFT_RED;
+  const int selectedIndex = static_cast<int>(messages.size()) - static_cast<int>(historyOffset);
+  size_t failedCount = 0;
+  for (const auto &entry : outboxEntries) failedCount += entry.state == outbox::State::Failed;
+  if (historyOffset > 0 && selectedIndex >= 0 && selectedIndex < static_cast<int>(messages.size()) && messages[selectedIndex].state == "failed") {
+    const outbox::Entry *entry = findOutboxLocked(messages[selectedIndex].clientId);
+    hint = String(uiText("NOT SENT (", "NON ENVOYE (")) + (entry ? entry->lastStatus : 0) + uiText("). ENTER TO RETRY", "). ENTER: REESSAYER");
+  } else if (chatNoticeAt) { hint = chatNotice.get(); hintColour = TFT_YELLOW; }
+  else if (failedCount) hint = String(failedCount) + uiText(" NOT SENT. FN+UP, ENTER: RETRY", " NON ENVOYES. FN+HAUT PUIS ENTER");
   int firstLine = static_cast<int>(lines.size());
   int usedHeight = 0;
   while (firstLine > 0) {
@@ -2059,7 +2428,8 @@ void drawChat() {
     // Font0 stores CP437 bitmaps; map UTF-8 accents to their actual glyph slots.
     display.setFont(&fonts::Font0); display.setTextSize(1.5f);
     const String prefix = lines[index].showSender ? lines[index].sender + ": " : "";
-    const int x = lines[index].mine ? std::max(3, 237 - display.textWidth(prefix + lines[index].text)) : 3;
+    // Our lines leave 12 px at the right for the delivery mark.
+    const int x = lines[index].mine ? std::max(3, 225 - display.textWidth(prefix + lines[index].text)) : 3;
     const uint32_t lineBackground = lines[index].selected ? 0x18C3 : TFT_BLACK;
     if (lines[index].selected) display.fillRoundRect(std::max(1, x - 2), y - 2, std::min(238 - x, display.textWidth(prefix + lines[index].text) + 5), 15, 2, lineBackground);
     display.setCursor(x, y);
@@ -2067,15 +2437,19 @@ void drawChat() {
       display.setTextColor(lines[index].colour, lineBackground); printFont0Text(lines[index].sender);
       display.setTextColor(TFT_WHITE, lineBackground); display.print(": ");
     } else display.setTextColor(TFT_WHITE, lineBackground);
-    printFont0Text(lines[index].text); y += 17;
+    printFont0Text(lines[index].text);
+    drawMessageMark(lines[index].mark, y);
+    y += 17;
   }
   xSemaphoreGive(stateMutex);
   display.setFont(&fonts::Font0);
   display.drawFastHLine(0, 106, 240, TFT_DARKGREY);
   display.setTextSize(1);
+  const bool twoLines = replyToMessageId > 0 || hint.length();
   if (replyToMessageId > 0) { display.setTextColor(TFT_CYAN, TFT_BLACK); display.setCursor(3, 109); display.print(uiText("REPLY ", "REPONDRE ")); printFont0Text(replyToAuthor.substring(0, 15)); }
-  display.setTextColor(TFT_YELLOW, TFT_BLACK); display.setCursor(3, replyToMessageId > 0 ? 120 : 112); display.print("> ");
-  display.setTextColor(TFT_WHITE, TFT_BLACK); printFont0Text(utf8Tail(draft, replyToMessageId > 0 ? 27 : 34));
+  else if (hint.length()) { display.setTextColor(hintColour, TFT_BLACK); display.setCursor(3, 109); display.print(hint.substring(0, 39)); }
+  display.setTextColor(TFT_YELLOW, TFT_BLACK); display.setCursor(3, twoLines ? 120 : 112); display.print("> ");
+  display.setTextColor(TFT_WHITE, TFT_BLACK); printFont0Text(utf8Tail(draft, twoLines ? 27 : 34));
   display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(198, 126); display.printf("%d/140", utf8CharacterCount(draft));
 }
 
@@ -2168,11 +2542,40 @@ void drawVolume() {
   display.setCursor(6, 116); display.print(uiText("LEFT/RIGHT CHANGE   OK BACK", "GAUCHE/DROITE CHANGER OK RETOUR"));
 }
 
+String utf8Head(const String &text, size_t maximumCharacters);
 void drawStatus() {
   auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader(uiText("STATUS", "ETAT")); display.setTextSize(1);
-  display.setTextColor(TFT_YELLOW, TFT_DARKGREEN); display.setCursor(78, 6); display.printf("%d/2", statusPage + 1);
+  display.setTextColor(TFT_YELLOW, TFT_DARKGREEN); display.setCursor(78, 6); display.printf("%d/3", statusPage + 1);
   display.setTextColor(TFT_WHITE, TFT_BLACK); display.setCursor(6, 29);
   if (statusPage == 0) {
+    // The link: which way messages go, and the exact step that failed, large enough to read out.
+    const LinkMode mode = linkMode();
+    display.setTextSize(2); display.setCursor(6, 25);
+    display.setTextColor(mode == LinkMode::Online ? TFT_GREEN : mode == LinkMode::Nearby ? TFT_YELLOW : TFT_ORANGE, TFT_BLACK);
+    display.print(mode == LinkMode::Online ? uiText("ONLINE", "EN LIGNE") : mode == LinkMode::Nearby ? uiText("NEARBY ONLY", "PROXIMITE SEULE")
+                  : mode == LinkMode::Offline ? uiText("OFFLINE", "HORS LIGNE") : uiText("STARTING", "DEMARRAGE"));
+    display.setCursor(6, 45); display.setTextColor(serverStage == ServerStage::Ok ? TFT_GREEN : serverStage == ServerStage::Unknown ? TFT_LIGHTGREY : TFT_RED, TFT_BLACK);
+    display.print(serverStageText());
+    display.setTextSize(1); display.setTextColor(TFT_WHITE, TFT_BLACK);
+    int y = 66;
+    auto line = [&](const String &text) { display.setCursor(6, y); display.print(text.substring(0, 38)); y += 10; };
+    if (mode == LinkMode::Nearby) line(uiText("TEXTS REACH NEARBY DEVICES ONLY", "TEXTES: APPAREILS PROCHES SEULEMENT"));
+    const String status = networkStatus.get();
+    if (WiFi.status() == WL_CONNECTED) line("WI-FI  " + utf8Head(currentSsid.get(), 18) + " " + String(wifiRssi) + " dBm");
+    else line(String("WI-FI  ") + (status == "ESPNOW ONLY" ? uiText("no saved network here", "aucun reseau connu ici")
+                                  : status == "JOIN FAILED" ? uiText("join failed (password?)", "echec (mot de passe?)") : status.c_str()));
+    const String detail = serverStageDetail.get();
+    if (serverStage == ServerStage::Auth || serverStage == ServerStage::Http) line(String("HTTP ") + serverStageStatus + "  " + detail);
+    else if (detail.length()) line(detail);
+    const uint32_t age = serverStageAt ? (millis() - serverStageAt) / 1000 : 0;
+    line(String(uiText("TRIED ", "ESSAI ")) + (serverStageAt ? String(age) + "s" : String("-")) + uiText("  CLOCK ", "  HEURE ") +
+         (clockFromNtp ? uiText("set", "ok") : uiText("not set", "inconnue")));
+    size_t waiting = 0, failed = 0;
+    xSemaphoreTake(stateMutex, portMAX_DELAY);
+    for (const auto &entry : outboxEntries) (entry.state == outbox::State::Failed ? failed : waiting)++;
+    xSemaphoreGive(stateMutex);
+    if (y <= 106) line(String(uiText("OUTBOX ", "ENVOI ")) + waiting + uiText(" waiting, ", " en attente, ") + failed + uiText(" failed", " refuses"));
+  } else if (statusPage == 1) {
     display.printf(frenchUi ? "APPAREIL  %s\n" : "NODE      %s\n", kDeviceName);
     display.printf("WIFI      %s\n", currentSsid.isEmpty() ? "offline" : currentSsid.get().c_str());
     display.printf(frenchUi ? "ETAT      %s\n" : "STATE     %s\n", networkStatus.get().c_str()); display.printf(frenchUi ? "HEURE     %s\n" : "TIME      %s\n", timeKnown ? uiText("known", "connue") : uiText("unknown", "inconnue"));
@@ -2971,23 +3374,77 @@ void flushFrenchDeadKey(String &target, size_t limit, bool byteLimit) {
   appendKeyboardText(target, "'", limit, byteLimit);
 }
 
+void showChatNotice(const char *english, const char *french) { chatNotice = uiText(english, french); chatNoticeAt = millis(); renderDirty = true; }
+
+// Broadcasts a typed message to devices in radio range. Nothing acknowledges a broadcast at the
+// radio level, so serviceNearbySends() repeats it until a nearby device answers with TextAck.
+bool broadcastNearbyText(const String &clientId, const String &body) {
+  if (!kEspNowEnabled || !meshReady || !espNowActive) return false;
+  static const uint8_t broadcast[] = {0xff,0xff,0xff,0xff,0xff,0xff};
+  EspNowPacket packet{}; packet.magic = kEspNowMagic; packet.type = static_cast<uint8_t>(EspNowType::Text); packet.sequence = ++espNowSequence;
+  strncpy(packet.senderId, kDeviceId, sizeof(packet.senderId) - 1); strncpy(packet.senderName, kDeviceName, sizeof(packet.senderName) - 1);
+  currentRoomId.copyTo(packet.roomId, sizeof(packet.roomId));
+  strncpy(packet.clientId, clientId.c_str(), sizeof(packet.clientId) - 1);
+  const size_t length = std::min<size_t>(body.length(), sizeof(packet.payload));
+  if (!encryptMeshPacket(packet, reinterpret_cast<const uint8_t *>(body.c_str()), length)) return false;
+  return esp_now_send(broadcast, reinterpret_cast<uint8_t *>(&packet), offsetof(EspNowPacket, payload) + packet.payloadLength) == ESP_OK;
+}
+
+void sendNearbyAck(const char *clientId) {
+  if (!kEspNowEnabled || !meshReady || !espNowActive) return;
+  static const uint8_t broadcast[] = {0xff,0xff,0xff,0xff,0xff,0xff};
+  EspNowPacket packet{}; packet.magic = kEspNowMagic; packet.type = static_cast<uint8_t>(EspNowType::TextAck); packet.sequence = ++espNowSequence;
+  strncpy(packet.senderId, kDeviceId, sizeof(packet.senderId) - 1); strncpy(packet.senderName, kDeviceName, sizeof(packet.senderName) - 1);
+  currentRoomId.copyTo(packet.roomId, sizeof(packet.roomId));
+  strncpy(packet.clientId, clientId, sizeof(packet.clientId) - 1);
+  const uint8_t marker = 1;
+  if (encryptMeshPacket(packet, &marker, 1)) esp_now_send(broadcast, reinterpret_cast<uint8_t *>(&packet), offsetof(EspNowPacket, payload) + packet.payloadLength);
+}
+
+void serviceNearbySends() {
+  if (chargingModeActive) return;
+  std::vector<String> acks;
+  xSemaphoreTake(stateMutex, portMAX_DELAY); acks.swap(pendingNearbyAcks); xSemaphoreGive(stateMutex);
+  for (const auto &clientId : acks) sendNearbyAck(clientId.c_str());
+  if (nearbySends.empty()) return;
+  const uint32_t now = millis();
+  struct Resend { String clientId, body; };
+  std::vector<Resend> resend;
+  xSemaphoreTake(stateMutex, portMAX_DELAY);
+  for (auto item = nearbySends.begin(); item != nearbySends.end();) {
+    if (item->heardBy || item->tries >= kNearbyTries) { item = nearbySends.erase(item); continue; }
+    if (outbox::due(now, item->nextAt)) {
+      auto message = std::find_if(messages.begin(), messages.end(), [&](const ChatMessage &m) { return m.clientId == item->clientId; });
+      if (message != messages.end()) resend.push_back({item->clientId, message->body});
+      item->tries++;
+      item->nextAt = now + (item->tries >= 6 ? 14000 : 1000u << (item->tries - 1));
+    }
+    ++item;
+  }
+  xSemaphoreGive(stateMutex);
+  for (const auto &item : resend) broadcastNearbyText(item.clientId, item.body);
+}
+
 void sendDraft() {
   flushFrenchDeadKey(draft, kMessageLimit, false);
   draft.trim(); if (draft.isEmpty()) return;
   ChatMessage message; message.roomId = currentRoomId; message.clientId = nextClientId(); message.authorId = kDeviceId; message.authorName = kDeviceName;
   message.body = draft; message.createdAt = time(nullptr) * 1000LL; message.queued = true; message.state = "queued";
   message.replyToId = replyToMessageId; message.replyAuthor = replyToAuthor; message.replyBody = replyToBody;
-  xSemaphoreTake(stateMutex, portMAX_DELAY); messages.push_back(message); trimHistory(); saveHistoryLocked(); xSemaphoreGive(stateMutex);
-  if (kEspNowEnabled && meshReady) {
-    static const uint8_t broadcast[] = {0xff,0xff,0xff,0xff,0xff,0xff};
-    EspNowPacket packet{}; packet.magic = kEspNowMagic; packet.type = static_cast<uint8_t>(EspNowType::Text); packet.sequence = ++espNowSequence;
-    strncpy(packet.senderId, kDeviceId, sizeof(packet.senderId) - 1); strncpy(packet.senderName, kDeviceName, sizeof(packet.senderName) - 1);
-    currentRoomId.copyTo(packet.roomId, sizeof(packet.roomId));
-    strncpy(packet.clientId, message.clientId.c_str(), sizeof(packet.clientId) - 1);
-    const size_t length = std::min<size_t>(message.body.length(), sizeof(packet.payload));
-    if (encryptMeshPacket(packet, reinterpret_cast<const uint8_t *>(message.body.c_str()), length))
-      esp_now_send(broadcast, reinterpret_cast<uint8_t *>(&packet), offsetof(EspNowPacket, payload) + packet.payloadLength);
+  outbox::Entry entry; entry.clientId = message.clientId.c_str(); entry.roomId = message.roomId.c_str(); entry.body = message.body.c_str();
+  entry.replyToId = message.replyToId; entry.createdAt = message.createdAt; entry.nextAttemptAt = millis();
+  xSemaphoreTake(stateMutex, portMAX_DELAY);
+  // A full outbox refuses the message and says so; the text stays in the composer.
+  const bool full = outboxEntries.size() >= outbox::kMaxEntries;
+  if (!full) {
+    outboxEntries.push_back(entry); saveOutboxLocked();
+    messages.push_back(message); trimHistory(); saveHistoryLocked();
+    nearbySends.push_back({message.clientId, millis(), millis(), 0, 0});
   }
+  xSemaphoreGive(stateMutex);
+  if (full) { showChatNotice("OUTBOX FULL: 16 NOT SENT YET", "BOITE PLEINE: 16 EN ATTENTE"); playDeniedTone(); return; }
+  serviceNearbySends();
+  syncOverride = true;
   draft = ""; historyOffset = 0; replyToMessageId = 0; replyToAuthor = ""; replyToBody = ""; renderDirty = true;
 }
 
@@ -3576,7 +4033,7 @@ void handleKeyboard() {
     renderDirty = true; return;
   }
   if (screenMode == ScreenMode::Status) {
-    if (goLeft || goRight) { statusPage = 1 - statusPage; playNextTone(); }
+    if (goLeft || goRight) { statusPage = (statusPage + (goRight ? 1 : 2)) % 3; playNextTone(); }
     else if (keys.enter) { leaveSettingsScreen(); playNextTone(); }
     renderDirty = true; return;
   }
@@ -3601,7 +4058,7 @@ void handleKeyboard() {
   }
   if (goUp) {
     xSemaphoreTake(stateMutex, portMAX_DELAY);
-    const size_t maximum = messages.size() > 5 ? messages.size() - 5 : 0;
+    const size_t maximum = messages.size();
     historyOffset = std::min(maximum, historyOffset + 1);
     xSemaphoreGive(stateMutex); playNextTone(); renderDirty = true; return;
   }
@@ -3611,9 +4068,13 @@ void handleKeyboard() {
   playNextTone();
   if (keys.enter) {
     if (draft.isEmpty() && historyOffset > 0) {
-      xSemaphoreTake(stateMutex, portMAX_DELAY); const int selected=static_cast<int>(messages.size())-static_cast<int>(historyOffset)-1;
-      if(selected>=0){replyToMessageId=messages[selected].id; replyToAuthor=messages[selected].authorName; replyToBody=messages[selected].body; historyOffset=0;}
-      xSemaphoreGive(stateMutex); renderDirty=true; return;
+      xSemaphoreTake(stateMutex, portMAX_DELAY); const int selected=static_cast<int>(messages.size())-static_cast<int>(historyOffset);
+      String retryId;
+      if (selected >= 0 && messages[selected].authorId == kDeviceId && messages[selected].state == "failed") retryId = messages[selected].clientId;
+      else if(selected>=0){replyToMessageId=messages[selected].id; replyToAuthor=messages[selected].authorName; replyToBody=messages[selected].body; historyOffset=0;}
+      xSemaphoreGive(stateMutex);
+      if (retryId.length()) { retryFailedMessage(retryId); historyOffset = 0; }
+      renderDirty=true; return;
     }
     sendDraft(); return;
   }
@@ -3652,6 +4113,7 @@ void setup() {
   // Cardputer ADV's explicit SD bus keeps GPIO11 free for the TCA8418
   // keyboard interrupt. Default ESP32-S3 SPI pins would disable all keys.
   SPI.begin(kSdSckPin, kSdMisoPin, kSdMosiPin, kSdCsPin);
+  loadOutboxLocked();
   sdReady = SD.begin(kSdCsPin, SPI, 25000000); loadHistory();
   Serial.println("setup: card done");
   keyboardReady = M5Cardputer.In_I2C.scanID(0x34, 400000);
@@ -3731,7 +4193,9 @@ static void loopBody() {
   if (screenMode != ScreenMode::VoiceMessages && screenMode != ScreenMode::Walkie && spacePttHeld) { spacePttHeld = false; spaceReleaseStartedAt = 0; stopVoiceRecording(); }
   if (kEspNowEnabled && millis() - lastEspNowBeaconAt >= kEspNowBeaconMs) sendEspNowBeacon();
   if (homeBumpAt) { if (millis() - homeBumpAt >= kHomeBumpMs) homeBumpAt = 0; renderDirty = true; }
-  if (screenMode == ScreenMode::Status && statusPage == 1 && lastSyncError != "NONE" && millis() - lastRenderAt >= 1000) renderDirty = true;
+  if (screenMode == ScreenMode::Status && millis() - lastRenderAt >= 1000) renderDirty = true;
+  if (screenMode == ScreenMode::Chat && chatNoticeAt && millis() - chatNoticeAt > 6000) { chatNoticeAt = 0; renderDirty = true; }
+  serviceNearbySends();
   if (screenMode == ScreenMode::System && millis() - lastRenderAt >= 1000) renderDirty = true;
   if (renderDirty && millis() - lastRenderAt >= kRenderIntervalMs) render();
   delay(2);

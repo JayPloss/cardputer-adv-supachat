@@ -183,7 +183,23 @@ At boot, the MVP handheld:
 5. Sends queued messages, long-polls for new messages and receipts, and retains the latest 100 locally.
 6. Contains a 10 p.m.–6 a.m. Eastern blackout implementation with a manual one-sync override. Enforcement is currently suspended indefinitely by `kBlackoutEnabled = false`; composing and the keypress melody remain available if it is re-enabled later.
 
-The firmware enables WiFi power saving and keeps network work on a separate FreeRTOS task so typing, display refresh, and melody playback stay responsive. Its Networks menu scans visible SSIDs, shows passwords during entry by design, joins the selected network, and saves up to 12 profiles in NVS. The provisioning tool can also import saved Windows profiles without printing or committing their keys.
+Since `v0.57` Wi-Fi power saving (modem sleep) is on only while the server answers and the walkie is closed: modem sleep leaves the radio deaf between the access point's beacons, and ESP-NOW packets arriving then are lost. Network work stays on a separate FreeRTOS task so typing, display refresh, and melody playback stay responsive. Its Networks menu scans visible SSIDs, shows passwords during entry by design, joins the selected network, and saves up to 12 profiles in NVS. The provisioning tool can also import saved Windows profiles without printing or committing their keys.
+
+### Messages: the outbox, the marks, and ONLINE or NEARBY
+
+Since `v0.57`. Every typed message goes into an outbox kept in NVS (`firmware/include/outbox.h`, up to 16), whatever room it belongs to, and leaves it only when the server answers that it stored it. A missing answer (no Wi-Fi, DNS, a blocked port, TLS, a 5xx) is retried with a growing wait from 5 seconds to 5 minutes. A refusal (400, 401, 403, 409) marks the message FAILED in red; it stays until the person selects it (Fn+Up) and presses Enter. A full outbox refuses the next message and says so, leaving the text in the composer. Unsent messages are never pushed off the 40-message list, and messages left unsent on the card by older firmware join the outbox when their room loads.
+
+Each message of this device's carries a mark at the right of its last line: a small grey clock while it waits, a yellow tick once a nearby device has acknowledged its ESP-NOW copy, a grey tick on the server, two grey ticks delivered to another device, two cyan ticks read.
+
+The header shows how messages travel right now: **ONLINE** (white) when the server answered in the last two minutes, **NEARBY** (yellow) when only ESP-NOW is left, so texts reach only devices in radio range on the same Wi-Fi channel, and **OFFLINE** when there is neither (no mesh key). French: EN LIGNE, PROXIMITE, HORS LIGNE.
+
+Nearby copies are broadcast at once and repeated at 1, 2, 4, 8, 16 and 30 seconds until a nearby device answers with an acknowledgement (ESP-NOW type 11). Firmware before `v0.57` neither sends nor understands acknowledgements, and ignores type 11.
+
+### Connecting to the server, and the STATUS screen
+
+Connections check supachat.net's certificate chain against ISRG Root X1 (the chain is leaf, Let's Encrypt YE2, ISRG Root YE, cross-signed by X2, cross-signed by X1; every signature checked with mbedTLS 2.28 on the PC, 2026-11-07). If that fails, the leaf pin `kTlsFingerprint` is tried, so a device whose clock isn't set yet still connects. Until `v0.57` the pin was the only check, and Caddy renews the certificate about every 60 days: `v0.48` pinned the August certificate, and every connection it made after the renewal of 2026-10-09 failed.
+
+STATUS (page 1 of 3) shows, large: the mode (ONLINE, NEARBY ONLY, OFFLINE), then the step that failed: NO WI-FI, DNS FAILED, PORT 443 BLOCKED, TLS FAILED, CERT REJECTED, LOGIN REFUSED (401), SERVER HTTP n, or SERVER OK. Under it: the Wi-Fi network and signal, the detail (mbedTLS's own words, the address tried, the HTTP status), how long ago, whether the clock is set, and how many messages wait or failed. Pages 2 and 3 are the device and last-sync pages from before.
 
 ### SupaChat's menu
 
@@ -290,8 +306,13 @@ Cardputer mic -> 20 ms PCM blocks -> authenticated WSS -> Papa/Cardputer speaker
                                       |
                                       +-> five-second stored voice message
 
-No usable WSS -> AES-256-GCM packet -> ESP-NOW broadcast -> nearby Cardputer
+No usable WSS -> level control -> IMA ADPCM, 30 ms a packet -> AES-256-GCM -> ESP-NOW broadcast, each packet sent twice
+               -> nearby Cardputer: 90 ms jitter buffer, lost frames covered -> speaker, 60 ms blocks
 ```
+
+Since `v0.57` (`firmware/include/voice_codec.h`, tested by `firmware/tools/messaging-test.cpp`). Before, nearby audio was raw PCM in 71-sample pieces, 150 broadcast packets a second with no acknowledgement, each played the moment it landed with about 18 ms queued at the speaker: every lost packet and every main-loop stall longer than 18 ms was a hole, which is the rough, choppy sound. Now one packet carries 30 ms (128 bytes of ADPCM, 26 dB SNR on a test signal), each goes out again with the next, the receiver waits 90 ms before playing, puts frames back in order, and covers a missing frame by repeating the last one at half level, twice, then silence. The first talker keeps the channel until they stop. Walkie-socket audio (and raw audio from older firmware) waits for a 240 ms cushion. The microphone gain went from 48 to M5's default 16, and a level control (DC blocker, slow gain up to 6x, fast gain down, limiter at 30000) follows it.
+
+What software can't change: the Cardputer's small chip antenna and the hand around it set the range; ESP-NOW broadcasts go out at 1 Mbit/s, the most robust 2.4 GHz rate, without retries; devices on different Wi-Fi channels (one joined to a network, one not) can't hear each other at all; the speaker is small and the audio 8 kHz. ESP-NOW's long-range mode (250 or 500 kbit/s) could reach further, but only between devices that all have it on, and nothing here has measured it; it is not enabled.
 
 On the Cardputer, open **WALKIE** from the large menu and hold the large Space key to talk. Release to stop; Enter replays the locally retained clip. Left returns to the menu, and the rear button remains an optional back shortcut. The screen distinguishes `HETZNER`, `ESP-NOW NEARBY`, and `ESP-NOW WAITING`. Speaker volume and mute use the existing Volume menu.
 
@@ -306,7 +327,7 @@ Transport rules:
 - ESP-NOW peers must be on the same WiFi radio channel. Cross-channel discovery is future work.
 - Speaker and microphone never run simultaneously because the Cardputer audio hardware requires explicit handoff.
 
-Codec2, SD-backed longer memos, packet-loss concealment, and measured battery tuning are the next audio iterations—not prerequisites for validating this slice.
+Nothing here has been heard on a device yet: the codec, jitter buffer, concealment and level control run only in the PC test, and ESP-NOW isn't modelled by the runtime emulator.
 
 The repeatable software, provisioning, hosted-PTT, nearby-radio, audio, and viewport gates are recorded in [`docs/walkie-acceptance.md`](docs/walkie-acceptance.md).
 

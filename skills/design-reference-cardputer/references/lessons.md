@@ -37,3 +37,8 @@ Each item says where it came from. Add to this list; don't delete from it unless
 
 - **No PSRAM.** Lists and strings on a screen cost real heap beside the player: a 200-song list ran out of memory, and opening a card folder now stops playback for that reason (commit "whole library on the card").
 - **Keep drawing off the key path.** Rendering is throttled to about 20 fps so typing and tones stay responsive (README). A long flourish must be stepped by time in the loop, never with `delay()`.
+
+## Status marks (v0.57)
+
+- **Three dots after a message read as text cut short.** The first "sending" mark was three grey dots at the right of the line; on the runtime emulator's shot, "first..." looked truncated. It is a small drawn clock now. Marks are drawn with lines, not a font: Font0 has no check mark that reads at x1.5 (runtime emulator shot `outbox-waiting.png`, 2026-11-07).
+- **The header's network word is the travel mode, not the last status string.** Raw strings like `SYNC IO -5` and `ESPNOW ONL` told nobody whether a message would reach the server. The header now says ONLINE, NEARBY or OFFLINE, and STATUS page 1 gives the failed step at x2 so it can be read out over the phone (Jay, 2026-11-07: "so the kids or Jay can read it off").

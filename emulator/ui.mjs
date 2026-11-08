@@ -26,11 +26,13 @@ function voiceMessages(){header('VOICE MESSAGES');if(s.recording){text('RECORDIN
 function walkie(){header('WALKIE');if(s.recording){text('TRANSMITTING',12,32,C.red,16);text(`${(s.recordedMs/1000).toFixed(1)}s / 30s`,12,62)}else{text('READY TO TALK',31,39,C.green,16);text(s.walkie.slice(0,35),7,78,C.yellow)}text('HOLD SPACE: PUSH TO TALK',6,111,C.grey);text('RELEASE: STOP       MENU BACK',6,123,C.grey)}
 function volume(){header('VOLUME');text(['MUTE','LOW','MEDIUM','HIGH','MAX'][s.volume],72,39,C.yellow,16);for(let i=0;i<5;i++)rect(20+i*42,72,30,20,i<=s.volume&&s.volume?C.green:C.dark,4);text('LEFT/RIGHT CHANGE   OK BACK',6,116,C.grey)}
 function status(){
-  header('STATUS');text(`${s.statusPage+1}/2`,78,6,C.yellow);
-  const rows=s.statusPage===0
+  header('STATUS');text(`${s.statusPage+1}/3`,78,6,C.yellow);
+  if(s.statusPage===0){const online=s.network==='SYNCED'&&!s.localOnly;text(online?'ONLINE':'NEARBY ONLY',6,25,online?C.green:C.yellow,16);text(online?'SERVER OK':'NOT TRIED YET',6,45,online?C.green:C.grey,16);
+    [online?'':'TEXTS REACH NEARBY DEVICES ONLY',`WI-FI  ${s.ssid||'none'}`,'TRIED 0s  CLOCK set','OUTBOX 0 waiting, 0 failed'].filter(Boolean).forEach((t,i)=>text(t,6,66+i*10));text('LEFT/RIGHT PAGE  OK BACK',6,123,C.grey);return}
+  const rows=s.statusPage===1
     ?[['NODE',s.name],['WIFI',s.ssid||'offline'],['STATE',s.network],['TIME','known'],['BATTERY',`${s.batteryLevel}%  ${s.batteryVoltageMv} mV`],['POWER',s.externalPowerDetected?'cable detected':'not detected'],['SD/KEY','ready / ready'],['HTTP/HEAP',`${s.http} / ${s.heap}`]]
     :[['ERROR',s.lastSyncError],['DETAIL',s.lastSyncError==='NONE'?'no sync failures':s.lastSyncDetail],['HTTP/BYTES',`${s.lastSyncErrorHttp} / ${s.lastSyncResponseBytes}`],['HEAP',s.lastSyncErrorHeap],['ROOM',s.lastSyncErrorRoom||'-'],['PHASE',s.lastSyncErrorPhase],['AGE',`${s.lastSyncErrorAgeSeconds}s`]];
-  rows.forEach((r,i)=>text(`${r[0].padEnd(s.statusPage?11:10)}${String(r[1]).slice(0,25)}`,6,29+i*(s.statusPage?12:10)));
+  rows.forEach((r,i)=>text(`${r[0].padEnd(s.statusPage===2?11:10)}${String(r[1]).slice(0,25)}`,6,29+i*(s.statusPage===2?12:10)));
   text('LEFT/RIGHT PAGE  OK BACK',6,123,C.grey)
 }
 function networkList(){header('NETWORKS');networks.forEach((n,i)=>{const y=23+i*16,sel=i===s.networkSelection;rect(3,y,234,14,sel?C.green:C.black);text(`${n.open?' ':'*'} ${n.ssid.slice(0,22).padEnd(22)} ${n.rssi}`,6,y+3,sel?C.black:C.white)});text('ARROWS  OK JOIN  LEFT BACK',6,121,C.grey)}
