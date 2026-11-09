@@ -35,6 +35,12 @@
 - `firmware/include/os.h` is the layer keeping apps within their RAM: budgets, one secure connection
   at a time, containment, the boot phase. `docs/heap-budget.md` has the measurements behind it.
 
+## Core libraries
+
+- Every library and the platform in `firmware/platformio.ini` is pinned to an exact version: no `^`, `~`, `>=` or bare names. A device build never pulls in new library code on its own.
+- Updating one is a deliberate migration: read its release notes, change our code to match, pass the emulators and the upload gate, then flash every device in the same round, so the family never runs on mixed libraries. Record it in the changelog.
+- (Origin 2026-11-08: unpinned, M5GFX and M5Unified 0.3.0 came into the builds for Julien, Mama, Naomie and Andrew on Nov 7. 0.3.0 makes rotation 0 the upright position, so our `setRotation(1)` turned Julien's screen; Papa's build had stayed on 0.2.36.)
+
 ## Screens
 
 - Before designing or changing a screen, menu, label, font size, key behaviour or UI sound, load `skills/design-reference-cardputer/SKILL.md`. Its `references/lessons.md` holds the mistakes already made, and takes new ones.
