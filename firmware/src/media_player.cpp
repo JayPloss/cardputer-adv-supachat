@@ -230,7 +230,16 @@ void playSource(const Command &command) {
 void playerTask(void *) {
   os::bindTask(os::Owner::Music);
   for (;;) {
-    if (endRequested) { endRequested = false; taskHandle = nullptr; vTaskDelete(nullptr); }
+    if (endRequested) {
+      // The main loop asks for the end whenever nothing plays, so a play can arrive just after it:
+      // a waiting command wins, and the handle goes under the same lock begin() reads it with.
+      xSemaphoreTake(commandMutex, portMAX_DELAY);
+      const bool leave = endRequested && !hasPending;
+      endRequested = false;
+      if (leave) taskHandle = nullptr;
+      xSemaphoreGive(commandMutex);
+      if (leave) vTaskDelete(nullptr);
+    }
     if (!hasPending) {
       if (stopRequested) {
         stopRequested = false;
@@ -266,15 +275,24 @@ void playerTask(void *) {
 }  // namespace
 
 bool begin() {
-  // Wanted again before it had ended: it just carries on.
-  if (taskHandle) { endRequested = false; return true; }
   if (!commandMutex) commandMutex = xSemaphoreCreateMutex();
+  xSemaphoreTake(commandMutex, portMAX_DELAY);
+  bool running = true;
+  // Wanted again before it had ended: it just carries on.
+  if (taskHandle) endRequested = false;
   // Core 0 is shared with the Wi-Fi stack; this outranks chat sync so a TLS
   // handshake there cannot hold up decoding.
-  return xTaskCreatePinnedToCore(playerTask, "media", 8192, nullptr, 3, &taskHandle, 0) == pdPASS;
+  else running = xTaskCreatePinnedToCore(playerTask, "media", 8192, nullptr, 3, &taskHandle, 0) == pdPASS;
+  xSemaphoreGive(commandMutex);
+  return running;
 }
 
-void end() { if (taskHandle) endRequested = true; }
+void end() {
+  if (!commandMutex) return;
+  xSemaphoreTake(commandMutex, portMAX_DELAY);
+  if (taskHandle) endRequested = true;
+  xSemaphoreGive(commandMutex);
+}
 
 void play(const String &url, uint32_t startSeconds) {
   xSemaphoreTake(commandMutex, portMAX_DELAY);
