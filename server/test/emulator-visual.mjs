@@ -83,10 +83,10 @@ await openMenu(6); await page.evaluate(()=>{window.__supachatState.offerPack('Pa
 await page.reload(); await page.getByLabel('Sync fault injection').selectOption('io');
 assert.equal((await state()).network, 'SYNC IO -1'); await shot('chat-sync-io');
 await page.goto(`${base}?language=fr`);
-await page.getByRole('button', { name: 'SHIFT + / = ?' }).click();
+// The French layout (CSA): / is é, [ then e is ê, ' is è, \ is à, Shift+6 is ?.
 const entry = page.getByLabel('Printable text');
-await entry.fill("'a'e"); await entry.dispatchEvent('input');
-assert.equal((await state()).draft, 'éàè');
+await entry.fill("/[e'\\^"); await entry.dispatchEvent('input');
+assert.equal((await state()).draft, 'éêèà?');
 await shot('chat-french-accents');
 await browser.close();
 console.log('supachat_emulator_visual=PASS');

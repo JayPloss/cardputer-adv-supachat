@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import tls from 'node:tls';
-import {interpretRawKeys,navPositions} from './state.mjs';
+import {interpretRawKeys,navPositions,frenchKeys,frenchCompositions} from './state.mjs';
 
 const firmware = fs.readFileSync(new URL('../firmware/src/main.cpp', import.meta.url), 'utf8');
 const serverSource = fs.readFileSync(new URL('../server/src/server.mjs', import.meta.url), 'utf8');
@@ -81,20 +81,33 @@ assert.deepEqual(interpretRawKeys('menu',{word:['/'],keyList:rightKey}),{kind:'n
   'physical arrows must be primary on navigation screens');
 assert.deepEqual(interpretRawKeys('menu',{fn:true,word:['/'],keyList:rightKey}),{kind:'ignored'},
   'navigation screens use the primary unmodified arrow layer');
-assert.match(firmware, /if \(character == '\?'\) \{ appendKeyboardText\(target, u8"é"/,
-  'French Shift+/ must emit é directly');
-assert.match(firmware, /if \(character == '\\'\'\) \{ frenchGravePending = true; return; \}/,
-  'French apostrophe must wait for its composition key');
-assert.match(firmware, /character == 'a'[\s\S]*u8"à"[\s\S]*character == 'e'[\s\S]*u8"è"/,
-  'French dead-key composition must emit à and è');
+// The French layout lives in one table, and the browser mock's copy of it must match it.
+const frenchHeader = fs.readFileSync(new URL('../firmware/include/french_keyboard.h', import.meta.url), 'utf8');
+const level = String.raw`(FRKB_N|FRKB_D\(\w+\)|FRKB_T\((?:u8)?"(?:\\.|[^"\\])*"\))`;
+const keyRow = new RegExp(String.raw`\{(\d+), (\d+), '(\\.|[^'\\])', '(\\.|[^'\\])', ` + [level, level, level, level].join(', ') + String.raw`\}`, 'g');
+const unescapeC = text => text.replace(/\\(.)/g, '$1');
+const parseLevel = text => text === 'FRKB_N' ? null : text.startsWith('FRKB_D') ? {dead: text.slice(7, -1)} : unescapeC(text.match(/^FRKB_T\((?:u8)?"(.*)"\)$/)[1]);
+const headerKeys = [...frenchHeader.matchAll(keyRow)].map(m => [Number(m[1]), Number(m[2]), unescapeC(m[3]), unescapeC(m[4]), ...m.slice(5, 9).map(parseLevel)]);
+assert.equal(headerKeys.length, 47, 'every typing key of the Cardputer is in the French table');
+assert.deepEqual(frenchKeys, headerKeys, 'emulator/state.mjs frenchKeys must match firmware/include/french_keyboard.h');
+const headerCompositions = {};
+for (const m of frenchHeader.matchAll(/\{Dead::(\w+), '(.)', (?:u8)?"([^"]*)"\}/g)) (headerCompositions[m[1]] ??= {})[m[2]] = m[3];
+assert.deepEqual(frenchCompositions, headerCompositions, 'emulator/state.mjs frenchCompositions must match the firmware');
+assert.match(firmware, /if \(frenchUi\) \{ typeFrenchKeys\(keys, draft, kMessageLimit\)/, 'French chat must type through the layout table');
+assert.match(firmware, /A password types exactly what the keycaps show/, 'a Wi-Fi password types its keycaps in both languages');
 assert.match(firmware, /textEntryScreen[\s\S]*textEntryScreen \? keys\.fn : !keys\.fn/,
   'arrows must require Fn during text entry and remain primary elsewhere');
 const loopBody=firmware.slice(firmware.indexOf('void loop()'),firmware.indexOf('delay(2);',firmware.indexOf('void loop()')));
 assert.doesNotMatch(loopBody,/Keyboard\.isChange/,'loop must not consume the keyboard edge before handleKeyboard');
 const cp437 = new Map([[0xA9,0x82],[0xA8,0x8A],[0xA0,0x85]]);
 assert.deepEqual([...Buffer.from('éèà')].reduce((out,byte,index,input)=>{if(byte===0xC3)out.push(cp437.get(input[index+1]));return out},[]),[0x82,0x8A,0x85]);
-assert.match(firmware, /0xA9[\s\S]*0x82[\s\S]*0xA8[\s\S]*0x8A[\s\S]*0xA0[\s\S]*0x85/,
-  'UTF-8 accents must map to the matching CP437 bitmap slots');
+const c3Slots = [...firmware.match(/kC3\[64\] = \{([\s\S]*?)\};/)[1].replace(/\/\/[^\n]*/g, '').matchAll(/0x[0-9A-Fa-f]+|'.'|\b0\b/g)]
+  .map(([token]) => token.startsWith("'") ? token.charCodeAt(1) : Number(token));
+assert.equal(c3Slots.length, 64, 'the CP437 table covers U+00C0 to U+00FF');
+const cp437Of = letter => c3Slots[Buffer.from(letter)[1] - 0x80];
+for (const [letter, slot] of Object.entries({'é':0x82,'è':0x8A,'à':0x85,'ê':0x88,'â':0x83,'ç':0x87,'ù':0x97,'û':0x96,'ô':0x93,'î':0x8C,'ï':0x8B,'ë':0x89,'ü':0x81,'É':0x90,'Ç':0x80}))
+  assert.equal(cp437Of(letter), slot, `${letter} must map to its CP437 bitmap slot`);
+assert.match(firmware, /second == 0xAB \? 0xAE : second == 0xBB \? 0xAF/, '« and » must map to CP437 0xAE and 0xAF');
 assert.match(firmware, /UTF8_SWITCH, false[\s\S]*cp437\(true\)[\s\S]*print\(encoded\)[\s\S]*UTF8_SWITCH, true/,
   'Font0 accent output must bypass Unicode-to-wrong-slot rendering');
 const fontBytes = [...installedGlcdFont.match(/font\[\].*?= \{([\s\S]*?)\};/)[1].matchAll(/0x([0-9A-Fa-f]{2})/g)].map(match=>Number.parseInt(match[1],16));

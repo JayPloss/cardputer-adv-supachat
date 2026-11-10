@@ -6,6 +6,8 @@ Each item says where it came from. Add to this list; don't delete from it unless
 
 - **The arrows are not arrow keys.** They share `;` `.` `,` `/`. On a text entry screen they type punctuation and need Fn to navigate; on a navigation screen they navigate without Fn, and Fn stops them. This took two commits and a change of mind to settle ("Fix contextual arrows and French glyph rendering", "fix physical menu navigation"); the code and `emulator/test-flow.mjs` hold the current rule. Every new screen must be listed correctly in `textEntryScreen` in `main.cpp`.
 - **The key that dismisses the splash must not reach the next screen.** Boot and charging mode have an input quarantine (`docs/firmware-fixes-backlog.md`, item 1). A new full-screen transition that consumes a held key needs the same thought.
+- **A hint on a text entry screen can't name an arrow as the way out.** The Wi-Fi password screen said LEFT CANCEL, but Left without Fn types a comma there (Jay, 2026-11-10). Text screens name the rear button, MENU; a new text screen's hints are checked against its key handler, not against the navigation screens' wording.
+- **The French layout is a table, read by key position.** v0.44 to v0.57 remapped Shift+/ to é, so ? could not be typed in French at all (Jay, 2026-11-10). Chat now types CSA from `french_keyboard.h`; its host test fails if any required character or printable ASCII becomes unreachable, and the TOUCHES page is generated from it. Add keys there, never as one-off cases in `main.cpp`.
 - **Back has two routes.** The rear button and the top-left key both go back one level (Fn + top-left while typing). A screen reachable from two places must go back to where it came from.
 
 ## Sound
@@ -16,6 +18,7 @@ Each item says where it came from. Add to this list; don't delete from it unless
 
 - **`Font2` has no accents.** French came out wrong until chat moved to `Font0` (commit "Fix contextual arrows and French glyph rendering"). Check any new font with the specimen: an ASCII font can report that it has a letter and still draw the wrong one.
 - **`Font0` holds CP437, not UTF-8.** Text that can hold accents must go through `printFont0Text`. A plain `print` draws garbage for anything people typed or names from the server.
+- **Font0 has no capital À Â È Ê Ë Î Ï Ô Ù Û.** CP437 holds only É and Ç among French capitals; `font0Cp437Text` draws the others as the plain capital (v0.58).
 - **Cut text by character, not by byte.** `utf8Head` and `utf8Tail` exist because `substring` can split an accent in half.
 - **Non-integer scales are uneven.** `Font0` x1.5 (chat) gives letters with strokes of different widths, and `ç` is hard to read at that size. See `fonts.md`.
 - **Passwords are shown in full on purpose** (`verify-cardputer-ui/references/screen-budget.md`): a tiny keyboard makes blind typing useless.
@@ -30,6 +33,8 @@ Each item says where it came from. Add to this list; don't delete from it unless
 
 - **Font0 x4 for a number read across a room.** The clock apps' countdowns are Font0 x4 (28 px capitals): "7:00 AM" is 168 px, "99:59" 120 px. Status words under them are x2 and key hints x1 (`clock_apps` commit, 2026-11-07).
 - **An overlay on the header is drawn last.** The screen-time warning first went in `drawHeader`, and chat then drew its room names over it ("Family" on top of "SCREEN: 5 MIN LEFT", runtime emulator shot, 2026-11-07). It now draws after the whole screen, in `render`.
+
+- **Typed digits are a draft until confirmed.** v0.58's first alarm list set the alarm on every digit that made a time, so 7 over 7:00 AM showed 12:07 AM at once (Jay, 2026-11-10). The time now shows as typed, HH:MM from 00:00, says what Enter would set, and changes nothing until confirmed.
 
 ## Memory and time
 

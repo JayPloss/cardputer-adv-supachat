@@ -158,10 +158,33 @@ struct Alarms {
     }
     return true;
   }
-  // Typed digits push in from the right, as 24-hour HHMM; the alarm takes the time whenever the
-  // digits so far make one (0, 7, 3, 0 sets 0:07, skips 0:73, then sets 7:30).
-  static uint16_t pushDigit(uint16_t typed, int digit) { return static_cast<uint16_t>((typed % 1000) * 10 + digit); }
   static bool isTime(uint16_t typed) { return typed / 100 <= 23 && typed % 100 <= 59; }
+};
+
+// An alarm time being typed. Digits push in from the right, as on a microwave, from 00:00: 7 is
+// 00:07, then 3 is 00:73, then 0 is 07:30. It is 24-hour HHMM in both languages. Nothing reaches
+// the alarm until the digits make a time and are confirmed (the fourth digit, Enter, or moving
+// off the time); Del takes back the last digit.
+struct TimeEntry {
+  uint16_t digits = 0;
+  uint8_t count = 0;  // 0: not typing.
+
+  bool active() const { return count > 0; }
+  bool full() const { return count >= 4; }
+  bool valid() const { return active() && Alarms::isTime(digits); }
+  uint8_t hour() const { return static_cast<uint8_t>(digits / 100); }
+  uint8_t minute() const { return static_cast<uint8_t>(digits % 100); }
+  void push(int digit) {
+    digits = static_cast<uint16_t>((digits % 1000) * 10 + digit);
+    if (count < 4) count++;
+  }
+  bool undo() {
+    if (!count) return false;
+    digits /= 10; count--;
+    if (!count) digits = 0;
+    return true;
+  }
+  void clear() { digits = 0; count = 0; }
 };
 
 // The stopwatch.

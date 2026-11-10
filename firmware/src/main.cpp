@@ -6,6 +6,7 @@
 #include "changelog.h"
 #include "clock_apps.h"
 #include "fox_finding.h"
+#include "french_keyboard.h"
 #include "outbox.h"
 #include "voice_codec.h"
 #include <WebSocketsClient.h>
@@ -270,7 +271,7 @@ struct ListsLock {
   ~ListsLock() { xSemaphoreGive(sharedListsMutex); }
 };
 
-enum class ScreenMode { Chat, Menu, Rooms, Volume, Language, EmojiRecipes, Changelog, VoiceMessages, Walkie, Status, Networks, NetworkPassword, ChargingConfirm, Charging, FoxFinding, Home, Library, LibrarySearch, NowPlaying, Remote, System, Timer, Alarm, ScreenTime, Stopwatch };
+enum class ScreenMode { Chat, Menu, Rooms, Volume, Language, EmojiRecipes, Changelog, VoiceMessages, Walkie, Status, Networks, NetworkPassword, ChargingConfirm, Charging, FoxFinding, Home, Library, LibrarySearch, NowPlaying, Remote, System, Timer, Alarm, ScreenTime, Stopwatch, KeyHelp };
 
 Preferences preferences;
 M5Canvas uiCanvas(&M5Cardputer.Display);
@@ -298,7 +299,8 @@ SharedText<32> walkieSpeaker;
 SharedText<33> currentSsid;
 String selectedSsid;
 String networkPassword;
-bool frenchGravePending = false;
+frkb::Typist frenchTypist;  // The French layout's pending dead key, in chat.
+int keyHelpPage = 0;
 String voiceClientId;
 ScreenMode screenMode = ScreenMode::Home;
 bool sdReady = false;
@@ -481,7 +483,7 @@ clockapps::Countdown timerCountdown;
 uint16_t timerTyped = 0;
 clockapps::ScreenTime screenTime;
 clockapps::Alarms alarms;
-uint16_t alarmTyped = 0;
+clockapps::TimeEntry alarmTyped;  // The time being typed on the selected row.
 // The alarm list's cursor: a row (an alarm, or the last row that adds one) and a column on it.
 enum class AlarmColumn : uint8_t { Time, Weekdays, Weekends };
 uint8_t alarmRow = 0;
@@ -2465,6 +2467,9 @@ void drawChat() {
   else if (hint.length()) { display.setTextColor(hintColour, TFT_BLACK); display.setCursor(3, 109); display.print(hint.substring(0, 39)); }
   display.setTextColor(TFT_YELLOW, TFT_BLACK); display.setCursor(3, twoLines ? 120 : 112); display.print("> ");
   display.setTextColor(TFT_WHITE, TFT_BLACK); printFont0Text(utf8Tail(draft, twoLines ? 27 : 34));
+  // A dead key waiting for its letter shows as its accent, in yellow; an empty French composer says where the keys are.
+  if (frenchTypist.pending != frkb::Dead::None) { display.setTextColor(TFT_YELLOW, TFT_BLACK); printFont0Text(frkb::deadText(frenchTypist.pending)); }
+  else if (frenchUi && draft.isEmpty()) { display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.print("TAB: TOUCHES"); }
   display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(198, 126); display.printf("%d/140", utf8CharacterCount(draft));
 }
 
@@ -2637,7 +2642,7 @@ void drawNetworkPassword() {
   display.setTextColor(TFT_WHITE, TFT_DARKGREY); display.setCursor(10, 73);
   display.print(networkPassword.substring(networkPassword.length() > 28 ? networkPassword.length() - 28 : 0));
   display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 104); display.print(networkStatus.substring(0, 34));
-  display.setCursor(6, 121); display.print(uiText("TYPE  ENTER JOIN  LEFT CANCEL", "TAPER ENTER JOINDRE GAUCHE ANNULER"));
+  display.setCursor(6, 121); display.print(uiText("TYPE  ENTER JOIN  MENU CANCEL", "TAPER ENTER JOINDRE MENU ANNULER"));
 }
 
 void drawChargingConfirm() {
@@ -2697,7 +2702,7 @@ void drawFoxFinding() {
       display.setTextColor(selected ? TFT_BLACK : TFT_WHITE, selected ? TFT_GREEN : TFT_DARKGREY); display.setCursor(12, y + 3);
       display.printf("%-12s %4d dBm", foxPeers[index].name, foxPeers[index].rssi);
     }
-    display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 123); display.print(packInvite ? "LEFT BACK          ENTER JOIN" : uiText("LEFT BACK        ENTER REQUEST", "GAUCHE RETOUR   ENTER DEMANDE")); return;
+    display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 123); display.print(packInvite ? uiText("LEFT BACK          ENTER JOIN", "GAUCHE RETOUR   ENTER REJOINDRE") : uiText("LEFT BACK        ENTER REQUEST", "GAUCHE RETOUR   ENTER DEMANDE")); return;
   }
   display.setTextColor(TFT_WHITE, TFT_BLACK); display.setCursor(6, 25); display.printf("%s  %d dBm", foxTargetName, foxRssiTrend.average());
   const char *phase = foxState == FoxState::Requesting ? "REQUESTING" : foxState == FoxState::Acquiring ? "SCANNING PLACE" : foxState == FoxState::TargetActive ? "HELPING SEEKER" : foxState == FoxState::SignalLost ? "SIGNAL LOST" : foxRssiTrend.guidance();
@@ -2836,7 +2841,7 @@ void drawLibrarySearch() {
   auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader(uiText("SEARCH", "CHERCHER"));
   display.setTextColor(TFT_WHITE, TFT_BLACK); display.setCursor(6, 40); display.print(uiText("SONG OR ARTIST", "CHANSON OU ARTISTE"));
   display.fillRoundRect(5, 55, 230, 24, 4, TFT_DARKGREY); display.setTextColor(TFT_WHITE, TFT_DARKGREY); display.setCursor(10, 63); printFont0Text(utf8Tail(librarySearchText, 36));
-  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 123); display.print(uiText("TYPE    ENTER SEARCH", "TAPER   ENTER CHERCHER"));
+  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 123); display.print(uiText("TYPE  ENTER SEARCH  MENU BACK", "TAPER ENTER CHERCHER MENU RETOUR"));
 }
 
 void drawNowPlaying() {
@@ -3031,10 +3036,14 @@ void drawAlarm() {
       continue;
     }
     const clockapps::AlarmEntry &entry = alarms.entries[row];
-    const String time = alarmTimeText(entry.hour, entry.minute);
+    // While typing, the cell shows the digits as typed, HH:MM from 00:00; red once four digits make no time.
+    const bool typing = selectedRow && alarmTyped.active();
+    char typed[6];
+    snprintf(typed, sizeof(typed), "%02u:%02u", static_cast<unsigned>(alarmTyped.digits / 100), static_cast<unsigned>(alarmTyped.digits % 100));
+    const String time = typing ? String(typed) : alarmTimeText(entry.hour, entry.minute);
     const uint16_t timeColour = entry.on() ? TFT_GREEN : TFT_DARKGREY;
     if (selectedRow && alarmColumn == AlarmColumn::Time) {
-      const uint16_t box = bumping ? TFT_RED : TFT_YELLOW;
+      const uint16_t box = bumping || (typing && alarmTyped.full() && !alarmTyped.valid()) ? TFT_RED : typing ? TFT_CYAN : TFT_YELLOW;
       display.fillRect(2, y - 1, static_cast<int>(time.length()) * 12 + 8, 18, box);
       display.setTextColor(TFT_BLACK, box);
     } else display.setTextColor(timeColour, TFT_BLACK);
@@ -3047,7 +3056,16 @@ void drawAlarm() {
   struct tm now{};
   char status[48] = "";
   uint16_t statusColour = TFT_WHITE;
-  if (!wallClock(now)) {
+  if (alarmTyped.active() && !alarmOnAddRow()) {
+    // What Enter would set, or why it can't.
+    if (alarmTyped.valid()) {
+      snprintf(status, sizeof(status), "%s%s", uiText("ENTER SETS ", "ENTER: "), alarmTimeText(alarmTyped.hour(), alarmTyped.minute()).c_str());
+      statusColour = TFT_GREEN;
+    } else if (alarmTyped.full()) {
+      snprintf(status, sizeof(status), "%s", uiText("NOT A TIME: DEL UNDOES A DIGIT", "PAS UNE HEURE: DEL EFFACE"));
+      statusColour = TFT_RED;
+    } else snprintf(status, sizeof(status), "%s", uiText("KEEP TYPING: 0730 IS 7:30 AM", "CONTINUE: 0730 DONNE 07:30"));
+  } else if (!wallClock(now)) {
     snprintf(status, sizeof(status), "%s", uiText("CLOCK NOT SET: NEEDS WI-FI ONCE", "HEURE INCONNUE: IL FAUT LE WI-FI"));
     statusColour = TFT_RED;
   } else if (alarms.snoozed) {
@@ -3065,6 +3083,7 @@ void drawAlarm() {
   display.setTextColor(statusColour, TFT_BLACK); display.setCursor(6, 112); display.print(status);
   display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 123);
   if (alarmOnAddRow()) display.print(uiText("ENTER OR 0-9: NEW ALARM", "ENTER OU 0-9: NOUVEAU"));
+  else if (alarmTyped.active()) display.print(uiText("0-9 DIGIT  DEL UNDO  ENTER OK", "0-9 CHIFFRE  DEL ANNULE  ENTER OK"));
   else if (alarmColumn == AlarmColumn::Time) display.print(uiText("0-9 TIME  < > DAYS  DEL DELETE", "0-9 HEURE < > JOURS DEL EFFACER"));
   else display.print(uiText("ENTER ON/OFF  0-9 TIME  DEL DELETE", "ENTER OUI/NON 0-9 HEURE DEL EFFACER"));
 }
@@ -3194,7 +3213,7 @@ void editAlarm(int row, uint8_t hour, uint8_t minute) {
   clockapps::AlarmEntry &entry = alarms.entries[row];
   entry.hour = hour; entry.minute = minute;
   if (alarms.ringing == row) alarms.snoozed = false;
-  // The minute it is now can't ring because of typing: 0, 7, 3, 0 passes through 0:07.
+  // Setting the time to the minute it is now doesn't ring at once.
   struct tm wall{};
   if (wallClock(wall)) entry.lastFired = clockapps::Alarms::minuteKey(wall.tm_yday, wall.tm_hour, wall.tm_min);
   saveClockSettings();
@@ -3203,46 +3222,66 @@ void editAlarm(int row, uint8_t hour, uint8_t minute) {
 // A key that can't act here: a falling tone and the cursor turns red for a moment.
 void bumpAlarm() { alarmBumpAt = millis(); if (!alarmBumpAt) alarmBumpAt = 1; playDeniedTone(); }
 
+// The time being typed goes into the alarm if it makes one. False, with a bump, if it doesn't, so
+// the cursor stays on it: Del takes back digits.
+bool commitAlarmTyping() {
+  if (!alarmTyped.active()) return true;
+  if (!alarmTyped.valid()) { bumpAlarm(); return false; }
+  editAlarm(alarmRow, alarmTyped.hour(), alarmTyped.minute());
+  alarmTyped.clear();
+  return true;
+}
+
 // The alarm list's keys. False when the key did nothing, so no key tone plays over the bump.
 bool handleAlarmKeys(const Keyboard_Class::KeysState &keys, int digit, bool goUp, bool goDown, bool goLeft, bool goRight) {
   if (goUp || goDown) {
     const int target = alarmRow + (goDown ? 1 : -1);
     if (target < 0 || target >= alarmRowCount()) { bumpAlarm(); return false; }
-    alarmRow = static_cast<uint8_t>(target); alarmTyped = 0;
+    if (!commitAlarmTyping()) return false;
+    alarmRow = static_cast<uint8_t>(target);
     return true;
   }
   if (alarmOnAddRow()) {
     if (!keys.enter && digit < 0) { bumpAlarm(); return false; }
     if (!alarms.add()) { bumpAlarm(); return false; }
-    alarmRow = alarms.count - 1; alarmColumn = AlarmColumn::Time; alarmTyped = 0;
-    if (digit >= 0) {
-      alarmTyped = clockapps::Alarms::pushDigit(0, digit);
-      editAlarm(alarmRow, alarmTyped / 100, alarmTyped % 100);
-    } else editAlarm(alarmRow, alarms.entries[alarmRow].hour, alarms.entries[alarmRow].minute);
+    alarmRow = alarms.count - 1; alarmColumn = AlarmColumn::Time; alarmTyped.clear();
+    editAlarm(alarmRow, alarms.entries[alarmRow].hour, alarms.entries[alarmRow].minute);
+    if (digit >= 0) alarmTyped.push(digit);
     return true;
   }
   clockapps::AlarmEntry &entry = alarms.entries[alarmRow];
   if (goLeft || goRight) {
     const int target = static_cast<int>(alarmColumn) + (goRight ? 1 : -1);
     if (target < 0 || target > static_cast<int>(AlarmColumn::Weekends)) { bumpAlarm(); return false; }
-    alarmColumn = static_cast<AlarmColumn>(target); alarmTyped = 0;
+    if (!commitAlarmTyping()) return false;
+    alarmColumn = static_cast<AlarmColumn>(target);
     return true;
   }
   if (keys.del) {
-    alarms.remove(alarmRow); alarmColumn = AlarmColumn::Time; alarmTyped = 0;
+    // While typing, Del takes back one digit; otherwise it deletes the alarm.
+    if (alarmTyped.undo()) return true;
+    alarms.remove(alarmRow); alarmColumn = AlarmColumn::Time;
     saveClockSettings();
     return true;
   }
   if (digit >= 0) {
-    alarmTyped = clockapps::Alarms::pushDigit(alarmTyped, digit);
-    if (clockapps::Alarms::isTime(alarmTyped)) editAlarm(alarmRow, alarmTyped / 100, alarmTyped % 100);
+    // A digit on a switch types the time too.
+    alarmColumn = AlarmColumn::Time;
+    alarmTyped.push(digit);
+    if (alarmTyped.full()) {
+      if (!alarmTyped.valid()) { bumpAlarm(); return false; }
+      commitAlarmTyping();
+    }
     return true;
   }
   if (keys.enter) {
-    // On the time, Enter steps to the first switch; on a switch, it flips it.
-    if (alarmColumn == AlarmColumn::Time) { alarmColumn = AlarmColumn::Weekdays; return true; }
+    // On the time, Enter takes what is typed, or steps to the first switch; on a switch, it flips it.
+    if (alarmColumn == AlarmColumn::Time) {
+      if (alarmTyped.active()) return commitAlarmTyping();
+      alarmColumn = AlarmColumn::Weekdays; return true;
+    }
     bool &day = alarmColumn == AlarmColumn::Weekdays ? entry.weekdays : entry.weekends;
-    day = !day; alarmTyped = 0;
+    day = !day;
     if (alarms.ringing == alarmRow && !entry.on()) alarms.snoozed = false;
     editAlarm(alarmRow, entry.hour, entry.minute);
     return true;
@@ -3306,6 +3345,7 @@ bool handleClockKeys(const Keyboard_Class::KeysState &keys, bool goUp, bool goDo
 
 void drawLanguage();
 void drawChangelog();
+void drawKeyHelp();
 void render() {
   if (ringingNow() != Ringing::None) drawRinging();
   else if (screenMode == ScreenMode::Timer) drawTimer(); else if (screenMode == ScreenMode::Alarm) drawAlarm();
@@ -3313,6 +3353,7 @@ void render() {
   else if (screenMode == ScreenMode::Chat) drawChat(); else if (screenMode == ScreenMode::Menu) drawMenu(); else if (screenMode == ScreenMode::Rooms) drawRooms();
   else if (screenMode == ScreenMode::Volume) drawVolume(); else if (screenMode == ScreenMode::Language) drawLanguage(); else if (screenMode == ScreenMode::Changelog) drawChangelog();
   else if (screenMode == ScreenMode::EmojiRecipes) drawEmojiRecipes();
+  else if (screenMode == ScreenMode::KeyHelp) drawKeyHelp();
   else if (screenMode == ScreenMode::VoiceMessages || screenMode == ScreenMode::Walkie) drawWalkie();
   else if (screenMode == ScreenMode::Status) drawStatus();
   else if (screenMode == ScreenMode::NetworkPassword) drawNetworkPassword();
@@ -3368,6 +3409,33 @@ void setLocalOnlyMode(bool enabled) {
     networkStatus = "WIFI RESUME"; walkieStatus = "RECONNECTING";
   }
   renderDirty = true;
+}
+
+// The French keyboard's combinations, generated from french_keyboard.h: what isn't on a keycap.
+frkb::Recipe keyHelpRecipes[48];
+int keyHelpCount = -1;
+constexpr int kKeyHelpRows = 5;
+int keyHelpPageCount() {
+  if (keyHelpCount < 0) keyHelpCount = std::min(48, frkb::recipes(keyHelpRecipes, 48));
+  return (keyHelpCount + kKeyHelpRows - 1) / kKeyHelpRows;
+}
+
+void drawKeyHelp() {
+  auto &display = uiCanvas; display.fillScreen(TFT_BLACK);
+  const int pages = keyHelpPageCount();
+  keyHelpPage = std::max(0, std::min(keyHelpPage, pages - 1));
+  const String title = String("TOUCHES ") + (keyHelpPage + 1) + "/" + pages;
+  drawHeader(title.c_str());
+  display.setFont(&fonts::Font0); display.setTextSize(2);
+  for (int row = 0; row < kKeyHelpRows; row++) {
+    const int index = keyHelpPage * kKeyHelpRows + row;
+    if (index >= keyHelpCount) break;
+    const int y = 23 + row * 17;
+    display.setTextColor(TFT_YELLOW, TFT_BLACK); display.setCursor(8, y); printFont0Text(keyHelpRecipes[index].text);
+    display.setTextColor(TFT_WHITE, TFT_BLACK); display.setCursor(32, y); display.print(keyHelpRecipes[index].keys);
+  }
+  display.setTextSize(1); display.setTextColor(TFT_LIGHTGREY, TFT_BLACK); display.setCursor(6, 111); display.print("SHIFT+LETTRE: MAJUSCULE");
+  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 123); display.print("HAUT/BAS PAGE      ENTER RETOUR");
 }
 
 void drawLanguage() {
@@ -3433,11 +3501,19 @@ String font0Cp437Text(const String &text) {
   encoded.reserve(text.length());
   for (size_t index = 0; index < text.length(); index++) {
     const uint8_t first = static_cast<uint8_t>(text[index]);
-    if (first == 0xC3 && index + 1 < text.length()) {
+    if ((first == 0xC3 || first == 0xC2) && index + 1 < text.length()) {
       const uint8_t second = static_cast<uint8_t>(text[index + 1]);
-      if (second == 0xA9) { encoded += static_cast<char>(0x82); index++; continue; } // é
-      if (second == 0xA8) { encoded += static_cast<char>(0x8A); index++; continue; } // è
-      if (second == 0xA0) { encoded += static_cast<char>(0x85); index++; continue; } // à
+      // The CP437 slot of each letter the French keyboard types. CP437 has no capital À Â È Ê Ë Î Ï Ô
+      // Ù Û: Font0 draws those as the plain capital, and the message keeps its accent.
+      static const uint8_t kC3[64] = {
+          'A', 'A', 'A', 'A', 0x8E, 0x8F, 0x92, 0x80, 'E', 0x90, 'E', 'E', 'I', 'I', 'I', 'I',   // À..Ï
+          0, 0xA5, 'O', 'O', 'O', 'O', 0x99, 0, 0, 'U', 'U', 'U', 0x9A, 'Y', 0, 0xE1,           // Ð..ß
+          0x85, 0xA0, 0x83, 0, 0x84, 0x86, 0x91, 0x87, 0x8A, 0x82, 0x88, 0x89, 0x8D, 0xA1, 0x8C, 0x8B,  // à..ï
+          0, 0xA4, 0x95, 0xA2, 0x93, 0, 0x94, 0xF6, 0, 0x97, 0xA3, 0x96, 0x81, 0, 0, 0x98};     // ð..ÿ
+      uint8_t slot = 0;
+      if (first == 0xC3 && second >= 0x80 && second < 0xC0) slot = kC3[second - 0x80];
+      else if (first == 0xC2) slot = second == 0xAB ? 0xAE : second == 0xBB ? 0xAF : second == 0xB0 ? 0xF8 : second == 0xA8 ? '"' : 0;
+      if (slot) { encoded += static_cast<char>(slot); index++; continue; }
     }
     encoded += static_cast<char>(first);
   }
@@ -3459,30 +3535,16 @@ bool appendKeyboardText(String &target, const char *text, size_t limit, bool byt
   return true;
 }
 
-void typeFrenchCharacter(String &target, char character, size_t limit, bool byteLimit) {
-  if (!frenchUi) {
-    const char text[] = {character, '\0'};
-    appendKeyboardText(target, text, limit, byteLimit);
-    return;
-  }
-  if (frenchGravePending) {
-    frenchGravePending = false;
-    if (character == 'a') { appendKeyboardText(target, u8"à", limit, byteLimit); return; }
-    if (character == 'e') { appendKeyboardText(target, u8"è", limit, byteLimit); return; }
-    appendKeyboardText(target, "'", limit, byteLimit);
-    typeFrenchCharacter(target, character, limit, byteLimit);
-    return;
-  }
-  if (character == '\'') { frenchGravePending = true; return; }
-  if (character == '?') { appendKeyboardText(target, u8"é", limit, byteLimit); return; }
-  const char text[] = {character, '\0'};
-  appendKeyboardText(target, text, limit, byteLimit);
+// Chat in French types the CSA layout of french_keyboard.h, read from the keys' positions, since
+// the M5 library only knows the English keycaps. Elsewhere, and in English, keys type their keycaps.
+void typeFrenchKeys(const Keyboard_Class::KeysState &keys, String &target, size_t limit) {
+  const bool shift = keys.shift || keys.ctrl, alt = keys.alt;
+  auto out = [&](const char *text) { if (text) appendKeyboardText(target, text, limit, false); };
+  for (const auto &key : M5Cardputer.Keyboard.keyList()) frenchTypist.press(key.x, key.y, shift, alt, out);
 }
 
-void flushFrenchDeadKey(String &target, size_t limit, bool byteLimit) {
-  if (!frenchGravePending) return;
-  frenchGravePending = false;
-  appendKeyboardText(target, "'", limit, byteLimit);
+void flushFrenchDeadKey(String &target, size_t limit) {
+  frenchTypist.flush([&](const char *text) { appendKeyboardText(target, text, limit, false); });
 }
 
 void showChatNotice(const char *english, const char *french) { chatNotice = uiText(english, french); chatNoticeAt = millis(); renderDirty = true; }
@@ -3537,7 +3599,7 @@ void serviceNearbySends() {
 }
 
 void sendDraft() {
-  flushFrenchDeadKey(draft, kMessageLimit, false);
+  flushFrenchDeadKey(draft, kMessageLimit);
   draft.trim(); if (draft.isEmpty()) return;
   ChatMessage message; message.roomId = currentRoomId; message.clientId = nextClientId(); message.authorId = kDeviceId; message.authorName = kDeviceName;
   message.body = draft; message.createdAt = time(nullptr) * 1000LL; message.queued = true; message.state = "queued";
@@ -3754,7 +3816,7 @@ void openHomeApp(int index) {
   else if (app == AppId::Books) openBooks();
   else if (app == AppId::Remote) screenMode = ScreenMode::Remote;
   else if (app == AppId::Timer) { timerTyped = 0; screenMode = ScreenMode::Timer; }
-  else if (app == AppId::Alarm) { alarmTyped = 0; alarmRow = 0; alarmColumn = AlarmColumn::Time; screenMode = ScreenMode::Alarm; }
+  else if (app == AppId::Alarm) { alarmTyped.clear(); alarmRow = 0; alarmColumn = AlarmColumn::Time; screenMode = ScreenMode::Alarm; }
   else if (app == AppId::ScreenTime) screenMode = ScreenMode::ScreenTime;
   else if (app == AppId::Stopwatch) screenMode = ScreenMode::Stopwatch;
   else if (app == AppId::Wifi) {
@@ -3779,13 +3841,14 @@ bool isSettingsScreen() {
 }
 
 void leaveSettingsScreen() {
-  if (screenMode == ScreenMode::NetworkPassword) { frenchGravePending = false; networkPassword = ""; screenMode = ScreenMode::Networks; return; }
+  if (screenMode == ScreenMode::NetworkPassword) { networkPassword = ""; screenMode = ScreenMode::Networks; return; }
   manualWifiMode = false; statusPage = 0; screenMode = ScreenMode::Home;
 }
 
 // One level back within HOME's apps. False when the screen is not one of them.
 bool goBackFromApp() {
   if (screenMode == ScreenMode::Home) return true;
+  if (screenMode == ScreenMode::KeyHelp) { screenMode = ScreenMode::Chat; return true; }
   if (screenMode == ScreenMode::Remote || screenMode == ScreenMode::System || isClockScreen()) { screenMode = ScreenMode::Home; return true; }
   if (isSettingsScreen()) { leaveSettingsScreen(); return true; }
   if (screenMode == ScreenMode::LibrarySearch) { openMusicRoot(); return true; }
@@ -3959,6 +4022,7 @@ void serviceMedia() {
 // Keys for HOME and its apps, plus the back key from chat and the menu.
 bool handleAppKeys(const Keyboard_Class::KeysState &keys, bool goUp, bool goDown, bool goLeft, bool goRight) {
   const bool escape = physicalKeyAt(0, 0) && (screenMode == ScreenMode::Chat || screenMode == ScreenMode::LibrarySearch || screenMode == ScreenMode::NetworkPassword ? keys.fn : true);
+  if (escape && screenMode == ScreenMode::KeyHelp) { screenMode = ScreenMode::Chat; playNextTone(); renderDirty = true; return true; }
   if (escape && (screenMode == ScreenMode::Chat || screenMode == ScreenMode::Menu)) { screenMode = ScreenMode::Home; playNextTone(); renderDirty = true; return true; }
   if (escape && isSettingsScreen()) { leaveSettingsScreen(); playNextTone(); renderDirty = true; return true; }
   const bool ownScreen = screenMode == ScreenMode::Home || screenMode == ScreenMode::Library || screenMode == ScreenMode::LibrarySearch ||
@@ -4124,14 +4188,12 @@ void handleKeyboard() {
   if (screenMode == ScreenMode::NetworkPassword) {
     if (goLeft) { leaveSettingsScreen(); playNextTone(); renderDirty = true; return; }
     playNextTone();
-    if (keys.enter) { flushFrenchDeadKey(networkPassword, 63, true); joinSelectedNetwork(); return; }
-    if (keys.del) {
-      if (frenchGravePending) frenchGravePending = false;
-      else removeLastUtf8Character(networkPassword);
-    }
-    if (keys.space) typeFrenchCharacter(networkPassword, ' ', 63, true);
+    // A password types exactly what the keycaps show, in both languages: it is copied from a card.
+    if (keys.enter) { joinSelectedNetwork(); return; }
+    if (keys.del) removeLastUtf8Character(networkPassword);
+    if (keys.space) appendKeyboardText(networkPassword, " ", 63, true);
     for (const auto character : keys.word)
-      if (character >= 0x20 && character <= 0x7e) typeFrenchCharacter(networkPassword, character, 63, true);
+      if (character >= 0x20 && character <= 0x7e) { const char text[] = {character, '\0'}; appendKeyboardText(networkPassword, text, 63, true); }
     renderDirty = true; return;
   }
   if (screenMode == ScreenMode::Language) {
@@ -4155,6 +4217,14 @@ void handleKeyboard() {
     else if (goLeft && changelogSelection > 0) { changelogSelection--; changelogLineOffset = 0; playNextTone(); }
     else if (goRight && changelogSelection + 1 < kSupaChatChangelogCount) { changelogSelection++; changelogLineOffset = 0; playNextTone(); }
     else if (keys.enter) { leaveSettingsScreen(); playNextTone(); }
+    renderDirty = true; return;
+  }
+  // The French keys' page, opened by Tab in chat: arrows page through it, and every exit is back to chat.
+  if (screenMode == ScreenMode::KeyHelp) {
+    const int pages = keyHelpPageCount();
+    if (goUp || goLeft) { if (keyHelpPage > 0) { keyHelpPage--; playNextTone(); } else playDeniedTone(); }
+    else if (goDown || goRight) { if (keyHelpPage + 1 < pages) { keyHelpPage++; playNextTone(); } else playDeniedTone(); }
+    else if (keys.enter || keys.tab) { screenMode = ScreenMode::Chat; playNextTone(); }
     renderDirty = true; return;
   }
   if (screenMode == ScreenMode::EmojiRecipes) {
@@ -4190,13 +4260,14 @@ void handleKeyboard() {
     sendDraft(); return;
   }
   if (keys.del) {
-    if (frenchGravePending) frenchGravePending = false;
-    else removeLastUtf8Character(draft);
+    if (!frenchTypist.cancel()) removeLastUtf8Character(draft);
     renderDirty = true; return;
   }
-  if (keys.space) typeFrenchCharacter(draft, ' ', kMessageLimit, false);
+  if (frenchUi && keys.tab) { screenMode = ScreenMode::KeyHelp; keyHelpPage = 0; renderDirty = true; return; }
+  if (frenchUi) { typeFrenchKeys(keys, draft, kMessageLimit); renderDirty = true; return; }
+  if (keys.space) appendKeyboardText(draft, " ", kMessageLimit, false);
   for (const auto character : keys.word)
-    if (character >= 0x20 && character <= 0x7e) typeFrenchCharacter(draft, character, kMessageLimit, false);
+    if (character >= 0x20 && character <= 0x7e) { const char text[] = {character, '\0'}; appendKeyboardText(draft, text, kMessageLimit, false); }
   renderDirty = true;
 }
 }  // namespace

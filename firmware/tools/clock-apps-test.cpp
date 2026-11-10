@@ -77,8 +77,18 @@ int main() {
   assert(!back.unpack(packed, length - 1) && back.count == 0);
   packed[1] = 24; assert(!back.unpack(packed, length) && back.count == 0);
   // Typed alarm digits: 0,7,3,0 ends at 07:30, passing 0:73, which is not a time.
-  uint16_t typed = 0; for (int d : {0, 7, 3}) typed = Alarms::pushDigit(typed, d); assert(typed == 73 && !Alarms::isTime(typed));
-  typed = Alarms::pushDigit(typed, 0); assert(typed == 730 && Alarms::isTime(typed));
+  // Alarm time entry, as on a microwave: from 00:00, 7 is 00:07, 3 is 00:73 (not a time yet),
+  // 0 is 07:30; Del takes digits back; a fifth digit pushes the first out.
+  TimeEntry entry; assert(!entry.active() && !entry.valid());
+  entry.push(7); assert(entry.active() && entry.digits == 7 && entry.valid() && entry.hour() == 0 && entry.minute() == 7);
+  entry.push(3); assert(entry.digits == 73 && !entry.valid() && !entry.full());
+  entry.push(0); assert(entry.digits == 730 && entry.valid() && entry.hour() == 7 && entry.minute() == 30 && !entry.full());
+  assert(entry.undo() && entry.digits == 73 && entry.count == 2);
+  assert(entry.undo() && entry.undo() && !entry.active() && entry.digits == 0 && !entry.undo());
+  for (int d : {0, 7, 3, 0}) entry.push(d); assert(entry.full() && entry.valid() && entry.digits == 730);
+  entry.clear(); for (int d : {2, 5, 7, 3}) entry.push(d); assert(entry.full() && !entry.valid());
+  entry.push(0); assert(entry.digits == 5730 && entry.count == 4 && !entry.valid());
+  entry.clear(); for (int d : {2, 3, 5, 9}) entry.push(d); assert(entry.valid() && entry.hour() == 23 && entry.minute() == 59);
   assert(!Alarms::isTime(2400) && Alarms::isTime(2359));
 
   // Stopwatch.
