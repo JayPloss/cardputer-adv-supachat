@@ -63,48 +63,100 @@ struct ScreenTime {
   }
 };
 
-// One alarm. Repeat is a mask of days, bit 0 Sunday as in struct tm; 0 rings once, then turns off.
-constexpr uint8_t kOnce = 0;
-constexpr uint8_t kWeekdays = 0x3E;
-constexpr uint8_t kEveryDay = 0x7F;
+// Alarms. Each has a time and two switches: weekdays (Monday to Friday) and weekends. Both on is
+// every day; both off is an alarm that doesn't ring. Weekdays as in struct tm, 0 Sunday.
+constexpr uint8_t kMaxAlarms = 4;
 constexpr uint32_t kSnoozeMs = 5 * 60000u;
 
-struct Alarm {
-  bool enabled = false;
+struct AlarmEntry {
   uint8_t hour = 7;
   uint8_t minute = 0;
-  uint8_t repeat = kOnce;
-  bool snoozed = false;
-  uint32_t snoozeUntil = 0;
+  bool weekdays = true;
+  bool weekends = false;
   int32_t lastFired = -1;  // The minute it last rang, so one minute rings once.
 
+  bool on() const { return weekdays || weekends; }
+  bool dayMatches(int weekday) const { return weekday == 0 || weekday == 6 ? weekends : weekdays; }
+  // Minutes from this moment to its next ring, or -1 if it is off. The minute itself counts as rung.
+  int32_t minutesUntil(int weekday, int hour24, int minute24) const {
+    if (!on()) return -1;
+    const int now = hour24 * 60 + minute24, at = hour * 60 + minute;
+    for (int day = 0; day < 8; day++) {
+      const int32_t ahead = day * 1440 + at - now;
+      if (ahead > 0 && dayMatches((weekday + day) % 7)) return ahead;
+    }
+    return -1;
+  }
+};
+
+struct Alarms {
+  AlarmEntry entries[kMaxAlarms];
+  uint8_t count = 0;
+  int8_t ringing = -1;  // The one that rang last: the ring screen and snooze show its time.
+  bool snoozed = false;
+  uint32_t snoozeUntil = 0;
+
   static int32_t minuteKey(int yearDay, int hour, int minute) { return (yearDay * 24 + hour) * 60 + minute; }
-  bool dayMatches(int weekday) const { return repeat == kOnce || (repeat >> weekday) & 1; }
-  // Called with the wall clock when it is known; false means nothing to ring.
+  // Called with the wall clock when it is known. Every alarm due this minute is marked rung; true if any was.
   bool due(int weekday, int yearDay, int hour24, int minute24) {
-    if (!enabled || hour24 != hour || minute24 != minute || !dayMatches(weekday)) return false;
     const int32_t key = minuteKey(yearDay, hour24, minute24);
-    if (key == lastFired) return false;
-    lastFired = key;
-    if (repeat == kOnce) enabled = false;
-    snoozed = false;
+    bool any = false;
+    for (int index = count - 1; index >= 0; index--) {
+      AlarmEntry &entry = entries[index];
+      if (!entry.on() || entry.hour != hour24 || entry.minute != minute24 || !entry.dayMatches(weekday) || entry.lastFired == key) continue;
+      entry.lastFired = key; ringing = static_cast<int8_t>(index); any = true;
+    }
+    if (any) snoozed = false;
+    return any;
+  }
+  bool add() {
+    if (count >= kMaxAlarms) return false;
+    entries[count++] = AlarmEntry{};
     return true;
+  }
+  void remove(int index) {
+    if (index < 0 || index >= count) return;
+    for (int at = index; at + 1 < count; at++) entries[at] = entries[at + 1];
+    count--;
+    if (ringing == index) { ringing = -1; snoozed = false; }
+    else if (ringing > index) ringing--;
   }
   void snooze(uint32_t now) { snoozed = true; snoozeUntil = now + kSnoozeMs; }
   bool snoozeDue(uint32_t now) {
     if (!snoozed || !reached(now, snoozeUntil)) return false;
     snoozed = false; return true;
   }
-  // Minutes from this moment to the next ring, or -1 if it will not ring. Snooze is not counted.
-  int32_t minutesUntil(int weekday, int hour24, int minute24) const {
-    if (!enabled) return -1;
-    const int now = hour24 * 60 + minute24, at = hour * 60 + minute;
-    for (int day = 0; day < 8; day++) {
-      const int32_t ahead = day * 1440 + at - now;
-      if (ahead <= 0) continue;
-      if (dayMatches((weekday + day) % 7)) return ahead;
+  // Minutes to the next ring of any alarm, or -1 if none will ring; which one in *next. Snooze is not counted.
+  int32_t minutesUntil(int weekday, int hour24, int minute24, int *next = nullptr) const {
+    int32_t best = -1;
+    for (int index = 0; index < count; index++) {
+      const int32_t ahead = entries[index].minutesUntil(weekday, hour24, minute24);
+      if (ahead >= 0 && (best < 0 || ahead < best)) { best = ahead; if (next) *next = index; }
     }
-    return -1;
+    return best;
+  }
+  // Kept in NVS as the count, then hour, minute and switches (bit 0 weekdays, bit 1 weekends) for each.
+  static constexpr int kPackedBytes = 1 + 3 * kMaxAlarms;
+  int pack(uint8_t *out) const {
+    out[0] = count;
+    for (int index = 0; index < count; index++) {
+      const AlarmEntry &entry = entries[index];
+      out[1 + 3 * index] = entry.hour; out[2 + 3 * index] = entry.minute;
+      out[3 + 3 * index] = static_cast<uint8_t>((entry.weekdays ? 1 : 0) | (entry.weekends ? 2 : 0));
+    }
+    return 1 + 3 * count;
+  }
+  // False, leaving no alarms, if the bytes aren't a whole valid list.
+  bool unpack(const uint8_t *in, int length) {
+    count = 0; ringing = -1; snoozed = false;
+    if (length < 1 || in[0] > kMaxAlarms || length < 1 + 3 * in[0]) return false;
+    for (int index = 0; index < in[0]; index++) {
+      const uint8_t hour = in[1 + 3 * index], minute = in[2 + 3 * index], days = in[3 + 3 * index];
+      if (hour > 23 || minute > 59 || days > 3) { count = 0; return false; }
+      AlarmEntry &entry = entries[count++];
+      entry = AlarmEntry{}; entry.hour = hour; entry.minute = minute; entry.weekdays = days & 1; entry.weekends = days & 2;
+    }
+    return true;
   }
   // Typed digits push in from the right, as 24-hour HHMM; the alarm takes the time whenever the
   // digits so far make one (0, 7, 3, 0 sets 0:07, skips 0:73, then sets 7:30).

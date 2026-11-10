@@ -60,7 +60,7 @@ constexpr bool kBuildFrenchDefault = false;
 bool frenchUi = kBuildFrenchDefault;
 SharedText<8> languageOverride{"auto"};
 const char *uiText(const char *english, const char *french) { return frenchUi ? french : english; }
-constexpr char kFirmwareVersion[] = "v0.57";
+constexpr char kFirmwareVersion[] = "v0.58";
 constexpr size_t kMessageLimit = 140;
 constexpr size_t kHistoryLimit = 100;  // What the first sync fetches; older pages go to the card.
 constexpr size_t kRamMessageLimit = 40;
@@ -480,8 +480,13 @@ void serviceMessageNotification();
 clockapps::Countdown timerCountdown;
 uint16_t timerTyped = 0;
 clockapps::ScreenTime screenTime;
-clockapps::Alarm alarmClock;
+clockapps::Alarms alarms;
 uint16_t alarmTyped = 0;
+// The alarm list's cursor: a row (an alarm, or the last row that adds one) and a column on it.
+enum class AlarmColumn : uint8_t { Time, Weekdays, Weekends };
+uint8_t alarmRow = 0;
+AlarmColumn alarmColumn = AlarmColumn::Time;
+uint32_t alarmBumpAt = 0;
 clockapps::Stopwatch stopwatch;
 // Set by SNTP when a time server has answered. The clock seeded from the build time is not good enough to ring by.
 volatile bool clockFromNtp = false;
@@ -898,10 +903,20 @@ void loadConfiguration() {
     const String psk = preferences.getString(("psk" + String(index)).c_str(), "");
     if (!ssid.isEmpty()) wifiProfiles.push_back({ssid, psk});
   }
-  alarmClock.hour = std::min<uint8_t>(preferences.getUChar("alarm_h", 7), 23);
-  alarmClock.minute = std::min<uint8_t>(preferences.getUChar("alarm_m", 0), 59);
-  alarmClock.repeat = preferences.getUChar("alarm_rep", clockapps::kOnce) & 0x7F;
-  alarmClock.enabled = preferences.getBool("alarm_on", false);
+  uint8_t packedAlarms[clockapps::Alarms::kPackedBytes];
+  const size_t packedLength = preferences.getBytesLength("alarms");
+  if (packedLength && packedLength <= sizeof(packedAlarms)) {
+    preferences.getBytes("alarms", packedAlarms, packedLength);
+    alarms.unpack(packedAlarms, static_cast<int>(packedLength));
+  } else if (preferences.isKey("alarm_h") && alarms.add()) {
+    // v0.56 and v0.57 had one alarm with a repeat: Monday to Friday, every day, or once (now off).
+    clockapps::AlarmEntry &entry = alarms.entries[0];
+    entry.hour = std::min<uint8_t>(preferences.getUChar("alarm_h", 7), 23);
+    entry.minute = std::min<uint8_t>(preferences.getUChar("alarm_m", 0), 59);
+    const uint8_t repeat = preferences.getUChar("alarm_rep", 0), on = preferences.getBool("alarm_on", false);
+    entry.weekdays = on && (repeat & 0x3E);
+    entry.weekends = on && (repeat & 0x41);
+  }
   timerCountdown.set(std::min<uint32_t>(preferences.getUInt("timer_ms", 5 * 60000u), (99 * 60 + 59) * 1000u));
   screenTime.countdown.set(std::min<uint32_t>(preferences.getUInt("screen_ms", 30 * 60000u), 120 * 60000u));
   preferences.end();
@@ -909,8 +924,8 @@ void loadConfiguration() {
 
 void saveClockSettings() {
   preferences.begin("supachat", false);
-  preferences.putUChar("alarm_h", alarmClock.hour); preferences.putUChar("alarm_m", alarmClock.minute);
-  preferences.putUChar("alarm_rep", alarmClock.repeat); preferences.putBool("alarm_on", alarmClock.enabled);
+  uint8_t packedAlarms[clockapps::Alarms::kPackedBytes];
+  preferences.putBytes("alarms", packedAlarms, alarms.pack(packedAlarms));
   preferences.putUInt("timer_ms", timerCountdown.durationMs); preferences.putUInt("screen_ms", screenTime.countdown.durationMs);
   preferences.end();
 }
@@ -2903,10 +2918,11 @@ String alarmTimeText(uint8_t hour, uint8_t minute) {
   return text;
 }
 
-const char *repeatText(uint8_t repeat) {
-  if (repeat == clockapps::kWeekdays) return uiText("MON-FRI", "LUN-VEN");
-  if (repeat == clockapps::kEveryDay) return uiText("EVERY DAY", "CHAQUE JOUR");
-  return uiText("ONCE", "UNE FOIS");
+// The time of the alarm that rang last, for the ring screen.
+String ringingAlarmText() {
+  if (alarms.ringing < 0 || alarms.ringing >= alarms.count) return "";
+  const clockapps::AlarmEntry &entry = alarms.entries[alarms.ringing];
+  return alarmTimeText(entry.hour, entry.minute);
 }
 
 String clockLine() {
@@ -2914,7 +2930,7 @@ String clockLine() {
   if (screenTime.countdown.state == clockapps::Countdown::State::Running || screenTime.countdown.state == clockapps::Countdown::State::Paused)
     return String(uiText("SCREEN TIME ", "TEMPS D'ECRAN ")) + clockText(screenTime.countdown.leftSeconds(now)) + uiText(" LEFT", "");
   if (timerCountdown.state == clockapps::Countdown::State::Running) return String(uiText("TIMER ", "MINUTEUR ")) + clockText(timerCountdown.leftSeconds(now));
-  if (alarmClock.snoozed) return uiText("ALARM SNOOZED", "REVEIL REPORTE");
+  if (alarms.snoozed) return uiText("ALARM SNOOZED", "REVEIL REPORTE");
   return "";
 }
 
@@ -2965,32 +2981,92 @@ void drawScreenTime() {
              state == State::Paused ? uiText("ENTER CONTINUE     DEL STOP", "ENTER REPRENDRE    DEL ARRETER") : uiText("ENTER PAUSE        DEL STOP", "ENTER PAUSE        DEL ARRETER"));
 }
 
+// The alarm list: one row an alarm, its time at x2 and two switches, Monday to Friday and the
+// weekend; a last row adds one while there is room. The cursor is a box around one cell.
+constexpr int kAlarmRowsTop = 32;
+constexpr int kAlarmRowHeight = 19;
+constexpr int kAlarmWeekdaysX = 150;
+constexpr int kAlarmWeekendsX = 206;
+
+int alarmRowCount() { return alarms.count + (alarms.count < clockapps::kMaxAlarms ? 1 : 0); }
+bool alarmOnAddRow() { return alarmRow >= alarms.count; }
+
+void drawAlarmSwitch(int centreX, int y, bool on, bool selected) {
+  auto &display = uiCanvas;
+  const int left = centreX - 8;
+  if (on) {
+    display.fillRect(left, y, 16, 16, TFT_GREEN);
+    // A check mark, drawn: Font0 has none that reads at this size.
+    for (int thick = 0; thick < 2; thick++) {
+      display.drawLine(left + 3, y + 8 + thick, left + 6, y + 11 + thick, TFT_BLACK);
+      display.drawLine(left + 6, y + 11 + thick, left + 12, y + 4 + thick, TFT_BLACK);
+    }
+  } else display.drawRect(left, y, 16, 16, TFT_DARKGREY);
+  if (selected) {
+    const uint16_t colour = millis() - alarmBumpAt < kHomeBumpMs ? TFT_RED : TFT_YELLOW;
+    display.drawRect(left - 3, y - 2, 22, 20, colour); display.drawRect(left - 2, y - 1, 20, 18, colour);
+  }
+}
+
 void drawAlarm() {
   auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader(uiText("ALARM", "REVEIL"));
-  centerText(alarmTimeText(alarmClock.hour, alarmClock.minute), 26, 4, alarmClock.enabled ? TFT_GREEN : TFT_DARKGREY, TFT_BLACK);
-  // ON or OFF in colour, then the repeat.
-  const String onOff = alarmClock.enabled ? uiText("ON", "OUI") : uiText("OFF", "NON");
-  const String repeat = repeatText(alarmClock.repeat);
-  const int x = (240 - static_cast<int>(onOff.length() + 2 + repeat.length()) * 12) / 2;
-  display.setTextSize(2); display.setCursor(x, 64);
-  display.setTextColor(alarmClock.enabled ? TFT_GREEN : TFT_RED, TFT_BLACK); display.print(onOff); display.print("  ");
-  display.setTextColor(TFT_WHITE, TFT_BLACK); display.print(repeat); display.setTextSize(1);
+  const bool bumping = millis() - alarmBumpAt < kHomeBumpMs;
+  display.setTextSize(1); display.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  if (alarms.count) {
+    const char *weekdays = uiText("MON-FRI", "LUN-VEN"), *weekends = uiText("SAT-SUN", "SAM-DIM");
+    display.setCursor(kAlarmWeekdaysX - static_cast<int>(strlen(weekdays)) * 3, 22); display.print(weekdays);
+    display.setCursor(kAlarmWeekendsX - static_cast<int>(strlen(weekends)) * 3, 22); display.print(weekends);
+  }
+  for (int row = 0; row < alarmRowCount(); row++) {
+    const int y = kAlarmRowsTop + row * kAlarmRowHeight;
+    const bool selectedRow = row == alarmRow;
+    display.setTextSize(2);
+    if (row >= alarms.count) {
+      const String add = uiText("+ NEW ALARM", "+ NOUVEAU REVEIL");
+      if (selectedRow) {
+        display.fillRect(2, y - 1, static_cast<int>(add.length()) * 12 + 8, 18, bumping ? TFT_RED : TFT_YELLOW);
+        display.setTextColor(TFT_BLACK, bumping ? TFT_RED : TFT_YELLOW);
+      } else display.setTextColor(TFT_DARKGREY, TFT_BLACK);
+      display.setCursor(6, y + 1); display.print(add);
+      continue;
+    }
+    const clockapps::AlarmEntry &entry = alarms.entries[row];
+    const String time = alarmTimeText(entry.hour, entry.minute);
+    const uint16_t timeColour = entry.on() ? TFT_GREEN : TFT_DARKGREY;
+    if (selectedRow && alarmColumn == AlarmColumn::Time) {
+      const uint16_t box = bumping ? TFT_RED : TFT_YELLOW;
+      display.fillRect(2, y - 1, static_cast<int>(time.length()) * 12 + 8, 18, box);
+      display.setTextColor(TFT_BLACK, box);
+    } else display.setTextColor(timeColour, TFT_BLACK);
+    display.setCursor(6, y + 1); display.print(time);
+    drawAlarmSwitch(kAlarmWeekdaysX, y, entry.weekdays, selectedRow && alarmColumn == AlarmColumn::Weekdays);
+    drawAlarmSwitch(kAlarmWeekendsX, y, entry.weekends, selectedRow && alarmColumn == AlarmColumn::Weekends);
+  }
+  display.setTextSize(1);
+  // The line above the keys: what the clock allows, then the snooze, then the next ring.
   struct tm now{};
+  char status[48] = "";
+  uint16_t statusColour = TFT_WHITE;
   if (!wallClock(now)) {
-    centerText(uiText("CLOCK NOT SET", "HEURE INCONNUE"), 84, 2, TFT_RED, TFT_BLACK);
-    centerText(uiText("IT NEEDS WI-FI ONCE AFTER TURNING ON", "IL FAUT LE WI-FI APRES L'ALLUMAGE"), 102, 1, TFT_RED, TFT_BLACK);
-  } else if (alarmClock.snoozed) {
-    const uint32_t left = alarmClock.snoozeUntil - millis();
-    centerText(String(uiText("SNOOZED ", "REPORTE ")) + String((left + 59999) / 60000) + " MIN", 84, 2, TFT_YELLOW, TFT_BLACK);
-  } else if (alarmClock.enabled) {
-    const int32_t minutes = alarmClock.minutesUntil(now.tm_wday, now.tm_hour, now.tm_min);
-    char text[24];
-    if (minutes >= 60) snprintf(text, sizeof(text), "%s%d H %d MIN", uiText("IN ", "DANS "), static_cast<int>(minutes / 60), static_cast<int>(minutes % 60));
-    else snprintf(text, sizeof(text), "%s%d MIN", uiText("IN ", "DANS "), static_cast<int>(minutes));
-    centerText(text, 84, 2, TFT_WHITE, TFT_BLACK);
-  } else centerText(uiText("ALARM IS OFF", "REVEIL ETEINT"), 84, 2, TFT_DARKGREY, TFT_BLACK);
-  drawFooter(uiText("0-9 TIME  ^v 5 MIN  < > REPEAT", "0-9 HEURE ^v 5 MIN  < > REPETER"),
-             alarmClock.enabled ? uiText("ENTER TURN OFF", "ENTER ETEINDRE") : uiText("ENTER TURN ON", "ENTER ALLUMER"));
+    snprintf(status, sizeof(status), "%s", uiText("CLOCK NOT SET: NEEDS WI-FI ONCE", "HEURE INCONNUE: IL FAUT LE WI-FI"));
+    statusColour = TFT_RED;
+  } else if (alarms.snoozed) {
+    const uint32_t left = alarms.snoozeUntil - millis();
+    snprintf(status, sizeof(status), "%s%u MIN", uiText("SNOOZED, RINGS AGAIN IN ", "REPORTE, SONNE DANS "), static_cast<unsigned>((left + 59999) / 60000));
+    statusColour = TFT_YELLOW;
+  } else {
+    int next = -1;
+    const int32_t minutes = alarms.minutesUntil(now.tm_wday, now.tm_hour, now.tm_min, &next);
+    if (minutes < 0) snprintf(status, sizeof(status), "%s", alarms.count ? uiText("NO ALARM IS ON", "AUCUN REVEIL ACTIF") : "");
+    else if (minutes >= 60) snprintf(status, sizeof(status), "%s%d H %d MIN", uiText("NEXT RINGS IN ", "PROCHAIN DANS "), static_cast<int>(minutes / 60), static_cast<int>(minutes % 60));
+    else snprintf(status, sizeof(status), "%s%d MIN", uiText("NEXT RINGS IN ", "PROCHAIN DANS "), static_cast<int>(minutes));
+    statusColour = minutes < 0 ? TFT_DARKGREY : TFT_GREEN;
+  }
+  display.setTextColor(statusColour, TFT_BLACK); display.setCursor(6, 112); display.print(status);
+  display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 123);
+  if (alarmOnAddRow()) display.print(uiText("ENTER OR 0-9: NEW ALARM", "ENTER OU 0-9: NOUVEAU"));
+  else if (alarmColumn == AlarmColumn::Time) display.print(uiText("0-9 TIME  < > DAYS  DEL DELETE", "0-9 HEURE < > JOURS DEL EFFACER"));
+  else display.print(uiText("ENTER ON/OFF  0-9 TIME  DEL DELETE", "ENTER OUI/NON 0-9 HEURE DEL EFFACER"));
 }
 
 void drawStopwatch() {
@@ -3015,7 +3091,7 @@ void drawRinging() {
   const Ringing what = ringingNow();
   if (what == Ringing::Alarm) {
     centerText(uiText("ALARM", "REVEIL"), 8, 3, colour, background);
-    centerText(alarmTimeText(alarmClock.hour, alarmClock.minute), 40, 4, colour, background);
+    centerText(ringingAlarmText(), 40, 4, colour, background);
     centerText(uiText("ENTER = STOP", "ENTER = ARRET"), 86, 2, colour, background);
     centerText(uiText("OTHER KEY: SNOOZE", "AUTRE: DANS 5 MIN"), 108, 2, colour, background);
     return;
@@ -3046,7 +3122,7 @@ void startRinging() {
 
 void dismissRinging(bool stop) {
   const Ringing what = ringingNow();
-  if (what == Ringing::Alarm) { alarmRinging = false; if (!stop) alarmClock.snooze(millis()); }
+  if (what == Ringing::Alarm) { alarmRinging = false; if (!stop) alarms.snooze(millis()); }
   else if (what == Ringing::ScreenTime) screenTime.countdown.reset();
   else if (what == Ringing::Timer) timerCountdown.reset();
   M5Cardputer.Speaker.stop(0);
@@ -3082,14 +3158,11 @@ void serviceClockApps() {
   bool ring = timerCountdown.expire(now);
   const clockapps::Warning warning = screenTime.warning(now);
   if (screenTime.countdown.expire(now)) ring = true;
-  if (alarmClock.snoozeDue(now)) { alarmRinging = true; ring = true; }
+  if (alarms.snoozeDue(now)) { alarmRinging = true; ring = true; }
   if (now - lastAlarmCheckAt >= 1000) {
     lastAlarmCheckAt = now;
     struct tm wall{};
-    if (wallClock(wall) && alarmClock.due(wall.tm_wday, wall.tm_yday, wall.tm_hour, wall.tm_min)) {
-      alarmRinging = true; ring = true;
-      if (!alarmClock.enabled) saveClockSettings();  // A one-time alarm turned itself off.
-    }
+    if (wallClock(wall) && alarms.due(wall.tm_wday, wall.tm_yday, wall.tm_hour, wall.tm_min)) { alarmRinging = true; ring = true; }
   }
   if (ring) startRinging();
   if (warning != clockapps::Warning::None && !ring) {
@@ -3110,21 +3183,75 @@ void serviceClockApps() {
   if (ringingNow() != Ringing::None) { if (since >= 250) renderDirty = true; return; }
   if (screenMode == ScreenMode::Stopwatch && stopwatch.running && since >= 100) renderDirty = true;
   else if ((screenMode == ScreenMode::Timer || screenMode == ScreenMode::ScreenTime) && since >= 250) renderDirty = true;
-  else if ((screenMode == ScreenMode::Alarm || (screenMode == ScreenMode::Home && clockLine().length())) && since >= 1000) renderDirty = true;
+  else if (screenMode == ScreenMode::Alarm && (since >= 1000 || (alarmBumpAt && millis() - alarmBumpAt < kHomeBumpMs + 100 && since >= 50))) renderDirty = true;
+  else if (screenMode == ScreenMode::Home && clockLine().length() && since >= 1000) renderDirty = true;
 }
 
 constexpr uint16_t kTimerPresetMinutes[] = {1, 2, 3, 5, 10, 15, 20, 30, 45, 60};
 constexpr uint16_t kScreenTimeMinutes[] = {15, 30, 45, 60, 90, 120};
 
-void editAlarm(uint8_t hour, uint8_t minute) {
-  alarmClock.hour = hour; alarmClock.minute = minute; alarmClock.enabled = true; alarmClock.snoozed = false;
+void editAlarm(int row, uint8_t hour, uint8_t minute) {
+  clockapps::AlarmEntry &entry = alarms.entries[row];
+  entry.hour = hour; entry.minute = minute;
+  if (alarms.ringing == row) alarms.snoozed = false;
   // The minute it is now can't ring because of typing: 0, 7, 3, 0 passes through 0:07.
   struct tm wall{};
-  if (wallClock(wall)) alarmClock.lastFired = clockapps::Alarm::minuteKey(wall.tm_yday, wall.tm_hour, wall.tm_min);
+  if (wallClock(wall)) entry.lastFired = clockapps::Alarms::minuteKey(wall.tm_yday, wall.tm_hour, wall.tm_min);
   saveClockSettings();
 }
 
-void handleClockKeys(const Keyboard_Class::KeysState &keys, bool goUp, bool goDown, bool goLeft, bool goRight) {
+// A key that can't act here: a falling tone and the cursor turns red for a moment.
+void bumpAlarm() { alarmBumpAt = millis(); if (!alarmBumpAt) alarmBumpAt = 1; playDeniedTone(); }
+
+// The alarm list's keys. False when the key did nothing, so no key tone plays over the bump.
+bool handleAlarmKeys(const Keyboard_Class::KeysState &keys, int digit, bool goUp, bool goDown, bool goLeft, bool goRight) {
+  if (goUp || goDown) {
+    const int target = alarmRow + (goDown ? 1 : -1);
+    if (target < 0 || target >= alarmRowCount()) { bumpAlarm(); return false; }
+    alarmRow = static_cast<uint8_t>(target); alarmTyped = 0;
+    return true;
+  }
+  if (alarmOnAddRow()) {
+    if (!keys.enter && digit < 0) { bumpAlarm(); return false; }
+    if (!alarms.add()) { bumpAlarm(); return false; }
+    alarmRow = alarms.count - 1; alarmColumn = AlarmColumn::Time; alarmTyped = 0;
+    if (digit >= 0) {
+      alarmTyped = clockapps::Alarms::pushDigit(0, digit);
+      editAlarm(alarmRow, alarmTyped / 100, alarmTyped % 100);
+    } else editAlarm(alarmRow, alarms.entries[alarmRow].hour, alarms.entries[alarmRow].minute);
+    return true;
+  }
+  clockapps::AlarmEntry &entry = alarms.entries[alarmRow];
+  if (goLeft || goRight) {
+    const int target = static_cast<int>(alarmColumn) + (goRight ? 1 : -1);
+    if (target < 0 || target > static_cast<int>(AlarmColumn::Weekends)) { bumpAlarm(); return false; }
+    alarmColumn = static_cast<AlarmColumn>(target); alarmTyped = 0;
+    return true;
+  }
+  if (keys.del) {
+    alarms.remove(alarmRow); alarmColumn = AlarmColumn::Time; alarmTyped = 0;
+    saveClockSettings();
+    return true;
+  }
+  if (digit >= 0) {
+    alarmTyped = clockapps::Alarms::pushDigit(alarmTyped, digit);
+    if (clockapps::Alarms::isTime(alarmTyped)) editAlarm(alarmRow, alarmTyped / 100, alarmTyped % 100);
+    return true;
+  }
+  if (keys.enter) {
+    // On the time, Enter steps to the first switch; on a switch, it flips it.
+    if (alarmColumn == AlarmColumn::Time) { alarmColumn = AlarmColumn::Weekdays; return true; }
+    bool &day = alarmColumn == AlarmColumn::Weekdays ? entry.weekdays : entry.weekends;
+    day = !day; alarmTyped = 0;
+    if (alarms.ringing == alarmRow && !entry.on()) alarms.snoozed = false;
+    editAlarm(alarmRow, entry.hour, entry.minute);
+    return true;
+  }
+  bumpAlarm();
+  return false;
+}
+
+bool handleClockKeys(const Keyboard_Class::KeysState &keys, bool goUp, bool goDown, bool goLeft, bool goRight) {
   const uint32_t now = millis();
   using State = clockapps::Countdown::State;
   int digit = -1;
@@ -3139,7 +3266,7 @@ void handleClockKeys(const Keyboard_Class::KeysState &keys, bool goUp, bool goDo
       if (state == State::Idle) timerCountdown.set(0);
       else timerCountdown.reset();
       timerTyped = 0;
-    } else if (state != State::Idle) return;
+    } else if (state != State::Idle) return true;
     else if (digit >= 0) { timerTyped = clockapps::timerPushDigit(timerTyped, digit); timerCountdown.set(clockapps::timerDigitsMs(timerTyped)); }
     else if (goUp || goDown) {
       const uint32_t minute = 60000, most = (99 * 60 + 59) * 1000u;
@@ -3153,7 +3280,7 @@ void handleClockKeys(const Keyboard_Class::KeysState &keys, bool goUp, bool goDo
       else { for (const uint16_t preset : kTimerPresetMinutes) if (preset * 60000u < current) next = preset * 60000u; }
       timerCountdown.set(next); timerTyped = 0;
     }
-    return;
+    return true;
   }
   if (screenMode == ScreenMode::ScreenTime) {
     clockapps::Countdown &countdown = screenTime.countdown;
@@ -3168,29 +3295,13 @@ void handleClockKeys(const Keyboard_Class::KeysState &keys, bool goUp, bool goDo
       index = (index + ((goUp || goRight) ? 1 : count - 1)) % count;
       countdown.set(kScreenTimeMinutes[index] * 60000u);
     }
-    return;
+    return true;
   }
-  if (screenMode == ScreenMode::Alarm) {
-    if (keys.enter) { alarmClock.enabled = !alarmClock.enabled; alarmClock.snoozed = false; alarmTyped = 0; saveClockSettings(); }
-    else if (digit >= 0) {
-      alarmTyped = clockapps::Alarm::pushDigit(alarmTyped, digit);
-      if (clockapps::Alarm::isTime(alarmTyped)) editAlarm(alarmTyped / 100, alarmTyped % 100);
-    } else if (goUp || goDown) {
-      const int total = alarmClock.hour * 60 + alarmClock.minute;
-      const int next = ((goUp ? (total / 5 + 1) * 5 : ((total + 4) / 5 - 1) * 5) + 1440) % 1440;
-      editAlarm(next / 60, next % 60); alarmTyped = 0;
-    } else if (goLeft || goRight) {
-      constexpr uint8_t kRepeats[] = {clockapps::kOnce, clockapps::kWeekdays, clockapps::kEveryDay};
-      int index = 0;
-      for (int choice = 0; choice < 3; choice++) if (kRepeats[choice] == alarmClock.repeat) index = choice;
-      alarmClock.repeat = kRepeats[(index + (goRight ? 1 : 2)) % 3];
-      editAlarm(alarmClock.hour, alarmClock.minute); alarmTyped = 0;
-    }
-    return;
-  }
+  if (screenMode == ScreenMode::Alarm) return handleAlarmKeys(keys, digit, goUp, goDown, goLeft, goRight);
   // Stopwatch.
   if (keys.enter) stopwatch.toggle(now);
   else if (keys.del) stopwatch.reset();
+  return true;
 }
 
 void drawLanguage();
@@ -3643,7 +3754,7 @@ void openHomeApp(int index) {
   else if (app == AppId::Books) openBooks();
   else if (app == AppId::Remote) screenMode = ScreenMode::Remote;
   else if (app == AppId::Timer) { timerTyped = 0; screenMode = ScreenMode::Timer; }
-  else if (app == AppId::Alarm) { alarmTyped = 0; screenMode = ScreenMode::Alarm; }
+  else if (app == AppId::Alarm) { alarmTyped = 0; alarmRow = 0; alarmColumn = AlarmColumn::Time; screenMode = ScreenMode::Alarm; }
   else if (app == AppId::ScreenTime) screenMode = ScreenMode::ScreenTime;
   else if (app == AppId::Stopwatch) screenMode = ScreenMode::Stopwatch;
   else if (app == AppId::Wifi) {
@@ -3854,7 +3965,7 @@ bool handleAppKeys(const Keyboard_Class::KeysState &keys, bool goUp, bool goDown
                          screenMode == ScreenMode::NowPlaying || screenMode == ScreenMode::Remote || screenMode == ScreenMode::System || isClockScreen();
   if (!ownScreen) return false;
   if (escape) { goBackFromApp(); playNextTone(); renderDirty = true; return true; }
-  if (isClockScreen()) { handleClockKeys(keys, goUp, goDown, goLeft, goRight); playNextTone(); renderDirty = true; return true; }
+  if (isClockScreen()) { if (handleClockKeys(keys, goUp, goDown, goLeft, goRight)) playNextTone(); renderDirty = true; return true; }
   if (screenMode == ScreenMode::Home) {
     const int page = homeSelection / kHomeAppsPerPage; const int slot = homeSelection % kHomeAppsPerPage;
     const bool onLeft = slot % 2 == 0;

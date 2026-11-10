@@ -41,22 +41,45 @@ int main() {
   ScreenTime shortOne; shortOne.countdown.set(3 * 60000u); shortOne.start(0);
   assert(shortOne.warning(1) == Warning::None && shortOne.warning(2 * 60000u) == Warning::OneMinute);
 
-  // Alarm: weekdays at 7:00 rings Monday once, not Saturday; once turns itself off.
-  Alarm alarm; alarm.enabled = true; alarm.hour = 7; alarm.minute = 0; alarm.repeat = kWeekdays;
-  assert(!alarm.due(6, 100, 7, 0));               // Saturday
-  assert(alarm.due(1, 102, 7, 0));                // Monday
-  assert(!alarm.due(1, 102, 7, 0));               // same minute again
-  assert(alarm.due(2, 103, 7, 0) && alarm.enabled);
-  assert(alarm.minutesUntil(5, 8, 0) == 2 * 1440 + 23 * 60);  // Friday 8:00 -> Monday 7:00
-  Alarm once; once.enabled = true; once.hour = 6; once.minute = 30;
-  assert(once.minutesUntil(3, 6, 30) == 1440);    // at the minute itself: tomorrow
-  assert(once.due(3, 10, 6, 30) && !once.enabled && once.minutesUntil(3, 6, 31) == -1);
+  // Alarms: a new one is 7:00 on weekdays. It rings Monday once, not Saturday.
+  Alarms alarms; assert(alarms.add() && alarms.count == 1);
+  assert(alarms.entries[0].weekdays && !alarms.entries[0].weekends);
+  assert(!alarms.due(6, 100, 7, 0));               // Saturday
+  assert(!alarms.due(0, 101, 7, 0));               // Sunday
+  assert(alarms.due(1, 102, 7, 0) && alarms.ringing == 0);  // Monday
+  assert(!alarms.due(1, 102, 7, 0));               // same minute again
+  assert(alarms.due(5, 106, 7, 0));                // Friday
+  assert(alarms.minutesUntil(5, 8, 0) == 2 * 1440 + 23 * 60);  // Friday 8:00 -> Monday 7:00
+  // Weekends only: Saturday and Sunday, not Monday. Both: every day. Neither: never.
+  alarms.add(); AlarmEntry &weekend = alarms.entries[1];
+  weekend.hour = 9; weekend.minute = 30; weekend.weekdays = false; weekend.weekends = true;
+  assert(alarms.due(6, 107, 9, 30) && alarms.ringing == 1 && alarms.due(0, 108, 9, 30) && !alarms.due(1, 109, 9, 30));
+  weekend.weekdays = true; for (int day = 0; day < 7; day++) assert(weekend.dayMatches(day));
+  weekend.weekdays = weekend.weekends = false; assert(!weekend.on() && weekend.minutesUntil(3, 6, 0) == -1);
+  // The next ring is the nearest of all: Saturday 8:00 -> Monday 7:00 with only weekdays left on.
+  int next = -1; assert(alarms.minutesUntil(6, 8, 0, &next) == 1440 + 23 * 60 && next == 0);
+  assert(alarms.entries[0].minutesUntil(3, 7, 0) == 1440);  // at the minute itself: tomorrow
+  // Two at the same minute ring once, together.
+  weekend.hour = 7; weekend.minute = 0; weekend.weekdays = true;
+  assert(alarms.due(2, 110, 7, 0) && alarms.ringing == 0 && !alarms.due(2, 110, 7, 0));
   // Snooze: rings again five minutes later, once.
-  once.snooze(1000); assert(!once.snoozeDue(1000 + kSnoozeMs - 1)); assert(once.snoozeDue(1000 + kSnoozeMs)); assert(!once.snoozeDue(1000 + kSnoozeMs + 1));
+  alarms.snooze(1000); assert(!alarms.snoozeDue(1000 + kSnoozeMs - 1)); assert(alarms.snoozeDue(1000 + kSnoozeMs)); assert(!alarms.snoozeDue(1000 + kSnoozeMs + 1));
+  // Deleting the snoozed one cancels the snooze; deleting one before it moves it.
+  alarms.ringing = 1; alarms.snooze(0); alarms.remove(0); assert(alarms.ringing == 0 && alarms.snoozed);
+  alarms.remove(0); assert(alarms.count == 0 && alarms.ringing == -1 && !alarms.snoozed);
+  for (int index = 0; index < kMaxAlarms; index++) assert(alarms.add());
+  assert(!alarms.add() && alarms.count == kMaxAlarms);
+  // Saved and read back; a damaged list reads as none.
+  alarms.entries[2].hour = 23; alarms.entries[2].minute = 59; alarms.entries[2].weekends = true;
+  uint8_t packed[Alarms::kPackedBytes]; const int length = alarms.pack(packed);
+  Alarms back; assert(back.unpack(packed, length) && back.count == kMaxAlarms);
+  assert(back.entries[2].hour == 23 && back.entries[2].minute == 59 && back.entries[2].weekdays && back.entries[2].weekends);
+  assert(!back.unpack(packed, length - 1) && back.count == 0);
+  packed[1] = 24; assert(!back.unpack(packed, length) && back.count == 0);
   // Typed alarm digits: 0,7,3,0 ends at 07:30, passing 0:73, which is not a time.
-  uint16_t typed = 0; for (int d : {0, 7, 3}) typed = Alarm::pushDigit(typed, d); assert(typed == 73 && !Alarm::isTime(typed));
-  typed = Alarm::pushDigit(typed, 0); assert(typed == 730 && Alarm::isTime(typed));
-  assert(!Alarm::isTime(2400) && Alarm::isTime(2359));
+  uint16_t typed = 0; for (int d : {0, 7, 3}) typed = Alarms::pushDigit(typed, d); assert(typed == 73 && !Alarms::isTime(typed));
+  typed = Alarms::pushDigit(typed, 0); assert(typed == 730 && Alarms::isTime(typed));
+  assert(!Alarms::isTime(2400) && Alarms::isTime(2359));
 
   // Stopwatch.
   Stopwatch watch; watch.toggle(100); watch.toggle(1100); assert(watch.elapsedMs(5000) == 1000);
