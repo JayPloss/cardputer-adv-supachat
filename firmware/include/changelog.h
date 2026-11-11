@@ -9,7 +9,7 @@ struct SupaChatChangelogEntry {
 // Canonical on-device release notes. The emulator reads this file directly so
 // its Changelog screen cannot silently drift from the firmware.
 constexpr SupaChatChangelogEntry kSupaChatChangelog[] = {
-  {"v0.59", {"MP3s with cover art play", "VBR songs: right length", "Says why a file won't play"}, 3},
+  {"v0.59", {"Every book on the card shows", "No crash listing at low RAM", "MP3s with cover art play", "VBR songs: right length", "Says why a file won't play"}, 5},
   {"v0.58", {"Up to four alarms", "Weekday and weekend switches", "Fixed: a play could be lost", "French keyboard: CSA layout", "Tab in chat: French keys", "Alarm time typed from 00:00", "Hints name the real exit key"}, 7},
   {"v0.57", {"Unsent texts kept and retried", "Sent/delivered/read marks", "ONLINE or NEARBY shown", "STATUS names the failure", "Survives cert renewals", "Clearer nearby walkie", "Nearby texts confirmed"}, 7},
   {"v0.56", {"Timer and stopwatch", "Alarm clock", "Screen time countdown"}, 3},

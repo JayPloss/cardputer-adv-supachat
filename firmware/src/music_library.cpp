@@ -9,6 +9,8 @@
 #include <mbedtls/md5.h>
 
 #include <algorithm>
+#include <cerrno>
+#include <dirent.h>
 #include <deque>
 #include <new>
 
@@ -164,18 +166,18 @@ void publish(std::vector<Item> &&items) {
 
 void addAlbum(std::vector<Item> &items, JsonObjectConst album) {
   Item item;
-  item.id = String(album["id"] | "");
-  item.title = String(album["name"] | "?");
-  item.detail = String(album["artist"] | "");
+  item.id = album["id"] | "";
+  item.title = album["name"] | "?";
+  item.detail = album["artist"] | "";
   item.seconds = album["duration"] | 0;
   items.push_back(std::move(item));
 }
 
 void addTrack(std::vector<Item> &items, JsonObjectConst track) {
   Item item;
-  item.id = String(track["id"] | "");
-  item.title = String(track["title"] | "?");
-  item.detail = String(track["artist"] | "");
+  item.id = track["id"] | "";
+  item.title = track["title"] | "?";
+  item.detail = track["artist"] | "";
   item.seconds = track["duration"] | 0;
   item.liked = !track["starred"].isNull();
   items.push_back(std::move(item));
@@ -183,40 +185,111 @@ void addTrack(std::vector<Item> &items, JsonObjectConst track) {
 
 const char *cardRoot(Collection collection) { return collection == Collection::Books ? "/books" : "/music"; }
 
-String baseName(const String &path) { return path.substring(path.lastIndexOf('/') + 1); }
+bool isMp3(const char *name) {
+  const size_t length = strlen(name);
+  return name[0] != '.' && length > 4 && (!strcmp(name + length - 4, ".mp3") || !strcmp(name + length - 4, ".MP3"));
+}
 
-void addCardFolders(std::vector<Item> &items, Collection collection) {
-  File root = SD.open(cardRoot(collection));
-  if (!root || !root.isDirectory()) return;
-  const size_t first = items.size();
-  // Counted first: a growing list needs twice its size at each step, which doesn't fit beside the player.
-  size_t folders = 0;
-  for (File entry = root.openNextFile(); entry; entry = root.openNextFile()) {
-    if (entry.isDirectory()) folders++;
-    entry.close();
+// Reading a card folder. The core's openNextFile opens every entry it passes (a stat, then an opendir or a
+// file with a 4 KB buffer), and when one of those allocations is refused (this app's budget, or the floor
+// while Wi-Fi scans away from home) it returns an empty File, which ends the loop as if the folder had
+// ended: a short list, no error. So the folder is read with readdir, which allocates nothing per entry
+// (FAT's long names are on the stack: CONFIG_FATFS_LFN_STACK), each name's String is checked, and a list
+// counts only when two passes in a row agree.
+// Strings are only ever assigned from char pointers here: the core's String::move copies a byte out of a
+// String whose allocation failed, from address 0, and the task crashes (WString.cpp, move()).
+constexpr int kListPasses = 6;
+constexpr uint32_t kListRetryMs = 300;
+constexpr char kCardMount[] = "/sd";  // where SD.begin mounts the card
+
+struct Pass {
+  bool read = true;  // false: the card or the RAM failed part way
+  size_t count = 0;
+  uint32_t hash = 2166136261u;
+};
+
+// Sets `text` to `first` (its first `length` bytes), plus "/" and `second` when given. A refused
+// allocation is tried again a few times: a dip in the heap passes in a moment.
+bool assign(String &text, const char *first, size_t length, const char *second = nullptr) {
+  const size_t want = length + (second ? 1 + strlen(second) : 0);
+  for (int attempt = 0; attempt < 5; attempt++) {
+    text = "";
+    if (text.reserve(want) && text.concat(first, length) && (!second || (text.concat('/') && text.concat(second))) && text.length() == want) return true;
+    vTaskDelay(pdMS_TO_TICKS(20));
   }
-  root.close();
-  root = SD.open(cardRoot(collection));
-  if (!root) return;
-  items.reserve(first + folders);
-  for (File entry = root.openNextFile(); entry; entry = root.openNextFile()) {
-    if (entry.isDirectory()) {
-      Item item;
-      item.path = String(cardRoot(collection)) + "/" + baseName(entry.name());
-      item.title = baseName(entry.name());
-      items.push_back(std::move(item));
+  return false;
+}
+
+// One pass over `path`, keeping folders (or MP3s). With `items`, it also builds the list.
+Pass readFolder(const String &path, bool folders, size_t limit, std::vector<Item> *items) {
+  Pass pass;
+  char where[320];
+  snprintf(where, sizeof where, "%s%s", kCardMount, path.c_str());
+  DIR *dir = opendir(where);
+  if (!dir) { pass.read = !SD.exists(path); return pass; }  // There but not opened: no room for it.
+  for (;;) {
+    errno = 0;
+    const dirent *entry = readdir(dir);
+    if (!entry) { if (errno) pass.read = false; break; }
+    const char *name = entry->d_name;
+    const bool isDirectory = entry->d_type == DT_DIR;
+    if (!isDirectory && entry->d_type != DT_REG) continue;
+    if (folders ? !isDirectory : (isDirectory || !isMp3(name))) continue;
+    if (folders && name[0] == '.') continue;
+    if (pass.count >= limit) break;
+    pass.count++;
+    for (const char *c = name; *c; c++) pass.hash = (pass.hash ^ static_cast<uint8_t>(*c)) * 16777619u;
+    pass.hash = (pass.hash ^ '/') * 16777619u;
+    if (!items) continue;
+    const size_t titleLength = strlen(name) - (folders ? 0 : 4);
+    Item item;
+    item.onCard = !folders;
+    if (!assign(item.title, name, titleLength) || (folders && !assign(item.path, path.c_str(), path.length(), name)) || items->size() >= items->capacity()) {
+      // This pass's list is lost, but it reads on: its count sizes the next one.
+      pass.read = false;
+      items = nullptr;
+      continue;
     }
-    entry.close();
+    items->push_back(std::move(item));
   }
-  root.close();
-  std::sort(items.begin() + first, items.end(), [](const Item &a, const Item &b) { return a.title < b.title; });
+  closedir(dir);
+  return pass;
+}
+
+// The whole list: counted, then built, until two passes agree. False if they never did.
+bool readFolderList(const String &path, bool folders, size_t limit, std::vector<Item> &items) {
+  const size_t first = items.size();
+  Pass last = readFolder(path, folders, limit, nullptr);
+  for (int attempt = 0; attempt < kListPasses; attempt++) {
+    items.resize(first);
+    try {
+      items.reserve(first + last.count + 1);
+    } catch (const std::bad_alloc &) {
+      vTaskDelay(pdMS_TO_TICKS(kListRetryMs));
+      continue;
+    }
+    const Pass pass = readFolder(path, folders, limit, &items);
+    if (pass.read && last.read && pass.count == last.count && pass.hash == last.hash) {
+      std::sort(items.begin() + first, items.end(), [](const Item &a, const Item &b) { return a.title < b.title; });
+      return true;
+    }
+    last = pass;
+    vTaskDelay(pdMS_TO_TICKS(kListRetryMs));
+  }
+  return false;
+}
+
+constexpr const char *kCardNotRead = "CARD NOT READ: LOW RAM";
+
+// False when the card's list couldn't be read whole; nothing is added then, rather than part of it.
+bool addCardFolders(std::vector<Item> &items, Collection collection) {
+  const size_t first = items.size();
+  if (readFolderList(cardRoot(collection), true, SIZE_MAX, items)) return true;
+  items.resize(first);
+  return false;
 }
 
 String placePath(const String &folder) { return folder + "/.place"; }
-
-bool isMp3(const String &name) {
-  return !name.startsWith(".") && (name.endsWith(".mp3") || name.endsWith(".MP3"));
-}
 
 // A place file ends in "ok", so one cut off by a power loss reads as no place, not a wrong one.
 bool readPlace(const String &path, String &trackPath, uint32_t &seconds) {
@@ -230,31 +303,11 @@ bool readPlace(const String &path, String &trackPath, uint32_t &seconds) {
 }
 
 bool runCardTracks(const Job &job) {
-  File root = SD.open(job.text);
-  if (!root || !root.isDirectory()) { failureText = "NOT ON CARD"; return false; }
-  // Counted first: growing to a long list needs twice its size at each step, which doesn't fit.
-  size_t tracks = 0;
-  for (File entry = root.openNextFile(); entry && tracks < kCardTrackLimit; entry = root.openNextFile()) {
-    if (!entry.isDirectory()) tracks++;
-    entry.close();
-  }
-  root.close();
-  root = SD.open(job.text);
-  if (!root) { failureText = "NOT ON CARD"; return false; }
   std::vector<Item> items;
-  items.reserve(tracks);
-  for (File entry = root.openNextFile(); entry && items.size() < kCardTrackLimit; entry = root.openNextFile()) {
-    const String name = baseName(entry.name());
-    if (!entry.isDirectory() && isMp3(name)) {
-      Item item;
-      item.onCard = true;
-      item.title = name.substring(0, name.length() - 4);
-      items.push_back(std::move(item));
-    }
-    entry.close();
+  if (!readFolderList(job.text, false, kCardTrackLimit, items)) {
+    failureText = SD.exists(job.text) ? kCardNotRead : "NOT ON CARD";
+    return false;
   }
-  root.close();
-  std::sort(items.begin(), items.end(), [](const Item &a, const Item &b) { return a.title < b.title; });
   String trackPath;
   uint32_t seconds = 0;
   if (readPlace(placePath(job.text), trackPath, seconds) || readPlace(placePath(job.text) + ".new", trackPath, seconds)) {
@@ -266,25 +319,25 @@ bool runCardTracks(const Job &job) {
 }
 
 void runAdjacent(const Job &job) {
-  File root = SD.open(job.text);
   String best;
   const bool forward = job.number > 0;
-  if (root && root.isDirectory()) {
-    for (File entry = root.openNextFile(); entry; entry = root.openNextFile()) {
-      const String name = baseName(entry.name());
-      if (!entry.isDirectory() && isMp3(name)) {
-        const String title = name.substring(0, name.length() - 4);
-        const bool past = forward ? title > job.extra : title < job.extra;
-        if (past && (best.isEmpty() || (forward ? title < best : title > best))) best = title;
-      }
-      entry.close();
+  char where[320];
+  snprintf(where, sizeof where, "%s%s", kCardMount, job.text.c_str());
+  if (DIR *dir = opendir(where)) {
+    while (const dirent *entry = readdir(dir)) {
+      if (entry->d_type != DT_REG || !isMp3(entry->d_name)) continue;
+      String title = entry->d_name;
+      if (title.length() != strlen(entry->d_name)) continue;
+      title.remove(title.length() - 4);
+      const bool past = forward ? title > job.extra : title < job.extra;
+      if (past && (best.isEmpty() || (forward ? title < best : title > best))) best = title.c_str();
     }
-    root.close();
+    closedir(dir);
   }
   xSemaphoreTake(mutex, portMAX_DELAY);
   adjacentItem = Item();
   adjacentItem.onCard = true;
-  adjacentItem.title = best;
+  adjacentItem.title = best.c_str();
   adjacentFound = best.length() > 0;
   adjacentReady = true;
   xSemaphoreGive(mutex);
@@ -313,14 +366,22 @@ void writeCardPlace(const Job &job) {
 
 bool runAlbums(const Job &job) {
   std::vector<Item> items;
-  if (job.number == 0) addCardFolders(items, job.collection);
+  const bool cardRead = job.number != 0 || addCardFolders(items, job.collection);
   const bool hasCardItems = !items.empty();
-  // The card shows at once. The server's albums join the list if and when they arrive.
-  if (hasCardItems) { std::vector<Item> first = items; publish(std::move(first)); }
-  const char *const nothing = job.collection == Collection::Books ? "NO BOOKS ON CARD, NO SERVER" : "NO MUSIC ON CARD, NO SERVER";
+  const char *const nothing = !cardRead ? kCardNotRead : job.collection == Collection::Books ? "NO BOOKS ON CARD, NO SERVER" : "NO MUSIC ON CARD, NO SERVER";
   if (!configured() || WiFi.status() != WL_CONNECTED || serverKnownDown()) {
     failureText = nothing;
+    if (hasCardItems) publish(std::move(items));
     return hasCardItems;
+  }
+  // The card shows at once. The server's albums join the list if and when they arrive. The copy is
+  // checked: a String that couldn't be copied comes out empty, and a list with a blank book isn't shown.
+  if (hasCardItems) {
+    std::vector<Item> first;
+    bool whole = true;
+    try { first = items; } catch (const std::bad_alloc &) { whole = false; }
+    for (size_t i = 0; whole && i < items.size(); i++) whole = first[i].title.length() == items[i].title.length() && first[i].path.length() == items[i].path.length();
+    if (whole) publish(std::move(first));
   }
   lookUpFolders();
   const int folder = job.collection == Collection::Books ? booksFolderId : musicFolderId;
@@ -403,8 +464,8 @@ void workerTask(void *) {
     switch (job.kind) {
       case JobKind::CardAlbums: {
         std::vector<Item> items;
-        addCardFolders(items, job.collection);
-        publish(std::move(items));
+        if (addCardFolders(items, job.collection)) publish(std::move(items));
+        else { failureText = kCardNotRead; ok = false; }
         break;
       }
       case JobKind::CardTracks: ok = runCardTracks(job); break;

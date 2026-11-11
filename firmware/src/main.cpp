@@ -61,6 +61,17 @@ constexpr bool kBuildFrenchDefault = false;
 bool frenchUi = kBuildFrenchDefault;
 SharedText<8> languageOverride{"auto"};
 const char *uiText(const char *english, const char *french) { return frenchUi ? french : english; }
+// The library's and the player's failure texts are English; a French device shows these.
+const char *failureText(const char *english) {
+  static const char *const kFrench[][2] = {
+      {"CARD NOT READ: LOW RAM", "CARTE NON LUE: MEMOIRE"},
+      {"NOT AN MP3", "PAS UN MP3"},
+      {"MP2, NOT MP3", "MP2, PAS UN MP3"},
+      {"8-12 KHZ MP3: UNSUPPORTED", "MP3 8-12 KHZ: NON LU"},
+  };
+  if (frenchUi) for (const auto &pair : kFrench) if (!strcmp(english, pair[0])) return pair[1];
+  return english;
+}
 constexpr char kFirmwareVersion[] = "v0.59";
 constexpr size_t kMessageLimit = 140;
 constexpr size_t kHistoryLimit = 100;  // What the first sync fetches; older pages go to the card.
@@ -2817,7 +2828,7 @@ void drawLibrary() {
   if (status == library::Status::Loading) {
     display.setTextColor(TFT_YELLOW, TFT_BLACK); display.setCursor(12, 50); display.print(uiText("LOADING...", "CHARGEMENT..."));
   } else if (status == library::Status::Failed) {
-    display.setTextColor(TFT_RED, TFT_BLACK); display.setCursor(12, 50); display.print(library::failure());
+    display.setTextColor(TFT_RED, TFT_BLACK); display.setCursor(12, 50); display.print(failureText(library::failure()));
   } else if (libraryItems.empty()) {
     display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(12, 50); display.print(uiText("NOTHING HERE", "RIEN ICI"));
   }
@@ -2858,7 +2869,7 @@ void drawNowPlaying() {
   display.setTextColor(TFT_WHITE, TFT_BLACK); display.setCursor(6, 74); display.print(clockText(position));
   const String total = clockText(duration); display.setCursor(234 - static_cast<int>(total.length()) * 6, 74); display.print(total);
   display.setCursor(6, 92);
-  if (state == media::State::Failed) { display.setTextColor(TFT_RED, TFT_BLACK); display.print(media::failure()); }
+  if (state == media::State::Failed) { display.setTextColor(TFT_RED, TFT_BLACK); display.print(failureText(media::failure())); }
   else {
     display.setTextColor(TFT_YELLOW, TFT_BLACK);
     display.print(state == media::State::Connecting ? uiText("BUFFERING", "CHARGEMENT") : state == media::State::Paused ? uiText("PAUSED", "EN PAUSE") : state == media::State::Playing ? uiText("PLAYING", "LECTURE") : uiText("STOPPED", "ARRET"));

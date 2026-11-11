@@ -49,6 +49,8 @@ MUSIC and BOOKS stream from Navidrome on the home LAN over the Subsonic API: pla
 
 Card files are found by `firmware/include/mp3_probe.h` (since `v0.59`): past any ID3v2 tag, cover art included, and any junk, onto two frames in a row; a Xing/Info or VBRI header gives a VBR file its real length and seek table. Streams drop a leading ID3v2 tag too. What can't play says why: `8-12 KHZ MP3: UNSUPPORTED` (MPEG 2.5: the pinned libhelix is built without it), `MP2, NOT MP3`, `NOT AN MP3`. `firmware/tools/mp3-fixtures.py` makes one file of each kind and `firmware/tools/mp3-probe-test.cpp` checks the probe against them on the PC; the runtime emulator's `card-formats` scenario plays them through the real firmware.
 
+Card lists (books, card albums, chapters) are read with `readdir`, which allocates nothing per entry, and count only when two passes in a row agree (since `v0.59`). The core's `openNextFile` opened every entry, and one refused allocation (the app's budget, or the floor while Wi-Fi scans away from home) ended its loop as if the folder had ended: a short list offline, and on the next String move from that failed allocation, a crash. A list that can't be read whole says `CARD NOT READ: LOW RAM`. The runtime emulator's `books-flaky` scenario refuses every Nth allocation on the list task and checks the whole list or that message.
+
 BOOKS is the Navidrome library named `Books`. Its place is saved on the server as a Subsonic bookmark every 30 seconds and on pause, and a book reopens on the chapter holding its bookmark.
 
 Server address and login come from `firmware/include/music_secrets.h` (gitignored; see the `.example.h`). Without it, both apps show NOT SET UP and everything else works.

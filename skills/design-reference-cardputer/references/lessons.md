@@ -47,3 +47,8 @@ Each item says where it came from. Add to this list; don't delete from it unless
 
 - **Three dots after a message read as text cut short.** The first "sending" mark was three grey dots at the right of the line; on the runtime emulator's shot, "first..." looked truncated. It is a small drawn clock now. Marks are drawn with lines, not a font: Font0 has no check mark that reads at x1.5 (runtime emulator shot `outbox-waiting.png`, 2026-11-07).
 - **The header's network word is the travel mode, not the last status string.** Raw strings like `SYNC IO -5` and `ESPNOW ONL` told nobody whether a message would reach the server. The header now says ONLINE, NEARBY or OFFLINE, and STATUS page 1 gives the failed step at x2 so it can be read out over the phone (Jay, 2026-11-07: "so the kids or Jay can read it off").
+
+## Lists and failures (v0.59)
+
+- **A list that couldn't be read whole says so; it is never shown short.** The books list read the card with the core's `openNextFile`, which ends a folder at the first entry it can't allocate for. Away from home that showed Julien and Albie some of their books and no error, and the next String move from the failed allocation crashed the device (Jay, 2026-11-11; reproduced by the runtime emulator's `books-flaky`). A short read now shows `CARD NOT READ: LOW RAM` (`CARTE NON LUE: MEMOIRE`).
+- **Failure texts come from the library and the player in English.** A French device showed them in English until `failureText` in `main.cpp` (v0.59). A new failure text gets its French line there.
