@@ -1,0 +1,16 @@
+#!/bin/sh
+# label-card LABEL: unmount the SD card in the built-in reader (mmcblk0p1) and set its FAT
+# volume label. Refuses unless the card carries the matching CARTE-<kid>.txt breadcrumb,
+# so a label never lands on the wrong kid's card. Run as root (pkexec); leaves the card
+# unmounted, ready to pull.
+set -eu
+label=$1 dev=/dev/mmcblk0p1
+case $label in CRD-DREW) kid=ANDREW;; CRD-EMMA) kid=EMMANUELLE;; CRD-NAO) kid=NAOMIE;; *) echo "unknown label $label" >&2; exit 2;; esac
+[ "$(lsblk -no FSTYPE $dev)" = vfat ] || { echo "$dev is not vfat" >&2; exit 1; }
+mnt=$(lsblk -no MOUNTPOINT $dev)
+[ -n "$mnt" ] && [ -f "$mnt/CARTE-$kid.txt" ] || { echo "no CARTE-$kid.txt on the card in $dev" >&2; exit 1; }
+sync
+umount "$dev"
+fatlabel "$dev" "$label"
+udevadm trigger --action=change "$dev"; udevadm settle
+echo "labelled $dev $(lsblk -no LABEL $dev)"
