@@ -76,3 +76,10 @@
 - Test failure paths and time bounds. No authentication or startup operation may leave an indefinite spinner; it must resolve or show an actionable error within a defined timeout.
 - Automate or emulate every stage that does not intrinsically require the physical phone. Use the physical-phone run only as the last acceptance gate, with runtime logging attached when possible.
 - If any stage cannot be exercised before handoff, identify that exact gap before asking for a test. Do not collapse several untested stages into “please try it.”
+
+## Media for the SD cards
+
+- Before loading songs or books onto anyone's card, play one of the actual files through the runtime emulator
+  (`cardputer-emulator`, a card folder holding it, a scenario that opens it and expects PLAYING with audio).
+  `tools/sd-cards/` does the copying. (Origin 2026-11-10: three kids' cards went out with MP3s whose ID3 tags
+  the player read as a broken frame; Andrew's showed NOT AN MP3 on the first song.)
