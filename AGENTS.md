@@ -35,6 +35,19 @@
 - `firmware/include/os.h` is the layer keeping apps within their RAM: budgets, one secure connection
   at a time, containment, the boot phase. `docs/heap-budget.md` has the measurements behind it.
 
+## Investigating a device report
+
+- Start from the device's own evidence, all of it, before any theory or question: what the person
+  saw, the card's files and their timestamps (place files, `supachat-charge.csv` sessions and
+  versions), and the core dump (`tools/read-crash.sh <env>` while it is in download mode). Then make
+  the runtime emulator reproduce what the device did; a pass there that contradicts the device means
+  a stand-in is hiding the failure, which is the next thing to fix.
+- Report only what the evidence shows. A guess is not offered as a cause, and a partial
+  explanation is not called found.
+- (Origin 2026-11-10: Julien's device showed a few books, then none after a reboot. I declared the
+  missing episodes the cause, read code for theories, floated a card-speed guess his device had
+  already disproved, and asked him what the screen showed, before reading the core dump.)
+
 ## Core libraries
 
 - Every library and the platform in `firmware/platformio.ini` is pinned to an exact version: no `^`, `~`, `>=` or bare names. A device build never pulls in new library code on its own.
