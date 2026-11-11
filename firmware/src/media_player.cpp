@@ -8,6 +8,8 @@
 #include <esp_wifi.h>
 #include <libhelix-mp3/mp3dec.h>
 
+#include "mp3_probe.h"
+
 #include <algorithm>
 
 // The MP3 library's own allocator spins forever when RAM runs out, which the watchdog turns
@@ -54,17 +56,16 @@ void fail(const char *reason) { failureText = reason; currentState = State::Fail
 
 bool interrupted() { return stopRequested || hasPending; }
 
-// Reads the first frame header so a constant-bitrate file can be timed and seeked.
-bool openAt(File &file, uint32_t seconds, uint8_t *scratch, HMP3Decoder decoder) {
-  const int got = file.read(scratch, 4096);
-  const int sync = got > 0 ? MP3FindSyncWord(scratch, got) : -1;
-  MP3FrameInfo info;
-  const bool found = sync >= 0 && MP3GetNextFrameInfo(decoder, &info, scratch + sync) == ERR_MP3_NONE && info.bitrate > 0;
-  if (found) {
-    totalSeconds = static_cast<uint64_t>(file.size()) * 8 / info.bitrate;
-    file.seek(sync + static_cast<uint64_t>(seconds) * info.bitrate / 8);
-  }
-  return found;
+// Finds the audio in a card file (past any ID3v2 tag and junk, on two frames in a row), times it from its
+// Xing/VBRI header when it has one (VBR files), and seeks to `seconds`. On failure, says why.
+bool openAt(File &file, uint32_t seconds, uint8_t *scratch, size_t scratchBytes, const char *&reason) {
+  const auto read = [&file](uint32_t pos, uint8_t *buf, size_t n) { return file.seek(pos) ? static_cast<int>(file.read(buf, n)) : -1; };
+  mp3probe::Timeline line;
+  mp3probe::Frame frame;
+  if (!mp3probe::locate(read, file.size(), scratch, scratchBytes, line, frame, reason)) return false;
+  totalSeconds = line.seconds;
+  file.seek(mp3probe::seekByte(line, seconds));
+  return true;
 }
 
 void playSource(const Command &command) {
@@ -100,7 +101,10 @@ void playSource(const Command &command) {
   if (local) {
     file = SD.open(command.path, FILE_READ);
     if (!file) fail("FILE NOT FOUND");
-    else if (!openAt(file, command.startSeconds, input, decoder)) fail("NOT AN MP3");
+    else {
+      const char *reason = "";
+      if (!openAt(file, command.startSeconds, input, kInputBytes, reason)) fail(reason);
+    }
   } else {
     // HTTP/1.0: no chunk markers inside the MP3 data, and the server closes at the end.
     http.useHTTP10(true);
@@ -123,6 +127,8 @@ void playSource(const Command &command) {
     uint32_t lastDataAt = millis();
     bool started = false;
     bool ended = false;
+    bool tagChecked = false;
+    uint32_t tagLeft = 0;
     // Hands the part-filled slot to the speaker. Slots hold several frames, so a
     // flash write or TLS handshake that stalls this task doesn't reach the listener.
     const auto submit = [&]() {
@@ -154,6 +160,16 @@ void playSource(const Command &command) {
           fail("STREAM STALLED");
           break;
         }
+      }
+
+      // A stream can open with an ID3v2 tag (cover art: tens of KB); drop it rather than hunt through it for frames.
+      if (!local && !tagChecked && (filled >= 10 || ended)) { tagChecked = true; tagLeft = mp3probe::id3v2Length(input, filled); }
+      if (tagLeft && filled) {
+        const size_t drop = std::min<size_t>(tagLeft, filled);
+        memmove(input, input + drop, filled - drop);
+        filled -= drop;
+        tagLeft -= drop;
+        continue;
       }
 
       if (!started) {

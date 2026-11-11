@@ -47,6 +47,8 @@ The device boots through the SupaChat splash to a HOME screen of apps, four to a
 
 MUSIC and BOOKS stream from Navidrome on the home LAN over the Subsonic API: plain HTTP, MP3 only, decoded with libhelix on a dedicated task (`firmware/src/media_player.cpp`, `firmware/src/music_library.cpp`). The Cardputer ADV has no PSRAM, so all audio buffers live in internal RAM and are released when playback stops. While media plays, the walkie socket closes and chat polls once a minute. Starting a walkie recording, charging mode or ESP-NOW local mode stops playback first.
 
+Card files are found by `firmware/include/mp3_probe.h` (since `v0.59`): past any ID3v2 tag, cover art included, and any junk, onto two frames in a row; a Xing/Info or VBRI header gives a VBR file its real length and seek table. Streams drop a leading ID3v2 tag too. What can't play says why: `8-12 KHZ MP3: UNSUPPORTED` (MPEG 2.5: the pinned libhelix is built without it), `MP2, NOT MP3`, `NOT AN MP3`. `firmware/tools/mp3-fixtures.py` makes one file of each kind and `firmware/tools/mp3-probe-test.cpp` checks the probe against them on the PC; the runtime emulator's `card-formats` scenario plays them through the real firmware.
+
 BOOKS is the Navidrome library named `Books`. Its place is saved on the server as a Subsonic bookmark every 30 seconds and on pause, and a book reopens on the chapter holding its bookmark.
 
 Server address and login come from `firmware/include/music_secrets.h` (gitignored; see the `.example.h`). Without it, both apps show NOT SET UP and everything else works.

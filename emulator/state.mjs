@@ -3,6 +3,7 @@ export const homeApps = ['SUPACHAT','MUSIC','BOOKS','R/C','TIMER','ALARM','SCREE
 const clockScreens = ['timer','alarm','screen-time','stopwatch'];
 const settingsScreens = ['networks','password','volume','status','language','charging-confirm','changelog'];
 export const changelog = [
+  {version:'v0.59',lines:['MP3s with cover art play','VBR songs: right length','Says why a file won\'t play']},
   {version:'v0.58',lines:['Up to four alarms','Weekday and weekend switches','Fixed: a play could be lost','French keyboard: CSA layout','Tab in chat: French keys','Alarm time typed from 00:00','Hints name the real exit key']},
   {version:'v0.57',lines:['Unsent texts kept and retried','Sent/delivered/read marks','ONLINE or NEARBY shown','STATUS names the failure','Survives cert renewals','Clearer nearby walkie','Nearby texts confirmed']},
   {version:'v0.56',lines:['Timer and stopwatch','Alarm clock','Screen time countdown']},
