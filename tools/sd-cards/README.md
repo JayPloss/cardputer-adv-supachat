@@ -12,8 +12,8 @@ Run on paqman. Data (Spotify pages, matches, file map) lives in `~/.local/share/
    Songs not on YouTube (Jay's own Suno songs) are tagged the same way by hand and added to `playlists.json` / `files.json`.
 4. `rsync -a --chmod=F644 ~/Music/wolfpack/ root@ori-san-host:/srv/music/library/Wolfpack/`, then
    `navidrome-playlists.py scan`, and when `status` says it's done, `navidrome-playlists.py`: each kid's playlist, as that kid.
-5. Card in the reader: `card.py <mount> <Kid>` copies the kid's list to `/music/<Kid>` as `001 Title - Artist.mp3`
-   (the player sorts by name) and appends a dated entry to `CARTE-<KID>.txt`, the card's owner note and log.
+5. Card in the reader: `uv run --with mutagen python -I card.py <mount> <Kid>` copies the kid's list to `/music/<Kid>` as `001 Title - Artist.mp3`
+   (the player sorts by name) with no ID3v2 tag (the player reads a tag as a broken frame: NOT AN MP3), and appends a dated entry to `CARTE-<KID>.txt`, the card's owner note and log.
    Rerunning copies only what's missing.
 6. `pkexec label-card CRD-DREW|CRD-EMMA|CRD-NAO` unmounts the card and sets its volume label; it refuses
    unless the matching `CARTE-<KID>.txt` is on the card. Root, so it opens the polkit dialog.
