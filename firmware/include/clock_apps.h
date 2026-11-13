@@ -42,7 +42,7 @@ struct Countdown {
 };
 
 // Screen time warns at five minutes and one minute left, then rings at zero.
-enum class Warning : uint8_t { None, FiveMinutes, OneMinute };
+enum class Warning : uint8_t { None, FiveMinutes, OneMinute, SchoolNight };
 struct ScreenTime {
   Countdown countdown;
   bool warnedFive = false;
@@ -192,6 +192,17 @@ struct TimeEntry {
 inline bool isBedtime(int hour24) { return hour24 >= 19 || hour24 < 5; }
 constexpr uint32_t kBedtimeSleepMs = 30 * 60000u;
 constexpr uint32_t kSleepFadeMs = 30000u;
+// School nights, Sunday to Thursday: a book playing at 21:20 is warned and stops at 21:30. It can
+// be started again; the stop only breaks the momentum. The children's devices only.
+inline bool isSchoolNight(int weekday) { return weekday >= 0 && weekday <= 4; }
+constexpr int kSchoolNightWarnAt = 21 * 60 + 20;
+constexpr int kSchoolNightStopAt = 21 * 60 + 30;
+// Milliseconds from this moment to the stop, or 0 outside 21:20 to 21:30 of a school night.
+inline uint32_t schoolNightStopInMs(int weekday, int hour24, int minute, int second) {
+  const int now = hour24 * 60 + minute;
+  if (!isSchoolNight(weekday) || now < kSchoolNightWarnAt || now >= kSchoolNightStopAt) return 0;
+  return static_cast<uint32_t>((kSchoolNightStopAt - now) * 60 - second) * 1000u;
+}
 // HOME's apps give way to the big clock after this long without a key.
 constexpr uint32_t kIdleClockMs = 2 * 60000u;
 

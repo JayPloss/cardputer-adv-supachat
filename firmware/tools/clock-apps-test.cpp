@@ -111,5 +111,12 @@ int main() {
   assert(sleep.fadeScale(t0 + 45000) == 127); assert(sleep.fadeScale(t0 + 60000) == 0);
   assert(!sleep.expired(t0 + 59999) && sleep.expired(t0 + 60000));
   sleep.cancel(); assert(!sleep.expired(t0 + 70000) && sleep.fadeScale(t0 + 70000) == 255);
+  // School nights: Sunday to Thursday, 21:20 to 21:30.
+  assert(isSchoolNight(0) && isSchoolNight(4) && !isSchoolNight(5) && !isSchoolNight(6));
+  assert(schoolNightStopInMs(4, 21, 19, 59) == 0);
+  assert(schoolNightStopInMs(4, 21, 20, 0) == 600000);
+  assert(schoolNightStopInMs(0, 21, 29, 30) == 30000);
+  assert(schoolNightStopInMs(4, 21, 30, 0) == 0);
+  assert(schoolNightStopInMs(5, 21, 25, 0) == 0 && schoolNightStopInMs(6, 21, 25, 0) == 0);
   return 0;
 }

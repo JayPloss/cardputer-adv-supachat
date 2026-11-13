@@ -513,6 +513,14 @@ uint32_t bannerUntil = 0;
 uint32_t lastAlarmCheckAt = 0;
 // The listening apps' sleep timer, and the big clock HOME's apps give way to when no key is pressed.
 clockapps::SleepTimer sleepTimer;
+// Parents' devices have no school-night stop.
+#if defined(SUPACHAT_DEVICE_PAPA) || defined(SUPACHAT_DEVICE_MAMA)
+constexpr bool kSchoolNightRules = false;
+#else
+constexpr bool kSchoolNightRules = true;
+#endif
+int16_t schoolNightWarnedDay = -1;
+uint32_t lastSchoolNightCheckAt = 0;
 bool idleClockShown = false;
 // Each alarm's song on the card (its path), or empty for the beeps.
 String alarmSounds[clockapps::kMaxAlarms];
@@ -2380,7 +2388,10 @@ void drawWarningBanner() {
   auto &display = uiCanvas;
   const bool one = bannerWarning == clockapps::Warning::OneMinute;
   const uint16_t background = one ? TFT_RED : TFT_YELLOW;
-  const char *text = one ? uiText("SCREEN: 1 MIN LEFT", "ECRAN: ENCORE 1 MIN") : uiText("SCREEN: 5 MIN LEFT", "ECRAN: ENCORE 5 MIN");
+  // The school-night warning takes turns between its two halves, each at x2.
+  const char *text = bannerWarning == clockapps::Warning::SchoolNight
+      ? (millis() / 2500 % 2 == 0 ? uiText("SCHOOL NIGHT", "SOIR D'ECOLE") : uiText("BOOK STOPS AT 21:30", "LIVRE: ARRET 21:30"))
+      : one ? uiText("SCREEN: 1 MIN LEFT", "ECRAN: ENCORE 1 MIN") : uiText("SCREEN: 5 MIN LEFT", "ECRAN: ENCORE 5 MIN");
   display.fillRect(0, 0, 240, 20, background); display.setTextSize(2);
   display.setTextColor(one ? TFT_WHITE : TFT_BLACK, background);
   display.setCursor((240 - static_cast<int>(strlen(text)) * 12) / 2, 2); display.print(text); display.setTextSize(1);
@@ -3929,6 +3940,27 @@ void serviceSleepTimer() {
   if (scale < 255 && state == media::State::Playing) M5Cardputer.Speaker.setVolume(static_cast<uint8_t>(kVolumeValues[volumeLevel] * scale / 255));
 }
 
+// A book playing between 21:20 and 21:30 on a school night: the sleep timer ends at 21:30, and the
+// first time each night a banner and a chime say so.
+void serviceSchoolNight() {
+  const uint32_t now = millis();
+  if (!kSchoolNightRules || now - lastSchoolNightCheckAt < 1000) return;
+  lastSchoolNightCheckAt = now;
+  if (queueCollection != library::Collection::Books || media::state() != media::State::Playing || alarmSong != AlarmSong::None) return;
+  struct tm wall{};
+  if (!wallClock(wall)) return;
+  const uint32_t stopIn = clockapps::schoolNightStopInMs(wall.tm_wday, wall.tm_hour, wall.tm_min, wall.tm_sec);
+  if (!stopIn) return;
+  if (!sleepTimer.on || sleepTimer.leftMs(now) > stopIn) { sleepTimer.set(now, stopIn); renderDirty = true; }
+  if (schoolNightWarnedDay == wall.tm_yday) return;
+  schoolNightWarnedDay = static_cast<int16_t>(wall.tm_yday);
+  bannerWarning = clockapps::Warning::SchoolNight; bannerUntil = now + 10000; renderDirty = true;
+  M5Cardputer.Speaker.setVolume(kVolumeValues[std::max<uint8_t>(volumeLevel, 2)]); M5Cardputer.Speaker.setChannelVolume(0, 255);
+  M5Cardputer.Speaker.tone(1319, 150, 0, true); M5Cardputer.Speaker.tone(1760, 250, 0, false);
+  lastToneAt = now;
+  Serial.println("SCHOOL NIGHT book stops at 21:30");
+}
+
 void startQueuedTrack(uint32_t offsetSeconds) {
   const auto *item = nowPlayingItem();
   if (!item) return;
@@ -4234,6 +4266,7 @@ void serviceApps() {
 
 void serviceMedia() {
   serviceApps();
+  serviceSchoolNight();
   serviceSleepTimer();
   if (radioOffWanted) {
     // Choosing the next chapter or book needs the same room as the last one had: chat stays out until he leaves.
