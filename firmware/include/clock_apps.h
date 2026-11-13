@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <initializer_list>
 
 // Timer, screen time, alarm and stopwatch: the arithmetic only, with no hardware, so a host test
 // can run it (firmware/tools/clock-apps-test.cpp). Times are millis() values; every comparison is
@@ -185,6 +186,38 @@ struct TimeEntry {
     return true;
   }
   void clear() { digits = 0; count = 0; }
+};
+
+// Bedtime, from 19:00 to 05:00: a book started then gets a sleep timer, and the idle clock is dimmer.
+inline bool isBedtime(int hour24) { return hour24 >= 19 || hour24 < 5; }
+constexpr uint32_t kBedtimeSleepMs = 30 * 60000u;
+constexpr uint32_t kSleepFadeMs = 30000u;
+// HOME's apps give way to the big clock after this long without a key.
+constexpr uint32_t kIdleClockMs = 2 * 60000u;
+
+// The listening apps' sleep timer: playback fades over its last 30 seconds, then pauses.
+struct SleepTimer {
+  bool on = false;
+  uint32_t endsAt = 0;
+
+  void set(uint32_t now, uint32_t ms) { on = ms > 0; endsAt = now + ms; }
+  void cancel() { on = false; }
+  uint32_t leftMs(uint32_t now) const { return !on || reached(now, endsAt) ? 0 : endsAt - now; }
+  uint32_t leftSeconds(uint32_t now) const { return (leftMs(now) + 999) / 1000; }
+  bool expired(uint32_t now) const { return on && reached(now, endsAt); }
+  // The T key steps through 15, 30, 45 and 60 minutes, then off. From a running timer it goes to the
+  // first step more than a minute above what is left, so a press always adds time until 60.
+  uint32_t nextStepMs(uint32_t now) const {
+    const uint32_t left = leftMs(now);
+    for (uint32_t minutes : {15u, 30u, 45u, 60u}) if (!on || minutes * 60000u > left + 60000u) return minutes * 60000u;
+    return 0;
+  }
+  // 255 until the fade, then down to 0 at the end.
+  uint8_t fadeScale(uint32_t now) const {
+    const uint32_t left = leftMs(now);
+    if (!on || left >= kSleepFadeMs) return 255;
+    return static_cast<uint8_t>(255u * left / kSleepFadeMs);
+  }
 };
 
 // The stopwatch.

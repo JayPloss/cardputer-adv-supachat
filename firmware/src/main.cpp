@@ -72,7 +72,7 @@ const char *failureText(const char *english) {
   if (frenchUi) for (const auto &pair : kFrench) if (!strcmp(english, pair[0])) return pair[1];
   return english;
 }
-constexpr char kFirmwareVersion[] = "v0.59";
+constexpr char kFirmwareVersion[] = "v0.60";
 constexpr size_t kMessageLimit = 140;
 constexpr size_t kHistoryLimit = 100;  // What the first sync fetches; older pages go to the card.
 constexpr size_t kRamMessageLimit = 40;
@@ -496,7 +496,7 @@ clockapps::ScreenTime screenTime;
 clockapps::Alarms alarms;
 clockapps::TimeEntry alarmTyped;  // The time being typed on the selected row.
 // The alarm list's cursor: a row (an alarm, or the last row that adds one) and a column on it.
-enum class AlarmColumn : uint8_t { Time, Weekdays, Weekends };
+enum class AlarmColumn : uint8_t { Time, Weekdays, Weekends, Sound };
 uint8_t alarmRow = 0;
 AlarmColumn alarmColumn = AlarmColumn::Time;
 uint32_t alarmBumpAt = 0;
@@ -511,6 +511,21 @@ uint8_t ringStep = 0;
 clockapps::Warning bannerWarning = clockapps::Warning::None;
 uint32_t bannerUntil = 0;
 uint32_t lastAlarmCheckAt = 0;
+// The listening apps' sleep timer, and the big clock HOME's apps give way to when no key is pressed.
+clockapps::SleepTimer sleepTimer;
+bool idleClockShown = false;
+// Each alarm's song on the card (its path), or empty for the beeps.
+String alarmSounds[clockapps::kMaxAlarms];
+// A ringing alarm's song: started once the player's task and the radio's RAM are free, looped
+// until the alarm stops; the beeps play until it does and take over if it can't.
+enum class AlarmSong : uint8_t { None, Starting, Playing, Failed };
+AlarmSong alarmSong = AlarmSong::None;
+uint32_t alarmSongAt = 0;
+bool alarmSongHeard = false;  // Once it has played, no beeps in the gap as it starts again.
+constexpr uint32_t kAlarmSongStartMs = 12000;
+// The alarm row whose song is being chosen from the card's music, or -1.
+int8_t alarmSoundPick = -1;
+uint8_t brightnessBeforeIdle = 255;
 uint32_t lastToneAt = 0;
 uint32_t lastRenderAt = 0;
 uint32_t bootNonce = 0;
@@ -930,6 +945,7 @@ void loadConfiguration() {
     entry.weekdays = on && (repeat & 0x3E);
     entry.weekends = on && (repeat & 0x41);
   }
+  for (int index = 0; index < alarms.count; index++) alarmSounds[index] = preferences.getString(("alarm_snd" + String(index)).c_str(), "");
   timerCountdown.set(std::min<uint32_t>(preferences.getUInt("timer_ms", 5 * 60000u), (99 * 60 + 59) * 1000u));
   screenTime.countdown.set(std::min<uint32_t>(preferences.getUInt("screen_ms", 30 * 60000u), 120 * 60000u));
   preferences.end();
@@ -939,6 +955,11 @@ void saveClockSettings() {
   preferences.begin("supachat", false);
   uint8_t packedAlarms[clockapps::Alarms::kPackedBytes];
   preferences.putBytes("alarms", packedAlarms, alarms.pack(packedAlarms));
+  for (int index = 0; index < clockapps::kMaxAlarms; index++) {
+    const String key = "alarm_snd" + String(index);
+    if (index < alarms.count && alarmSounds[index].length()) preferences.putString(key.c_str(), alarmSounds[index]);
+    else if (preferences.isKey(key.c_str())) preferences.remove(key.c_str());
+  }
   preferences.putUInt("timer_ms", timerCountdown.durationMs); preferences.putUInt("screen_ms", screenTime.countdown.durationMs);
   preferences.end();
 }
@@ -2874,11 +2895,15 @@ void drawNowPlaying() {
     display.setTextColor(TFT_YELLOW, TFT_BLACK);
     display.print(state == media::State::Connecting ? uiText("BUFFERING", "CHARGEMENT") : state == media::State::Paused ? uiText("PAUSED", "EN PAUSE") : state == media::State::Playing ? uiText("PLAYING", "LECTURE") : uiText("STOPPED", "ARRET"));
   }
+  if (sleepTimer.on) {
+    display.setCursor(72, 92); display.setTextColor(TFT_CYAN, TFT_BLACK);
+    display.print(uiText("SLEEP ", "DODO ")); display.print(clockText(sleepTimer.leftSeconds(millis())));
+  }
   display.setCursor(178, 92); display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.print(kVolumeNames[volumeLevel]);
   if (item->liked) { display.setCursor(160, 92); display.setTextColor(TFT_YELLOW, TFT_BLACK); display.print("*"); }
   display.setTextColor(TFT_DARKGREY, TFT_BLACK);
   display.setCursor(6, 110); display.print(queueCollection == library::Collection::Books ? uiText("LEFT/RIGHT 30s    UP/DOWN VOL", "GAUCHE/DROITE 30s HAUT/BAS VOL") : uiText("LEFT/RIGHT SONG   UP/DOWN VOL", "GAUCHE/DROITE     HAUT/BAS VOL"));
-  display.setCursor(6, 123); display.print(queueCollection == library::Collection::Books ? uiText("ENTER PAUSE       S STOP", "ENTER PAUSE       S ARRET") : uiText("ENTER PAUSE  L LIKE  S STOP", "ENTER PAUSE  L AIME  S ARRET"));
+  display.setCursor(6, 123); display.print(queueCollection == library::Collection::Books ? uiText("ENTER PAUSE  T SLEEP  S STOP", "ENTER PAUSE  T DODO  S ARRET") : uiText("ENTER PAUSE L LIKE T SLEEP S STOP", "ENTER PAUSE L AIME T DODO S ARRET"));
 }
 
 void drawSystem() {
@@ -2910,6 +2935,10 @@ void drawRemote() {
   display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(12, 56); display.print(uiText("NOTHING CONNECTED YET", "RIEN DE CONNECTE"));
   display.setCursor(6, 123); display.print(uiText("LEFT BACK", "GAUCHE RETOUR"));
 }
+
+void openAlarmSoundPicker();
+void beginAlarmSong();
+void stopAlarmSong();
 
 // The clock apps. Their screens are navigation screens: the arrows need no Fn, and digits type times.
 enum class Ringing : uint8_t { None, Alarm, ScreenTime, Timer };
@@ -3001,8 +3030,16 @@ void drawScreenTime() {
 // weekend; a last row adds one while there is room. The cursor is a box around one cell.
 constexpr int kAlarmRowsTop = 32;
 constexpr int kAlarmRowHeight = 19;
-constexpr int kAlarmWeekdaysX = 150;
-constexpr int kAlarmWeekendsX = 206;
+constexpr int kAlarmWeekdaysX = 126;
+constexpr int kAlarmWeekendsX = 174;
+constexpr int kAlarmSoundX = 218;
+
+// A song's name from its path on the card: the file name without .mp3.
+String alarmSongTitle(const String &path) {
+  String title = path.substring(path.lastIndexOf('/') + 1);
+  if (title.endsWith(".mp3")) title.remove(title.length() - 4);
+  return title;
+}
 
 int alarmRowCount() { return alarms.count + (alarms.count < clockapps::kMaxAlarms ? 1 : 0); }
 bool alarmOnAddRow() { return alarmRow >= alarms.count; }
@@ -3024,14 +3061,30 @@ void drawAlarmSwitch(int centreX, int y, bool on, bool selected) {
   }
 }
 
+// The sound cell: a drawn note, on green when the alarm plays a song, outlined for the beeps.
+void drawAlarmSound(int centreX, int y, bool song, bool selected) {
+  auto &display = uiCanvas;
+  const int left = centreX - 8;
+  const uint16_t ink = song ? TFT_BLACK : TFT_DARKGREY;
+  if (song) display.fillRect(left, y, 16, 16, TFT_GREEN); else display.drawRect(left, y, 16, 16, TFT_DARKGREY);
+  display.fillCircle(left + 6, y + 11, 2, ink);
+  display.drawLine(left + 8, y + 11, left + 8, y + 3, ink);
+  display.drawLine(left + 8, y + 3, left + 12, y + 5, ink);
+  if (selected) {
+    const uint16_t colour = millis() - alarmBumpAt < kHomeBumpMs ? TFT_RED : TFT_YELLOW;
+    display.drawRect(left - 3, y - 2, 22, 20, colour); display.drawRect(left - 2, y - 1, 20, 18, colour);
+  }
+}
+
 void drawAlarm() {
   auto &display = uiCanvas; display.fillScreen(TFT_BLACK); drawHeader(uiText("ALARM", "REVEIL"));
   const bool bumping = millis() - alarmBumpAt < kHomeBumpMs;
   display.setTextSize(1); display.setTextColor(TFT_DARKGREY, TFT_BLACK);
   if (alarms.count) {
-    const char *weekdays = uiText("MON-FRI", "LUN-VEN"), *weekends = uiText("SAT-SUN", "SAM-DIM");
+    const char *weekdays = uiText("MON-FRI", "LUN-VEN"), *weekends = uiText("SAT-SUN", "SAM-DIM"), *sound = uiText("SOUND", "SON");
     display.setCursor(kAlarmWeekdaysX - static_cast<int>(strlen(weekdays)) * 3, 22); display.print(weekdays);
     display.setCursor(kAlarmWeekendsX - static_cast<int>(strlen(weekends)) * 3, 22); display.print(weekends);
+    display.setCursor(kAlarmSoundX - static_cast<int>(strlen(sound)) * 3, 22); display.print(sound);
   }
   for (int row = 0; row < alarmRowCount(); row++) {
     const int y = kAlarmRowsTop + row * kAlarmRowHeight;
@@ -3061,6 +3114,7 @@ void drawAlarm() {
     display.setCursor(6, y + 1); display.print(time);
     drawAlarmSwitch(kAlarmWeekdaysX, y, entry.weekdays, selectedRow && alarmColumn == AlarmColumn::Weekdays);
     drawAlarmSwitch(kAlarmWeekendsX, y, entry.weekends, selectedRow && alarmColumn == AlarmColumn::Weekends);
+    drawAlarmSound(kAlarmSoundX, y, alarmSounds[row].length() > 0, selectedRow && alarmColumn == AlarmColumn::Sound);
   }
   display.setTextSize(1);
   // The line above the keys: what the clock allows, then the snooze, then the next ring.
@@ -3076,6 +3130,9 @@ void drawAlarm() {
       snprintf(status, sizeof(status), "%s", uiText("NOT A TIME: DEL UNDOES A DIGIT", "PAS UNE HEURE: DEL EFFACE"));
       statusColour = TFT_RED;
     } else snprintf(status, sizeof(status), "%s", uiText("KEEP TYPING: 0730 IS 7:30 AM", "CONTINUE: 0730 DONNE 07:30"));
+  } else if (alarmColumn == AlarmColumn::Sound && !alarmOnAddRow()) {
+    // The song's name can hold accents: drawn below, through printFont0Text.
+    statusColour = alarmSounds[alarmRow].length() ? TFT_GREEN : TFT_WHITE;
   } else if (!wallClock(now)) {
     snprintf(status, sizeof(status), "%s", uiText("CLOCK NOT SET: NEEDS WI-FI ONCE", "HEURE INCONNUE: IL FAUT LE WI-FI"));
     statusColour = TFT_RED;
@@ -3091,11 +3148,17 @@ void drawAlarm() {
     else snprintf(status, sizeof(status), "%s%d MIN", uiText("NEXT RINGS IN ", "PROCHAIN DANS "), static_cast<int>(minutes));
     statusColour = minutes < 0 ? TFT_DARKGREY : TFT_GREEN;
   }
-  display.setTextColor(statusColour, TFT_BLACK); display.setCursor(6, 112); display.print(status);
+  display.setTextColor(statusColour, TFT_BLACK); display.setCursor(6, 112);
+  if (alarmColumn == AlarmColumn::Sound && !alarmOnAddRow() && !alarmTyped.active()) {
+    const String &path = alarmSounds[alarmRow];
+    display.print(uiText("SOUND: ", "SON: "));
+    if (path.length()) printFont0Text(utf8Head(alarmSongTitle(path), frenchUi ? 33 : 31)); else display.print(uiText("BEEPS", "BIPS"));
+  } else display.print(status);
   display.setTextColor(TFT_DARKGREY, TFT_BLACK); display.setCursor(6, 123);
   if (alarmOnAddRow()) display.print(uiText("ENTER OR 0-9: NEW ALARM", "ENTER OU 0-9: NOUVEAU"));
   else if (alarmTyped.active()) display.print(uiText("0-9 DIGIT  DEL UNDO  ENTER OK", "0-9 CHIFFRE  DEL ANNULE  ENTER OK"));
   else if (alarmColumn == AlarmColumn::Time) display.print(uiText("0-9 TIME  < > DAYS  DEL DELETE", "0-9 HEURE < > JOURS DEL EFFACER"));
+  else if (alarmColumn == AlarmColumn::Sound) display.print(uiText("ENTER CHOOSE SONG  DEL DELETE", "ENTER CHOISIR    DEL EFFACER"));
   else display.print(uiText("ENTER ON/OFF  0-9 TIME  DEL DELETE", "ENTER OUI/NON 0-9 HEURE DEL EFFACER"));
 }
 
@@ -3109,6 +3172,73 @@ void drawStopwatch() {
   centerText(text, 40, 4, stopwatch.running ? TFT_GREEN : TFT_WHITE, TFT_BLACK);
   drawFooter(stopwatch.running ? uiText("KEEPS GOING IN OTHER APPS", "CONTINUE DANS LES AUTRES APPS") : "",
              stopwatch.running ? uiText("ENTER STOP         DEL RESET", "ENTER ARRET        DEL ZERO") : uiText("ENTER START        DEL RESET", "ENTER DEPART       DEL ZERO"));
+}
+
+// The big clock: 24-hour time across the screen, the date, and when the next alarm rings.
+void drawIdleClock() {
+  auto &display = uiCanvas; display.fillScreen(TFT_BLACK);
+  struct tm now{};
+  if (!wallClock(now)) return;
+  const bool night = clockapps::isBedtime(now.tm_hour);
+  char text[40];
+  snprintf(text, sizeof(text), "%02d:%02d", now.tm_hour, now.tm_min);
+  centerText(text, 6, 7, night ? TFT_ORANGE : TFT_WHITE, TFT_BLACK);
+  static const char *const kDays[2][7] = {{"SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"},
+                                          {"DIMANCHE", "LUNDI", "MARDI", "MERCREDI", "JEUDI", "VENDREDI", "SAMEDI"}};
+  static const char *const kMonths[2][12] = {{"JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"},
+                                             {"JANV", "FEVR", "MARS", "AVR", "MAI", "JUIN", "JUIL", "AOUT", "SEPT", "OCT", "NOV", "DEC"}};
+  const int language = frenchUi ? 1 : 0;
+  snprintf(text, sizeof(text), "%s %d %s", kDays[language][now.tm_wday], now.tm_mday, kMonths[language][now.tm_mon]);
+  centerText(text, 70, 2, TFT_DARKGREY, TFT_BLACK);
+  int next = -1;
+  const int32_t minutes = alarms.minutesUntil(now.tm_wday, now.tm_hour, now.tm_min, &next);
+  if (alarms.snoozed) {
+    centerText(uiText("ALARM SNOOZED", "REVEIL REPORTE"), 94, 2, TFT_YELLOW, TFT_BLACK);
+  } else if (minutes >= 0 && next >= 0) {
+    const clockapps::AlarmEntry &entry = alarms.entries[next];
+    snprintf(text, sizeof(text), "%s %02u:%02u", uiText("ALARM", "REVEIL"), entry.hour, entry.minute);
+    centerText(text, 94, 2, night ? TFT_DARKGREEN : TFT_GREEN, TFT_BLACK);
+    // Within a day, how long; further off, which day.
+    if (minutes >= 1440) snprintf(text, sizeof(text), "%s", kDays[language][(now.tm_wday + (now.tm_hour * 60 + now.tm_min + minutes) / 1440) % 7]);
+    else if (minutes >= 60) snprintf(text, sizeof(text), "%s%d H %02d MIN", uiText("IN ", "DANS "), static_cast<int>(minutes / 60), static_cast<int>(minutes % 60));
+    else snprintf(text, sizeof(text), "%s%d MIN", uiText("IN ", "DANS "), static_cast<int>(minutes));
+    centerText(text, 112, 1, TFT_DARKGREY, TFT_BLACK);
+  } else {
+    centerText(uiText("NO ALARM ON", "AUCUN REVEIL ACTIF"), 100, 1, TFT_DARKGREY, TFT_BLACK);
+  }
+  if (sleepTimer.on) {
+    snprintf(text, sizeof(text), "%s%s", uiText("SLEEP ", "DODO "), clockText(sleepTimer.leftSeconds(millis())).c_str());
+    centerText(text, 123, 1, TFT_CYAN, TFT_BLACK);
+  }
+}
+
+// It takes over from any screen but the walkie, the hunt and charging, once the clock is set.
+bool idleClockAllowed() {
+  if (!clockFromNtp || ringingNow() != Ringing::None || voiceRecording || spacePttHeld) return false;
+  return screenMode != ScreenMode::Walkie && screenMode != ScreenMode::VoiceMessages && screenMode != ScreenMode::FoxFinding &&
+         screenMode != ScreenMode::Charging && screenMode != ScreenMode::ChargingConfirm;
+}
+
+void setIdleClock(bool shown) {
+  if (idleClockShown == shown) return;
+  idleClockShown = shown; renderDirty = true;
+  if (shown) brightnessBeforeIdle = M5Cardputer.Display.getBrightness();
+  else M5Cardputer.Display.setBrightness(brightnessBeforeIdle);
+  Serial.printf("IDLE clock %s\n", shown ? "shown" : "hidden");
+}
+
+void serviceIdleClock() {
+  const uint32_t now = millis();
+  if (!idleClockShown) {
+    if (now - lastUserInputAt >= clockapps::kIdleClockMs && idleClockAllowed()) setIdleClock(true);
+    return;
+  }
+  if (!idleClockAllowed()) { setIdleClock(false); return; }
+  // At bedtime it dims to the charging screen's level.
+  struct tm wall{};
+  const uint8_t brightness = wallClock(wall) && clockapps::isBedtime(wall.tm_hour) ? kChargeBrightness : brightnessBeforeIdle;
+  if (M5Cardputer.Display.getBrightness() != brightness) M5Cardputer.Display.setBrightness(brightness);
+  if (now - lastRenderAt >= 1000) renderDirty = true;
 }
 
 // The alert: the screen flashes, and the tone repeats until a key or the rear button stops it.
@@ -3142,17 +3272,20 @@ void startRinging() {
   const uint32_t now = millis();
   // Charging mode has the speaker off and the screen dim; an alert brings the device back.
   if (chargingModeActive) exitChargingMode();
-  if (media::active()) stopMediaNow();
+  if (media::active() && alarmSong == AlarmSong::None) stopMediaNow();
   if (audioPlaying) stopVoicePlayback();
+  sleepTimer.cancel();
   messageNotificationPending = false; messageNotificationActive = false;
   ringStartedAt = now; ringKeysFrom = now + 1000; nextRingToneAt = now; ringStep = 0;
+  if (ringingNow() == Ringing::Alarm && alarmSong == AlarmSong::None && alarms.ringing >= 0 && alarms.ringing < alarms.count &&
+      alarmSounds[alarms.ringing].length() && sdReady) beginAlarmSong();
   renderDirty = true;
   Serial.printf("CLOCK ringing %d\n", static_cast<int>(ringingNow()));
 }
 
 void dismissRinging(bool stop) {
   const Ringing what = ringingNow();
-  if (what == Ringing::Alarm) { alarmRinging = false; if (!stop) alarms.snooze(millis()); }
+  if (what == Ringing::Alarm) { alarmRinging = false; if (!stop) alarms.snooze(millis()); stopAlarmSong(); }
   else if (what == Ringing::ScreenTime) screenTime.countdown.reset();
   else if (what == Ringing::Timer) timerCountdown.reset();
   M5Cardputer.Speaker.stop(0);
@@ -3165,6 +3298,12 @@ void dismissRinging(bool stop) {
 void serviceRingTone(uint32_t now) {
   const Ringing what = ringingNow();
   if (what == Ringing::None || !clockapps::reached(now, nextRingToneAt)) return;
+  const uint8_t ramp = std::min<uint8_t>(4, std::max<uint8_t>(volumeLevel, 2) + (now - ringStartedAt) / 10000);
+  if (what == Ringing::Alarm && alarmSong == AlarmSong::Playing && (alarmSongHeard || media::state() == media::State::Playing)) {
+    // The song rings instead of the beeps, getting louder the same way.
+    M5Cardputer.Speaker.setVolume(kVolumeValues[ramp]);
+    nextRingToneAt = now + 250; return;
+  }
   const RingNote *notes = what == Ringing::Alarm ? kAlarmRing : what == Ringing::Timer ? kTimerRing : kScreenRing;
   const uint8_t count = what == Ringing::Alarm ? 4 : 3;
   const RingNote note = notes[ringStep % count];
@@ -3172,8 +3311,7 @@ void serviceRingTone(uint32_t now) {
   nextRingToneAt = now + note.ms + note.gapMs;
   messageNotificationPending = false; messageNotificationActive = false;
   if (voiceRecording) return;  // The microphone has the codec; the screen still flashes.
-  const uint8_t level = std::min<uint8_t>(4, std::max<uint8_t>(volumeLevel, 2) + (now - ringStartedAt) / 10000);
-  M5Cardputer.Speaker.setVolume(kVolumeValues[level]); M5Cardputer.Speaker.setChannelVolume(0, 255);
+  M5Cardputer.Speaker.setVolume(kVolumeValues[ramp]); M5Cardputer.Speaker.setChannelVolume(0, 255);
   M5Cardputer.Speaker.tone(note.frequency, note.ms, 0, true);
   lastToneAt = now;
 }
@@ -3255,7 +3393,7 @@ bool handleAlarmKeys(const Keyboard_Class::KeysState &keys, int digit, bool goUp
   if (alarmOnAddRow()) {
     if (!keys.enter && digit < 0) { bumpAlarm(); return false; }
     if (!alarms.add()) { bumpAlarm(); return false; }
-    alarmRow = alarms.count - 1; alarmColumn = AlarmColumn::Time; alarmTyped.clear();
+    alarmRow = alarms.count - 1; alarmColumn = AlarmColumn::Time; alarmTyped.clear(); alarmSounds[alarmRow] = "";
     editAlarm(alarmRow, alarms.entries[alarmRow].hour, alarms.entries[alarmRow].minute);
     if (digit >= 0) alarmTyped.push(digit);
     return true;
@@ -3263,7 +3401,7 @@ bool handleAlarmKeys(const Keyboard_Class::KeysState &keys, int digit, bool goUp
   clockapps::AlarmEntry &entry = alarms.entries[alarmRow];
   if (goLeft || goRight) {
     const int target = static_cast<int>(alarmColumn) + (goRight ? 1 : -1);
-    if (target < 0 || target > static_cast<int>(AlarmColumn::Weekends)) { bumpAlarm(); return false; }
+    if (target < 0 || target > static_cast<int>(AlarmColumn::Sound)) { bumpAlarm(); return false; }
     if (!commitAlarmTyping()) return false;
     alarmColumn = static_cast<AlarmColumn>(target);
     return true;
@@ -3272,6 +3410,8 @@ bool handleAlarmKeys(const Keyboard_Class::KeysState &keys, int digit, bool goUp
     // While typing, Del takes back one digit; otherwise it deletes the alarm.
     if (alarmTyped.undo()) return true;
     alarms.remove(alarmRow); alarmColumn = AlarmColumn::Time;
+    for (int index = alarmRow; index + 1 < clockapps::kMaxAlarms; index++) alarmSounds[index] = alarmSounds[index + 1];
+    alarmSounds[clockapps::kMaxAlarms - 1] = "";
     saveClockSettings();
     return true;
   }
@@ -3291,6 +3431,7 @@ bool handleAlarmKeys(const Keyboard_Class::KeysState &keys, int digit, bool goUp
       if (alarmTyped.active()) return commitAlarmTyping();
       alarmColumn = AlarmColumn::Weekdays; return true;
     }
+    if (alarmColumn == AlarmColumn::Sound) { openAlarmSoundPicker(); return true; }
     bool &day = alarmColumn == AlarmColumn::Weekdays ? entry.weekdays : entry.weekends;
     day = !day;
     if (alarms.ringing == alarmRow && !entry.on()) alarms.snoozed = false;
@@ -3359,6 +3500,7 @@ void drawChangelog();
 void drawKeyHelp();
 void render() {
   if (ringingNow() != Ringing::None) drawRinging();
+  else if (idleClockShown) drawIdleClock();
   else if (screenMode == ScreenMode::Timer) drawTimer(); else if (screenMode == ScreenMode::Alarm) drawAlarm();
   else if (screenMode == ScreenMode::ScreenTime) drawScreenTime(); else if (screenMode == ScreenMode::Stopwatch) drawStopwatch();
   else if (screenMode == ScreenMode::Chat) drawChat(); else if (screenMode == ScreenMode::Menu) drawMenu(); else if (screenMode == ScreenMode::Rooms) drawRooms();
@@ -3732,7 +3874,8 @@ String trackPath(const library::Item &item) { return queueFolder + "/" + item.ti
 
 void savePlace() {
   const auto *item = nowPlayingItem();
-  if (!item || queueCollection != library::Collection::Books) return;
+  // While an alarm's song plays, the player's position is the song's, not the book's.
+  if (!item || queueCollection != library::Collection::Books || alarmSong != AlarmSong::None) return;
   if (item->onCard) library::saveCardPlace(queueFolder, trackPath(*item), media::positionSeconds());
   else library::saveBookmark(item->id, media::positionSeconds() * 1000);
 }
@@ -3760,6 +3903,32 @@ void shrinkChatForPlayback() {
   xSemaphoreGive(stateMutex);
 }
 
+// A book started or resumed at bedtime gets a sleep timer, unless one is already running.
+void armBedtimeSleep() {
+  struct tm wall{};
+  if (sleepTimer.on || queueCollection != library::Collection::Books || !wallClock(wall) || !clockapps::isBedtime(wall.tm_hour)) return;
+  sleepTimer.set(millis(), clockapps::kBedtimeSleepMs);
+  Serial.println("SLEEP bedtime timer 30 min");
+}
+
+// Fades playback over the timer's last 30 seconds, then pauses it with its place saved.
+void serviceSleepTimer() {
+  if (!sleepTimer.on) return;
+  const uint32_t now = millis();
+  const auto state = media::state();
+  // Nothing playing or about to: the timer has nothing left to stop.
+  if (!media::active() && !mediaStarting && !adjacentWanted) { sleepTimer.cancel(); M5Cardputer.Speaker.setVolume(kVolumeValues[volumeLevel]); renderDirty = true; return; }
+  if (sleepTimer.expired(now)) {
+    if (state == media::State::Playing) { media::togglePause(); savePlace(); }
+    sleepTimer.cancel();
+    M5Cardputer.Speaker.setVolume(kVolumeValues[volumeLevel]);
+    Serial.println("SLEEP timer paused playback");
+    renderDirty = true; return;
+  }
+  const uint8_t scale = sleepTimer.fadeScale(now);
+  if (scale < 255 && state == media::State::Playing) M5Cardputer.Speaker.setVolume(static_cast<uint8_t>(kVolumeValues[volumeLevel] * scale / 255));
+}
+
 void startQueuedTrack(uint32_t offsetSeconds) {
   const auto *item = nowPlayingItem();
   if (!item) return;
@@ -3781,11 +3950,93 @@ void startQueuedTrack(uint32_t offsetSeconds) {
   else media::play(library::streamUrl(item->id, queueCollection, offsetSeconds), offsetSeconds);
   mediaStarting = false;
   lastBookmarkAt = millis();
+  armBedtimeSleep();
 }
 
 // A media app asks for its tasks; they start once any secure connection in flight has
 // finished, and until then its first request waits in the queue with LOADING on the screen.
 void startMediaTasks() { mediaTasksWanted = true; os::holdSecure(true); }
+
+// The alarm's song is chosen from the card's music only: it has to play with no network.
+void openAlarmSoundPicker() {
+  alarmSoundPick = static_cast<int8_t>(alarmRow);
+  libraryCollection = library::Collection::Music; libraryOffset = 0;
+  os::setMediaOwner(os::Owner::Music);
+  startMediaTasks();
+  library::forget();
+  libraryView = LibraryView::CardAlbums; libraryTitle = uiText("ALARM SONG", "SON DU REVEIL");
+  libraryItems.clear(); librarySelection = 0;
+  screenMode = ScreenMode::Library; renderDirty = true;
+  library::requestCardAlbums(library::Collection::Music);
+}
+
+// Back to the alarm list, with the song (or "" for the beeps) set when one was chosen.
+void closeAlarmSoundPicker(bool chosen, const String &path) {
+  if (chosen && alarmSoundPick >= 0 && alarmSoundPick < alarms.count) {
+    alarmSounds[alarmSoundPick] = path; saveClockSettings();
+    Serial.printf("ALARM %d sound %s\n", alarmSoundPick, path.length() ? path.c_str() : "beeps");
+  }
+  if (alarmSoundPick >= 0) alarmRow = static_cast<uint8_t>(alarmSoundPick);
+  alarmSoundPick = -1; alarmColumn = AlarmColumn::Sound;
+  library::forget(); std::vector<library::Item>().swap(libraryItems);
+  screenMode = ScreenMode::Alarm; renderDirty = true;
+}
+
+os::Owner ownerBeforeAlarmSong = os::Owner::Music;
+
+// Asks for the player's task and the radio's RAM; serviceAlarmSong starts the song once they are free.
+void beginAlarmSong() {
+  ownerBeforeAlarmSong = os::mediaOwner();
+  os::setMediaOwner(os::Owner::Music); playingOwner = os::Owner::Music;
+  alarmSong = AlarmSong::Starting; alarmSongAt = millis(); alarmSongHeard = false;
+  mediaStarting = true; radioOffWanted = true; lastCardMediaAt = millis();
+  startMediaTasks();
+  Serial.printf("ALARM song starting %s\n", alarmSounds[alarms.ringing].c_str());
+}
+
+void waitForPlayerIdle() {
+  for (const uint32_t started = millis(); media::state() != media::State::Idle && media::state() != media::State::Failed && millis() - started < 1500;) delay(5);
+}
+
+void stopAlarmSong() {
+  if (alarmSong == AlarmSong::None) return;
+  if (media::active()) { media::stop(); waitForPlayerIdle(); }
+  alarmSong = AlarmSong::None; mediaStarting = false;
+  os::setMediaOwner(ownerBeforeAlarmSong);
+  M5Cardputer.Speaker.setVolume(kVolumeValues[volumeLevel]);
+  renderDirty = true;
+}
+
+void failAlarmSong(const char *why) {
+  if (media::active()) { media::stop(); waitForPlayerIdle(); }
+  alarmSong = AlarmSong::Failed; mediaStarting = false;
+  Serial.printf("ALARM song failed, beeps instead: %s\n", why && *why ? why : "?");
+}
+
+void serviceAlarmSong() {
+  if (alarmSong == AlarmSong::None || alarmSong == AlarmSong::Failed) return;
+  if (ringingNow() != Ringing::Alarm || alarms.ringing < 0 || alarms.ringing >= alarms.count) { stopAlarmSong(); return; }
+  const uint32_t now = millis();
+  const String &path = alarmSounds[alarms.ringing];
+  if (alarmSong == AlarmSong::Starting) {
+    if (mediaTasksWanted || !radioIsOff) {
+      if (now - alarmSongAt > kAlarmSongStartMs) failAlarmSong(mediaTasksWanted ? "player not started" : "radio still on");
+      return;
+    }
+    if (!SD.exists(path)) { failAlarmSong("song not on the card"); return; }
+    M5Cardputer.Mic.end(); M5Cardputer.Speaker.begin();
+    shrinkChatForPlayback();
+    media::playFile(path, 0);
+    alarmSong = AlarmSong::Playing; alarmSongAt = now;
+    Serial.println("ALARM song playing");
+    return;
+  }
+  const auto state = media::state();
+  if (state == media::State::Playing) { alarmSongAt = now; alarmSongHeard = true; return; }
+  if (state == media::State::Ended) { media::stop(); waitForPlayerIdle(); media::playFile(path, 0); alarmSongAt = now; return; }  // Again until stopped.
+  if (state == media::State::Failed) failAlarmSong(media::failure());
+  else if (now - alarmSongAt > kAlarmSongStartMs) failAlarmSong("song never started");
+}
 
 void openLibraryList(LibraryView view, const String &title) {
   libraryView = view; libraryTitle = title; libraryItems.clear(); librarySelection = 0;
@@ -3868,6 +4119,7 @@ bool goBackFromApp() {
     return true;
   }
   if (screenMode != ScreenMode::Library) return false;
+  if (alarmSoundPick >= 0 && libraryView == LibraryView::CardAlbums) { closeAlarmSoundPicker(false, ""); return true; }
   if (libraryView == LibraryView::Tracks && tracksFromCardList) {
     openLibraryList(LibraryView::CardAlbums, uiText("ON THE CARD", "SUR LA CARTE")); library::requestCardAlbums(libraryCollection);
   } else if (libraryView == LibraryView::Tracks) {
@@ -3888,6 +4140,12 @@ void openLibrarySelection() {
     renderDirty = true; return;
   }
   if (librarySelection >= static_cast<int>(libraryItems.size())) return;
+  if (alarmSoundPick >= 0 && libraryView == LibraryView::CardAlbums && librarySelection == 0) { closeAlarmSoundPicker(true, ""); return; }
+  if (alarmSoundPick >= 0 && libraryView == LibraryView::Tracks) {
+    const library::Item &song = libraryItems[librarySelection];
+    if (song.onCard) closeAlarmSoundPicker(true, libraryFolder + "/" + song.title + ".mp3");
+    return;
+  }
   if (libraryView == LibraryView::Albums || libraryView == LibraryView::CardAlbums) {
     const auto album = libraryItems[librarySelection];
     tracksFromCardList = libraryView == LibraryView::CardAlbums;
@@ -3976,14 +4234,21 @@ void serviceApps() {
 
 void serviceMedia() {
   serviceApps();
+  serviceSleepTimer();
   if (radioOffWanted) {
     // Choosing the next chapter or book needs the same room as the last one had: chat stays out until he leaves.
     const bool inListeningApp = screenMode == ScreenMode::Library || screenMode == ScreenMode::LibrarySearch || screenMode == ScreenMode::NowPlaying;
     if (media::active() || mediaStarting || adjacentWanted || inListeningApp) lastCardMediaAt = millis();
     else if (millis() - lastCardMediaAt > kRadioBackAfterMs) radioOffWanted = false;
   }
+  if (alarmSong != AlarmSong::None) { serviceAlarmSong(); if (alarmSong == AlarmSong::Starting || alarmSong == AlarmSong::Playing) return; }
   const bool listHadItems = !libraryItems.empty();
   if (library::takeItems(libraryItems)) {
+    // Choosing an alarm's song: the beeps come first.
+    if (alarmSoundPick >= 0 && libraryView == LibraryView::CardAlbums) {
+      library::Item beeps; beeps.title = uiText("BEEPS (NO SONG)", "BIPS (SANS CHANSON)");
+      libraryItems.insert(libraryItems.begin(), beeps);
+    }
     // A list growing (the server's albums joining the card's) keeps the selection in place.
     if (!listHadItems) librarySelection = 0;
     else if (librarySelection >= static_cast<int>(libraryItems.size())) librarySelection = 0;
@@ -4089,8 +4354,10 @@ bool handleAppKeys(const Keyboard_Class::KeysState &keys, bool goUp, bool goDown
   }
   // Now playing. Music keeps going after leaving this screen; S stops it.
   if (keys.enter) {
+    const bool resuming = media::state() == media::State::Paused;
     media::togglePause();
     savePlace();
+    if (resuming) armBedtimeSleep();
   } else if (goUp && volumeLevel < 4) { volumeLevel++; saveVolume(); }
   else if (goDown && volumeLevel > 0) { volumeLevel--; saveVolume(); }
   else if (goLeft || goRight) {
@@ -4102,6 +4369,11 @@ bool handleAppKeys(const Keyboard_Class::KeysState &keys, bool goUp, bool goDown
   } else {
     for (const auto character : keys.word) {
       if (character == 's' || character == 'S') { stopMediaNow(); goBackFromApp(); }
+      else if ((character == 't' || character == 'T') && media::active()) {
+        // 15, 30, 45, 60 minutes, then off.
+        sleepTimer.set(millis(), sleepTimer.nextStepMs(millis()));
+        M5Cardputer.Speaker.setVolume(kVolumeValues[volumeLevel]);
+      }
       else if ((character == 'l' || character == 'L') && queueIndex >= 0 && queueCollection == library::Collection::Music) {
         auto &item = playQueue[queueIndex];
         if (!item.onCard) { item.liked = !item.liked; library::setLiked(item.id, item.liked); }
@@ -4122,6 +4394,8 @@ void handleKeyboard() {
   const auto keys = M5Cardputer.Keyboard.keysState();
   // A ringing alert takes every key, and none for its first second, so typing that was under way can't stop it.
   if (ringingNow() != Ringing::None) { if (clockapps::reached(millis(), ringKeysFrom)) dismissRinging(keys.enter); return; }
+  // The first key only brings back the screen under the big clock.
+  if (idleClockShown) { setIdleClock(false); return; }
   if (screenMode == ScreenMode::Charging && chargingDimmed) {
     chargingDimmed = false;
     M5Cardputer.Display.setBrightness(kChargeBrightness);
@@ -4364,7 +4638,8 @@ static void loopBody() {
     if (!chargingDimmed && renderDirty && millis() - lastRenderAt >= 1000) render();
     delay(20); return;
   }
-  serviceClockRender(); captureVoice(); serviceAudioPlayback(); serviceMessageNotification(); serviceMedia();
+  serviceClockRender(); captureVoice(); serviceAudioPlayback(); serviceMessageNotification(); serviceMedia(); serviceIdleClock();
+  if (idleClockShown && M5Cardputer.BtnA.wasClicked()) { setIdleClock(false); delay(2); return; }
   if (screenMode == ScreenMode::VoiceMessages || screenMode == ScreenMode::Walkie) {
     const bool spacePressed = M5Cardputer.Keyboard.isPressed() && M5Cardputer.Keyboard.keysState().space;
     if (spacePressed) {

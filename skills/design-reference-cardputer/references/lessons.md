@@ -52,3 +52,9 @@ Each item says where it came from. Add to this list; don't delete from it unless
 
 - **A list that couldn't be read whole says so; it is never shown short.** The books list read the card with the core's `openNextFile`, which ends a folder at the first entry it can't allocate for. Away from home that showed Julien and Albie some of their books and no error, and the next String move from the failed allocation crashed the device (Jay, 2026-11-11; reproduced by the runtime emulator's `books-flaky`). A short read now shows `CARD NOT READ: LOW RAM` (`CARTE NON LUE: MEMOIRE`).
 - **Failure texts come from the library and the player in English.** A French device showed them in English until `failureText` in `main.cpp` (v0.59). A new failure text gets its French line there.
+
+## Idle and bedtime (v0.60)
+
+- **A footer that names a mode collides with the mode's own label in text checks.** The players' footer says T SLEEP, so a scenario checking that the timer is gone must look for "SLEEP" with a time, not the word (runtime emulator `book-sleep`, 2026-11-13).
+- **The big clock swallows the first key.** Anything that takes over the screen after idle gives the key that ends it to nobody, as the boot and charging quarantines do: a 1 pressed to wake must not open chat.
+- **The alarm row holds four columns at most.** Time (x2, 104 px), MON-FRI, SAT-SUN and SOUND as 16 px cells centred at 126, 174 and 218, their x1 labels 6 px or more apart. A fifth needs a second line or a page, not narrower cells.

@@ -96,5 +96,20 @@ int main() {
   watch.toggle(6000); assert(watch.elapsedMs(6500) == 1500); watch.reset(); assert(watch.elapsedMs(9000) == 0);
 
   puts("clock apps: all checks pass");
+
+  // Bedtime is 19:00 to 05:00.
+  assert(isBedtime(19) && isBedtime(23) && isBedtime(0) && isBedtime(4) && !isBedtime(5) && !isBedtime(18));
+  // Sleep timer: T steps 15, 30, 45, 60, off; from a running timer, to the next step above what's left.
+  SleepTimer sleep; assert(sleep.nextStepMs(0) == 15 * 60000u && sleep.leftMs(0) == 0 && !sleep.expired(0));
+  sleep.set(t0, sleep.nextStepMs(t0)); assert(sleep.leftSeconds(t0) == 15 * 60);
+  assert(sleep.nextStepMs(t0 + 1000) == 30 * 60000u);
+  sleep.set(t0, 30 * 60000u); assert(sleep.nextStepMs(t0 + 20 * 60000u) == 15 * 60000u);
+  sleep.set(t0, 60 * 60000u); assert(sleep.nextStepMs(t0) == 0);
+  sleep.set(t0, 0); assert(!sleep.on);
+  // It fades over the last 30 seconds, across the millis() wrap, then expires.
+  sleep.set(t0, 60000); assert(sleep.fadeScale(t0 + 29000) == 255);
+  assert(sleep.fadeScale(t0 + 45000) == 127); assert(sleep.fadeScale(t0 + 60000) == 0);
+  assert(!sleep.expired(t0 + 59999) && sleep.expired(t0 + 60000));
+  sleep.cancel(); assert(!sleep.expired(t0 + 70000) && sleep.fadeScale(t0 + 70000) == 255);
   return 0;
 }
